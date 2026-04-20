@@ -1,0 +1,678 @@
+============================================= ERRORS ==============================================
+____________________________ ERROR collecting tests/acp/test_entry.py _____________________________
+ImportError while importing test module '/home/bc-dev/Documents/github/current/hermes-agent/tests/acp/test_entry.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/acp/test_entry.py:3: in <module>
+    import acp
+E   ModuleNotFoundError: No module named 'acp'
+____________________________ ERROR collecting tests/acp/test_events.py ____________________________
+ImportError while importing test module '/home/bc-dev/Documents/github/current/hermes-agent/tests/acp/test_events.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/acp/test_events.py:9: in <module>
+    import acp
+E   ModuleNotFoundError: No module named 'acp'
+___________________________ ERROR collecting tests/acp/test_mcp_e2e.py ____________________________
+ImportError while importing test module '/home/bc-dev/Documents/github/current/hermes-agent/tests/acp/test_mcp_e2e.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/acp/test_mcp_e2e.py:17: in <module>
+    import acp
+E   ModuleNotFoundError: No module named 'acp'
+_________________________ ERROR collecting tests/acp/test_permissions.py __________________________
+ImportError while importing test module '/home/bc-dev/Documents/github/current/hermes-agent/tests/acp/test_permissions.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/acp/test_permissions.py:9: in <module>
+    from acp.schema import (
+E   ModuleNotFoundError: No module named 'acp'
+____________________________ ERROR collecting tests/acp/test_server.py ____________________________
+ImportError while importing test module '/home/bc-dev/Documents/github/current/hermes-agent/tests/acp/test_server.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/acp/test_server.py:10: in <module>
+    import acp
+E   ModuleNotFoundError: No module named 'acp'
+____________________________ ERROR collecting tests/acp/test_tools.py _____________________________
+ImportError while importing test module '/home/bc-dev/Documents/github/current/hermes-agent/tests/acp/test_tools.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/acp/test_tools.py:5: in <module>
+    from acp_adapter.tools import (
+acp_adapter/tools.py:8: in <module>
+    import acp
+E   ModuleNotFoundError: No module named 'acp'
+============================================ FAILURES =============================================
+_________________ TestCLIQuickCommands.test_exec_command_no_output_shows_fallback _________________
+[gw6] linux -- Python 3.13.3 /home/bc-dev/Documents/github/current/hermes-agent/.venv/bin/python3
+
+self = <tests.cli.test_quick_commands.TestCLIQuickCommands object at 0x767ee02002b0>
+
+    def test_exec_command_no_output_shows_fallback(self):
+        cli = self._make_cli({"empty": {"type": "exec", "command": "true"}})
+        cli.process_command("/empty")
+>       cli.console.print.assert_called_once()
+
+tests/cli/test_quick_commands.py:46: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <MagicMock name='mock.print' id='130287254552064'>
+
+    def assert_called_once(self):
+        """assert that the mock was called only once.
+        """
+        if not self.call_count == 1:
+            msg = ("Expected '%s' to have been called once. Called %s times.%s"
+                   % (self._mock_name or 'mock',
+                      self.call_count,
+                      self._calls_repr()))
+>           raise AssertionError(msg)
+E           AssertionError: Expected 'print' to have been called once. Called 0 times.
+
+/usr/lib/python3.13/unittest/mock.py:958: AssertionError
+-------------------------------------- Captured stdout call ---------------------------------------
+Command returned no output
+_________________ TestNormalizeVisionProvider.test_main_resolves_to_named_custom __________________
+[gw1] linux -- Python 3.13.3 /home/bc-dev/Documents/github/current/hermes-agent/.venv/bin/python3
+
+self = <tests.agent.test_auxiliary_named_custom_providers.TestNormalizeVisionProvider object at 0x73d875a334d0>
+tmp_path = PosixPath('/tmp/pytest-of-bc-dev/pytest-1/popen-gw1/test_main_resolves_to_named_cu0')
+
+    def test_main_resolves_to_named_custom(self, tmp_path):
+        _write_config(tmp_path, {
+            "model": {"default": "my-model", "provider": "custom:beans"},
+            "custom_providers": [{"name": "beans", "base_url": "http://localhost/v1"}],
+        })
+        from agent.auxiliary_client import _normalize_vision_provider
+>       assert _normalize_vision_provider("main") == "custom:beans"
+E       AssertionError: assert 'beans' == 'custom:beans'
+E         
+E         - custom:beans
+E         + beans
+
+tests/agent/test_auxiliary_named_custom_providers.py:35: AssertionError
+______________________ TestCLIQuickCommands.test_alias_no_target_shows_error ______________________
+[gw6] linux -- Python 3.13.3 /home/bc-dev/Documents/github/current/hermes-agent/.venv/bin/python3
+
+self = <tests.cli.test_quick_commands.TestCLIQuickCommands object at 0x767ee0098380>
+
+    def test_alias_no_target_shows_error(self):
+        cli = self._make_cli({"broken": {"type": "alias", "target": ""}})
+        cli.process_command("/broken")
+>       cli.console.print.assert_called_once()
+
+tests/cli/test_quick_commands.py:68: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <MagicMock name='mock.print' id='130287242249280'>
+
+    def assert_called_once(self):
+        """assert that the mock was called only once.
+        """
+        if not self.call_count == 1:
+            msg = ("Expected '%s' to have been called once. Called %s times.%s"
+                   % (self._mock_name or 'mock',
+                      self.call_count,
+                      self._calls_repr()))
+>           raise AssertionError(msg)
+E           AssertionError: Expected 'print' to have been called once. Called 0 times.
+
+/usr/lib/python3.13/unittest/mock.py:958: AssertionError
+-------------------------------------- Captured stdout call ---------------------------------------
+Quick command '/broken' has no target defined
+_____________________ TestCLIQuickCommands.test_unsupported_type_shows_error ______________________
+[gw6] linux -- Python 3.13.3 /home/bc-dev/Documents/github/current/hermes-agent/.venv/bin/python3
+
+self = <tests.cli.test_quick_commands.TestCLIQuickCommands object at 0x767ee0098490>
+
+    def test_unsupported_type_shows_error(self):
+        cli = self._make_cli({"bad": {"type": "prompt", "command": "echo hi"}})
+        cli.process_command("/bad")
+>       cli.console.print.assert_called_once()
+
+tests/cli/test_quick_commands.py:75: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <MagicMock name='mock.print' id='130287242251632'>
+
+    def assert_called_once(self):
+        """assert that the mock was called only once.
+        """
+        if not self.call_count == 1:
+            msg = ("Expected '%s' to have been called once. Called %s times.%s"
+                   % (self._mock_name or 'mock',
+                      self.call_count,
+                      self._calls_repr()))
+>           raise AssertionError(msg)
+E           AssertionError: Expected 'print' to have been called once. Called 0 times.
+
+/usr/lib/python3.13/unittest/mock.py:958: AssertionError
+-------------------------------------- Captured stdout call ---------------------------------------
+Quick command '/bad' has unsupported type (supported: 'exec', 'alias')
+___________________ TestCLIQuickCommands.test_missing_command_field_shows_error ___________________
+[gw6] linux -- Python 3.13.3 /home/bc-dev/Documents/github/current/hermes-agent/.venv/bin/python3
+
+self = <tests.cli.test_quick_commands.TestCLIQuickCommands object at 0x767ee0301750>
+
+    def test_missing_command_field_shows_error(self):
+        cli = self._make_cli({"oops": {"type": "exec"}})
+        cli.process_command("/oops")
+>       cli.console.print.assert_called_once()
+
+tests/cli/test_quick_commands.py:82: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <MagicMock name='mock.print' id='130287242248608'>
+
+    def assert_called_once(self):
+        """assert that the mock was called only once.
+        """
+        if not self.call_count == 1:
+            msg = ("Expected '%s' to have been called once. Called %s times.%s"
+                   % (self._mock_name or 'mock',
+                      self.call_count,
+                      self._calls_repr()))
+>           raise AssertionError(msg)
+E           AssertionError: Expected 'print' to have been called once. Called 0 times.
+
+/usr/lib/python3.13/unittest/mock.py:958: AssertionError
+-------------------------------------- Captured stdout call ---------------------------------------
+Quick command '/oops' has no command defined
+__________________________ TestCLIQuickCommands.test_timeout_shows_error __________________________
+[gw6] linux -- Python 3.13.3 /home/bc-dev/Documents/github/current/hermes-agent/.venv/bin/python3
+
+self = <tests.cli.test_quick_commands.TestCLIQuickCommands object at 0x767ee013ef30>
+
+    def test_timeout_shows_error(self):
+        cli = self._make_cli({"slow": {"type": "exec", "command": "sleep 100"}})
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("sleep", 30)):
+            cli.process_command("/slow")
+>       cli.console.print.assert_called_once()
+
+tests/cli/test_quick_commands.py:107: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <MagicMock name='mock.print' id='130287242254320'>
+
+    def assert_called_once(self):
+        """assert that the mock was called only once.
+        """
+        if not self.call_count == 1:
+            msg = ("Expected '%s' to have been called once. Called %s times.%s"
+                   % (self._mock_name or 'mock',
+                      self.call_count,
+                      self._calls_repr()))
+>           raise AssertionError(msg)
+E           AssertionError: Expected 'print' to have been called once. Called 0 times.
+
+/usr/lib/python3.13/unittest/mock.py:958: AssertionError
+-------------------------------------- Captured stdout call ---------------------------------------
+Quick command timed out (30s)
+__________________ TestHuggingFaceModels.test_model_metadata_has_context_lengths __________________
+[gw2] linux -- Python 3.13.3 /home/bc-dev/Documents/github/current/hermes-agent/.venv/bin/python3
+
+self = <tests.hermes_cli.test_api_key_providers.TestHuggingFaceModels object at 0x7e0ba2447820>
+
+    def test_model_metadata_has_context_lengths(self):
+        """Every HF model should have a context length entry."""
+        from hermes_cli.models import _PROVIDER_MODELS
+        from agent.model_metadata import DEFAULT_CONTEXT_LENGTHS
+        hf_models = _PROVIDER_MODELS["huggingface"]
+        for model in hf_models:
+>           assert model in DEFAULT_CONTEXT_LENGTHS, (
+                f"HF model {model!r} missing from DEFAULT_CONTEXT_LENGTHS"
+            )
+E           AssertionError: HF model 'MiniMaxAI/MiniMax-M2.5' missing from DEFAULT_CONTEXT_LENGTHS
+E           assert 'MiniMaxAI/MiniMax-M2.5' in {'Qwen/Qwen3.5-35B-A3B': 131072, 'Qwen/Qwen3.5-397B-A17B': 131072, 'XiaomiMiMo/MiMo-V2-Flash': 32768, 'claude': 200000, ...}
+
+tests/hermes_cli/test_api_key_providers.py:946: AssertionError
+_______________________ test_execute_uses_hermes_dotenv_for_allowlisted_env _______________________
+[gw11] linux -- Python 3.13.3 /home/bc-dev/Documents/github/current/hermes-agent/.venv/bin/python3
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x764c351dbe70>
+
+    def test_execute_uses_hermes_dotenv_for_allowlisted_env(monkeypatch):
+        env = _make_execute_only_env(["GITHUB_TOKEN"])
+        popen_calls = []
+    
+        def _fake_popen(cmd, **kwargs):
+            popen_calls.append(cmd)
+            return _FakePopen(cmd, **kwargs)
+    
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.setattr(docker_env, "_load_hermes_env_vars", lambda: {"GITHUB_TOKEN": "value_from_dotenv"})
+        monkeypatch.setattr(docker_env.subprocess, "Popen", _fake_popen)
+    
+        result = env.execute("echo hi")
+    
+        assert result["returncode"] == 0
+>       assert "GITHUB_TOKEN=value_from_dotenv" in popen_calls[0]
+E       AssertionError: assert 'GITHUB_TOKEN=value_from_dotenv' in ['/usr/bin/docker', 'exec', '-w', '/root', 'test-container', 'bash', ...]
+
+tests/tools/test_docker_environment.py:266: AssertionError
+________________________ test_execute_prefers_shell_env_over_hermes_dotenv ________________________
+[gw11] linux -- Python 3.13.3 /home/bc-dev/Documents/github/current/hermes-agent/.venv/bin/python3
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x764c3522ac10>
+
+    def test_execute_prefers_shell_env_over_hermes_dotenv(monkeypatch):
+        env = _make_execute_only_env(["GITHUB_TOKEN"])
+        popen_calls = []
+    
+        def _fake_popen(cmd, **kwargs):
+            popen_calls.append(cmd)
+            return _FakePopen(cmd, **kwargs)
+    
+        monkeypatch.setenv("GITHUB_TOKEN", "value_from_shell")
+        monkeypatch.setattr(docker_env, "_load_hermes_env_vars", lambda: {"GITHUB_TOKEN": "value_from_dotenv"})
+        monkeypatch.setattr(docker_env.subprocess, "Popen", _fake_popen)
+    
+        env.execute("echo hi")
+    
+>       assert "GITHUB_TOKEN=value_from_shell" in popen_calls[0]
+E       AssertionError: assert 'GITHUB_TOKEN=value_from_shell' in ['/usr/bin/docker', 'exec', '-w', '/root', 'test-container', 'bash', ...]
+
+tests/tools/test_docker_environment.py:283: AssertionError
+________________________ TestTranscribeLocal.test_successful_transcription ________________________
+[gw6] linux -- Python 3.13.3 /home/bc-dev/Documents/github/current/hermes-agent/.venv/bin/python3
+
+self = <tests.tools.test_transcription.TestTranscribeLocal object at 0x767edc8b25d0>
+tmp_path = PosixPath('/tmp/pytest-of-bc-dev/pytest-1/popen-gw6/test_successful_transcription0')
+
+    def test_successful_transcription(self, tmp_path):
+        audio_file = tmp_path / "test.ogg"
+        audio_file.write_bytes(b"fake audio")
+    
+        mock_segment = MagicMock()
+        mock_segment.text = "Hello world"
+        mock_info = MagicMock()
+        mock_info.language = "en"
+        mock_info.duration = 2.5
+    
+        mock_model = MagicMock()
+        mock_model.transcribe.return_value = ([mock_segment], mock_info)
+    
+        with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
+>            patch("faster_whisper.WhisperModel", return_value=mock_model), \
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+             patch("tools.transcription_tools._local_model", None):
+
+tests/tools/test_transcription.py:139: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+/usr/lib/python3.13/unittest/mock.py:1481: in __enter__
+    self.target = self.getter()
+                  ^^^^^^^^^^^^^
+/usr/lib/python3.13/pkgutil.py:513: in resolve_name
+    mod = importlib.import_module(modname)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen importlib._bootstrap>:1387: in _gcd_import
+    ???
+<frozen importlib._bootstrap>:1360: in _find_and_load
+    ???
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+name = 'faster_whisper', import_ = <function _gcd_import at 0x767eea9d04a0>
+
+>   ???
+E   ModuleNotFoundError: No module named 'faster_whisper'
+
+<frozen importlib._bootstrap>:1324: ModuleNotFoundError
+___________________ TestTranscribeLocalExtended.test_model_reuse_on_second_call ___________________
+[gw7] linux -- Python 3.13.3 /home/bc-dev/Documents/github/current/hermes-agent/.venv/bin/python3
+
+self = <tests.tools.test_transcription_tools.TestTranscribeLocalExtended object at 0x74ba790e87d0>
+tmp_path = PosixPath('/tmp/pytest-of-bc-dev/pytest-1/popen-gw7/test_model_reuse_on_second_cal0')
+
+    def test_model_reuse_on_second_call(self, tmp_path):
+        """Second call with same model should NOT reload the model."""
+        audio = tmp_path / "test.ogg"
+        audio.write_bytes(b"fake")
+    
+        mock_segment = MagicMock()
+        mock_segment.text = "hi"
+        mock_info = MagicMock()
+        mock_info.language = "en"
+        mock_info.duration = 1.0
+    
+        mock_model = MagicMock()
+        mock_model.transcribe.return_value = ([mock_segment], mock_info)
+        mock_whisper_cls = MagicMock(return_value=mock_model)
+    
+        with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
+>            patch("faster_whisper.WhisperModel", mock_whisper_cls), \
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+             patch("tools.transcription_tools._local_model", None), \
+             patch("tools.transcription_tools._local_model_name", None):
+
+tests/tools/test_transcription_tools.py:433: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+/usr/lib/python3.13/unittest/mock.py:1481: in __enter__
+    self.target = self.getter()
+                  ^^^^^^^^^^^^^
+/usr/lib/python3.13/pkgutil.py:513: in resolve_name
+    mod = importlib.import_module(modname)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen importlib._bootstrap>:1387: in _gcd_import
+    ???
+<frozen importlib._bootstrap>:1360: in _find_and_load
+    ???
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+name = 'faster_whisper', import_ = <function _gcd_import at 0x74ba87fc44a0>
+
+>   ???
+E   ModuleNotFoundError: No module named 'faster_whisper'
+
+<frozen importlib._bootstrap>:1324: ModuleNotFoundError
+____________________ TestTranscribeLocalExtended.test_model_reloaded_on_change ____________________
+[gw7] linux -- Python 3.13.3 /home/bc-dev/Documents/github/current/hermes-agent/.venv/bin/python3
+
+self = <tests.tools.test_transcription_tools.TestTranscribeLocalExtended object at 0x74ba790e8910>
+tmp_path = PosixPath('/tmp/pytest-of-bc-dev/pytest-1/popen-gw7/test_model_reloaded_on_change0')
+
+    def test_model_reloaded_on_change(self, tmp_path):
+        """Switching model name should reload the model."""
+        audio = tmp_path / "test.ogg"
+        audio.write_bytes(b"fake")
+    
+        mock_segment = MagicMock()
+        mock_segment.text = "hi"
+        mock_info = MagicMock()
+        mock_info.language = "en"
+        mock_info.duration = 1.0
+    
+        mock_model = MagicMock()
+        mock_model.transcribe.return_value = ([mock_segment], mock_info)
+        mock_whisper_cls = MagicMock(return_value=mock_model)
+    
+        with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
+>            patch("faster_whisper.WhisperModel", mock_whisper_cls), \
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+             patch("tools.transcription_tools._local_model", None), \
+             patch("tools.transcription_tools._local_model_name", None):
+
+tests/tools/test_transcription_tools.py:459: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+/usr/lib/python3.13/unittest/mock.py:1481: in __enter__
+    self.target = self.getter()
+                  ^^^^^^^^^^^^^
+/usr/lib/python3.13/pkgutil.py:513: in resolve_name
+    mod = importlib.import_module(modname)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen importlib._bootstrap>:1387: in _gcd_import
+    ???
+<frozen importlib._bootstrap>:1360: in _find_and_load
+    ???
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+name = 'faster_whisper', import_ = <function _gcd_import at 0x74ba87fc44a0>
+
+>   ???
+E   ModuleNotFoundError: No module named 'faster_whisper'
+
+<frozen importlib._bootstrap>:1324: ModuleNotFoundError
+___________________ TestTranscribeLocalExtended.test_exception_returns_failure ____________________
+[gw7] linux -- Python 3.13.3 /home/bc-dev/Documents/github/current/hermes-agent/.venv/bin/python3
+
+self = <tests.tools.test_transcription_tools.TestTranscribeLocalExtended object at 0x74ba79edd5b0>
+tmp_path = PosixPath('/tmp/pytest-of-bc-dev/pytest-1/popen-gw7/test_exception_returns_failure0')
+
+    def test_exception_returns_failure(self, tmp_path):
+        audio = tmp_path / "test.ogg"
+        audio.write_bytes(b"fake")
+    
+        mock_whisper_cls = MagicMock(side_effect=RuntimeError("CUDA out of memory"))
+    
+        with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
+>            patch("faster_whisper.WhisperModel", mock_whisper_cls), \
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+             patch("tools.transcription_tools._local_model", None):
+
+tests/tools/test_transcription_tools.py:475: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+/usr/lib/python3.13/unittest/mock.py:1481: in __enter__
+    self.target = self.getter()
+                  ^^^^^^^^^^^^^
+/usr/lib/python3.13/pkgutil.py:513: in resolve_name
+    mod = importlib.import_module(modname)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen importlib._bootstrap>:1387: in _gcd_import
+    ???
+<frozen importlib._bootstrap>:1360: in _find_and_load
+    ???
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+name = 'faster_whisper', import_ = <function _gcd_import at 0x74ba87fc44a0>
+
+>   ???
+E   ModuleNotFoundError: No module named 'faster_whisper'
+
+<frozen importlib._bootstrap>:1324: ModuleNotFoundError
+____________________ TestTranscribeLocalExtended.test_multiple_segments_joined ____________________
+[gw7] linux -- Python 3.13.3 /home/bc-dev/Documents/github/current/hermes-agent/.venv/bin/python3
+
+self = <tests.tools.test_transcription_tools.TestTranscribeLocalExtended object at 0x74ba79edd6e0>
+tmp_path = PosixPath('/tmp/pytest-of-bc-dev/pytest-1/popen-gw7/test_multiple_segments_joined0')
+
+    def test_multiple_segments_joined(self, tmp_path):
+        audio = tmp_path / "test.ogg"
+        audio.write_bytes(b"fake")
+    
+        seg1 = MagicMock()
+        seg1.text = "Hello"
+        seg2 = MagicMock()
+        seg2.text = " world"
+        mock_info = MagicMock()
+        mock_info.language = "en"
+        mock_info.duration = 3.0
+    
+        mock_model = MagicMock()
+        mock_model.transcribe.return_value = ([seg1, seg2], mock_info)
+    
+        with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
+>            patch("faster_whisper.WhisperModel", return_value=mock_model), \
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+             patch("tools.transcription_tools._local_model", None):
+
+tests/tools/test_transcription_tools.py:499: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+/usr/lib/python3.13/unittest/mock.py:1481: in __enter__
+    self.target = self.getter()
+                  ^^^^^^^^^^^^^
+/usr/lib/python3.13/pkgutil.py:513: in resolve_name
+    mod = importlib.import_module(modname)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen importlib._bootstrap>:1387: in _gcd_import
+    ???
+<frozen importlib._bootstrap>:1360: in _find_and_load
+    ???
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+name = 'faster_whisper', import_ = <function _gcd_import at 0x74ba87fc44a0>
+
+>   ???
+E   ModuleNotFoundError: No module named 'faster_whisper'
+
+<frozen importlib._bootstrap>:1324: ModuleNotFoundError
+________________ TestVisionRequirements.test_check_requirements_accepts_codex_auth ________________
+[gw6] linux -- Python 3.13.3 /home/bc-dev/Documents/github/current/hermes-agent/.venv/bin/python3
+
+self = <tests.tools.test_vision_tools.TestVisionRequirements object at 0x767edc9fe710>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x767ed95d84b0>
+tmp_path = PosixPath('/tmp/pytest-of-bc-dev/pytest-1/popen-gw6/test_check_requirements_accept0')
+
+    def test_check_requirements_accepts_codex_auth(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "auth.json").write_text(
+            '{"active_provider":"openai-codex","providers":{"openai-codex":{"tokens":{"access_token":"codex-access-token","refresh_token":"codex-refresh-token"}}}}'
+        )
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("AUXILIARY_VISION_PROVIDER", raising=False)
+        monkeypatch.delenv("CONTEXT_VISION_PROVIDER", raising=False)
+    
+>       assert check_vision_requirements() is True
+E       assert False is True
+E        +  where False = check_vision_requirements()
+
+tests/tools/test_vision_tools.py:450: AssertionError
+======================================== warnings summary =========================================
+tests/agent/test_model_metadata.py: 1 warning
+tests/acp/test_auth.py: 1 warning
+tests/agent/test_display.py: 1 warning
+tests/agent/test_prompt_builder.py: 1 warning
+tests/cli/test_branch_command.py: 1 warning
+tests/cli/test_quick_commands.py: 1 warning
+tests/cron/test_cron_script.py: 1 warning
+tests/gateway/test_channel_directory.py: 1 warning
+tests/agent/test_auxiliary_client.py: 1 warning
+tests/gateway/test_feishu.py: 1 warning
+tests/gateway/test_discord_thread_persistence.py: 1 warning
+  /home/bc-dev/Documents/github/current/hermes-agent/tests/conftest.py:89: DeprecationWarning: There is no current event loop
+    loop = asyncio.get_event_loop_policy().get_event_loop()
+
+tests/gateway/test_api_server.py: 63 warnings
+  /home/bc-dev/Documents/github/current/hermes-agent/tests/gateway/test_api_server.py:220: NotAppKeyWarning: It is recommended to use web.AppKey instances for keys.
+  https://docs.aiohttp.org/en/stable/web_advanced.html#application-s-config
+    app["api_server_adapter"] = adapter
+
+tests/cli/test_reasoning_command.py::TestHandleReasoningCommand::test_no_args_shows_status
+  /usr/lib/python3.13/unittest/mock.py:2247: RuntimeWarning: coroutine 'Process.communicate' was never awaited
+    def __init__(self, name, parent):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/cli/test_reasoning_command.py::TestHandleReasoningCommand::test_no_args_shows_status
+  /home/bc-dev/Documents/github/current/hermes-agent/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x767ee8afc400>
+  
+  Traceback (most recent call last):
+    File "/usr/lib/python3.13/asyncio/base_subprocess.py", line 130, in __del__
+      self.close()
+      ~~~~~~~~~~^^
+    File "/usr/lib/python3.13/asyncio/base_subprocess.py", line 107, in close
+      proto.pipe.close()
+      ~~~~~~~~~~~~~~~~^^
+    File "/usr/lib/python3.13/asyncio/unix_events.py", line 603, in close
+      self._close(None)
+      ~~~~~~~~~~~^^^^^^
+    File "/usr/lib/python3.13/asyncio/unix_events.py", line 627, in _close
+      self._loop.call_soon(self._call_connection_lost, exc)
+      ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/usr/lib/python3.13/asyncio/base_events.py", line 827, in call_soon
+      self._check_closed()
+      ~~~~~~~~~~~~~~~~~~^^
+    File "/usr/lib/python3.13/asyncio/base_events.py", line 550, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))
+
+tests/hermes_cli/test_auth_nous_provider.py::test_refresh_token_persisted_when_mint_returns_insufficient_credits
+tests/hermes_cli/test_auth_nous_provider.py::test_refresh_token_persisted_when_mint_returns_insufficient_credits
+tests/hermes_cli/test_auth_nous_provider.py::test_refresh_token_persisted_when_mint_times_out
+tests/hermes_cli/test_auth_nous_provider.py::test_mint_retry_uses_latest_rotated_refresh_token
+  /home/bc-dev/Documents/github/current/hermes-agent/.venv/lib/python3.13/site-packages/httpx/_config.py:51: DeprecationWarning: `verify=<str>` is deprecated. Use `verify=ssl.create_default_context(cafile=...)` or `verify=ssl.create_default_context(capath=...)` instead.
+    warnings.warn(message, DeprecationWarning)
+
+tests/gateway/test_api_server_jobs.py: 35 warnings
+  /home/bc-dev/Documents/github/current/hermes-agent/tests/gateway/test_api_server_jobs.py:52: NotAppKeyWarning: It is recommended to use web.AppKey instances for keys.
+  https://docs.aiohttp.org/en/stable/web_advanced.html#application-s-config
+    app["api_server_adapter"] = adapter
+
+tests/gateway/test_approve_deny_commands.py::TestBlockingApprovalE2E::test_blocking_approval_approve_once
+tests/tools/test_approval.py::TestSessionKeyContext::test_context_keeps_pending_approval_attached_to_originating_session
+  /home/bc-dev/Documents/github/current/hermes-agent/tools/tirith_security.py:355: DeprecationWarning: Python 3.14 will, by default, filter extracted tar archives and reject files or modify their metadata. Use the filter argument to control this behavior.
+    tar.extract(member, tmpdir)
+
+tests/gateway/test_slack.py::TestIncomingDocumentHandling::test_pdf_document_cached
+tests/gateway/test_slack.py::TestIncomingDocumentHandling::test_zip_file_cached
+  /usr/lib/python3.13/unittest/mock.py:2247: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    def __init__(self, name, parent):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/gateway/test_slack.py: 12 warnings
+  /home/bc-dev/Documents/github/current/hermes-agent/gateway/platforms/slack.py:952: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    user_name = await self._resolve_user_name(user_id, chat_id=channel_id)
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/gateway/test_whatsapp_group_gating.py::test_invalid_regex_patterns_are_ignored
+  /usr/lib/python3.13/unittest/mock.py:532: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    def _mock_add_spec(self, spec, spec_set, _spec_as_instance=False,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/tools/test_mcp_probe.py::TestProbeMcpServerTools::test_skips_disabled_servers
+  /usr/lib/python3.13/unittest/mock.py:2247: RuntimeWarning: coroutine 'probe_mcp_server_tools.<locals>._probe_all' was never awaited
+    def __init__(self, name, parent):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/tools/test_mcp_tool.py::TestUtilityHandlers::test_list_resources_success
+  /usr/lib/python3.13/unittest/mock.py:2247: RuntimeWarning: coroutine '_make_tool_handler.<locals>._handler.<locals>._call' was never awaited
+    def __init__(self, name, parent):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+===================================== short test summary info =====================================
+FAILED tests/cli/test_quick_commands.py::TestCLIQuickCommands::test_exec_command_no_output_shows_fallback - AssertionError: Expected 'print' to have been called once. Called 0 times.
+FAILED tests/agent/test_auxiliary_named_custom_providers.py::TestNormalizeVisionProvider::test_main_resolves_to_named_custom - AssertionError: assert 'beans' == 'custom:beans'
+FAILED tests/cli/test_quick_commands.py::TestCLIQuickCommands::test_alias_no_target_shows_error - AssertionError: Expected 'print' to have been called once. Called 0 times.
+FAILED tests/cli/test_quick_commands.py::TestCLIQuickCommands::test_unsupported_type_shows_error - AssertionError: Expected 'print' to have been called once. Called 0 times.
+FAILED tests/cli/test_quick_commands.py::TestCLIQuickCommands::test_missing_command_field_shows_error - AssertionError: Expected 'print' to have been called once. Called 0 times.
+FAILED tests/cli/test_quick_commands.py::TestCLIQuickCommands::test_timeout_shows_error - AssertionError: Expected 'print' to have been called once. Called 0 times.
+FAILED tests/hermes_cli/test_api_key_providers.py::TestHuggingFaceModels::test_model_metadata_has_context_lengths - AssertionError: HF model 'MiniMaxAI/MiniMax-M2.5' missing from DEFAULT_CONTEXT_LENGTHS
+FAILED tests/tools/test_docker_environment.py::test_execute_uses_hermes_dotenv_for_allowlisted_env - AssertionError: assert 'GITHUB_TOKEN=value_from_dotenv' in ['/usr/bin/docker', 'exec', '-w', '...
+FAILED tests/tools/test_docker_environment.py::test_execute_prefers_shell_env_over_hermes_dotenv - AssertionError: assert 'GITHUB_TOKEN=value_from_shell' in ['/usr/bin/docker', 'exec', '-w', '/...
+FAILED tests/tools/test_transcription.py::TestTranscribeLocal::test_successful_transcription - ModuleNotFoundError: No module named 'faster_whisper'
+FAILED tests/tools/test_transcription_tools.py::TestTranscribeLocalExtended::test_model_reuse_on_second_call - ModuleNotFoundError: No module named 'faster_whisper'
+FAILED tests/tools/test_transcription_tools.py::TestTranscribeLocalExtended::test_model_reloaded_on_change - ModuleNotFoundError: No module named 'faster_whisper'
+FAILED tests/tools/test_transcription_tools.py::TestTranscribeLocalExtended::test_exception_returns_failure - ModuleNotFoundError: No module named 'faster_whisper'
+FAILED tests/tools/test_transcription_tools.py::TestTranscribeLocalExtended::test_multiple_segments_joined - ModuleNotFoundError: No module named 'faster_whisper'
+FAILED tests/tools/test_vision_tools.py::TestVisionRequirements::test_check_requirements_accepts_codex_auth - assert False is True
+ERROR tests/acp/test_entry.py - ImportError while importing test module '/home/bc-dev/Documents/github/current/hermes-agent/te...
+ERROR tests/acp/test_events.py - ImportError while importing test module '/home/bc-dev/Documents/github/current/hermes-agent/te...
+ERROR tests/acp/test_mcp_e2e.py - ImportError while importing test module '/home/bc-dev/Documents/github/current/hermes-agent/te...
+ERROR tests/acp/test_permissions.py - ImportError while importing test module '/home/bc-dev/Documents/github/current/hermes-agent/te...
+ERROR tests/acp/test_server.py - ImportError while importing test module '/home/bc-dev/Documents/github/current/hermes-agent/te...
+ERROR tests/acp/test_tools.py - ImportError while importing test module '/home/bc-dev/Documents/github/current/hermes-agent/te...
+=== 15 failed, 9116 passed, 89 skipped, 1 xpassed, 134 warnings, 6 errors in 124.23s (0:02:04) ===
