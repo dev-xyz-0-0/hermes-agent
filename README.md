@@ -166,7 +166,19 @@ uv run pytest
 uv run pytest tests/acp
 
 uv run pytest tests/cli
----
+
+uv run pytest tests/tools/transcription_tools.py
+
+uv run pytest tests/tools/tools/tts_tool.py
+
+uv run pytest tests/tools/test_whisper_transcribe.py
+
+tools/.py
+
+uv run pytest tests/tools/test_whisper_transcribe.py -m integration -n 0 -vv
+
+uv run pytest -m integration -n 0
+ ---
 
 ## Community
 
