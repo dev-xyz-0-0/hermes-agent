@@ -227,7 +227,7 @@ python -m pytest tests/hermes_cli/test_api_key_providers.py -q                 #
 
 python -m pytest tests/agent/test_error_classifier.py -q                 # Tool-level tests
 python -m pytest tests/tools/test_skills_sync.py -q                 # Tool-level tests
-python -m pytest tests/tools/test_terminal_foreground_timeout_cap.py -q                 # Tool-level tests
+python -m pytest tests/gateway/test_internal_event_bypass_pairing.py -q                 # Tool-level tests
 
 
 
