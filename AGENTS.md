@@ -473,6 +473,7 @@ python -m pytest tests/gateway/ -q               # Gateway tests
 python -m pytest tests/tools/ -q                 # Tool-level tests
 python -m pytest tests/hermes_cli/test_api_key_providers.py -q                 # Tool-level tests
 
+python -m pytest tests/agent/test_auxiliary_client.py -q                 # Tool-level tests
 
 
 ```
