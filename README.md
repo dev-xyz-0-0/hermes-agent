@@ -194,3 +194,12 @@ uv run pytest -m integration -n 0
 MIT — see [LICENSE](LICENSE).
 
 Built by [Nous Research](https://nousresearch.com).
+
+https://github.com/NousResearch/hermes-agent/compare/v2026.4.8...v2026.4.16
+
+
+Hermes Agent v0.8.0 (2026.4.8)
+Project: /home/ubuntu/.hermes/hermes-agent
+Python: 3.11.15
+OpenAI SDK: 2.32.0
+Update available: 2535 commits behind — run 'hermes update'

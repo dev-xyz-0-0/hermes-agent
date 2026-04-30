@@ -458,12 +458,23 @@ def profile_env(tmp_path, monkeypatch):
 ## Testing
 
 ```bash
+
+
+uv venv venv --python 3.11
+source venv/bin/activate
+uv pip install -e ".[all,dev]"
+python -m pytest tests/ -q
+
 source venv/bin/activate
 python -m pytest tests/ -q          # Full suite (~3000 tests, ~3 min)
 python -m pytest tests/test_model_tools.py -q   # Toolset resolution
 python -m pytest tests/test_cli_init.py -q       # CLI config loading
 python -m pytest tests/gateway/ -q               # Gateway tests
 python -m pytest tests/tools/ -q                 # Tool-level tests
+python -m pytest tests/hermes_cli/test_api_key_providers.py -q                 # Tool-level tests
+
+
+
 ```
 
 Always run the full suite before pushing changes.
