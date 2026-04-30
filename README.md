@@ -173,6 +173,9 @@ uv run pytest tests/tools/tools/tts_tool.py
 
 uv run pytest tests/tools/test_whisper_transcribe.py
 
+
+tests/agent/test_error_classifier.py
+
 tools/.py
 
 uv run pytest tests/tools/test_whisper_transcribe.py -m integration -n 0 -vv
@@ -199,7 +202,34 @@ https://github.com/NousResearch/hermes-agent/compare/v2026.4.8...v2026.4.16
 
 
 Hermes Agent v0.8.0 (2026.4.8)
-Project: /home/ubuntu/.hermes/hermes-agent
 Python: 3.11.15
 OpenAI SDK: 2.32.0
 Update available: 2535 commits behind — run 'hermes update'
+
+
+## Testing
+
+```bash
+
+
+uv venv venv --python 3.11
+source venv/bin/activate
+uv pip install -e ".[all,dev]"
+python -m pytest tests/ -q
+
+source venv/bin/activate
+python -m pytest tests/ -q          # Full suite (~3000 tests, ~3 min)
+python -m pytest tests/test_model_tools.py -q   # Toolset resolution
+python -m pytest tests/test_cli_init.py -q       # CLI config loading
+python -m pytest tests/gateway/ -q               # Gateway tests
+python -m pytest tests/tools/ -q                 # Tool-level tests
+python -m pytest tests/hermes_cli/test_api_key_providers.py -q                 # Tool-level tests
+
+python -m pytest tests/agent/test_error_classifier.py -q                 # Tool-level tests
+python -m pytest tests/tools/test_skills_sync.py -q                 # Tool-level tests
+python -m pytest tests/tools/test_terminal_foreground_timeout_cap.py -q                 # Tool-level tests
+
+
+
+
+```
