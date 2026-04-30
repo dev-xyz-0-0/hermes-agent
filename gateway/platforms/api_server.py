@@ -533,6 +533,19 @@ class APIServerAdapter(BasePlatformAdapter):
         # When provided, history is loaded from state.db instead of from the request body.
         provided_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
         if provided_session_id:
+            if not self._api_key:
+                logger.warning(
+                    "Session continuation via X-Hermes-Session-Id rejected: "
+                    "no API key configured.  Set API_SERVER_KEY to enable "
+                    "session continuity."
+                )
+                return web.json_response(
+                    _openai_error(
+                        "Session continuation requires API key authentication. "
+                        "Configure API_SERVER_KEY to enable this feature."
+                    ),
+                    status=403,
+                )
             session_id = provided_session_id
             try:
                 db = self._ensure_session_db()
@@ -1652,6 +1665,14 @@ class APIServerAdapter(BasePlatformAdapter):
             await self._site.start()
 
             self._mark_connected()
+            if not self._api_key:
+                logger.warning(
+                    "[%s] ⚠️  No API key configured (API_SERVER_KEY / platforms.api_server.key). "
+                    "All requests will be accepted without authentication. "
+                    "Set an API key for production deployments to prevent "
+                    "unauthorized access to sessions, responses, and cron jobs.",
+                    self.name,
+                )
             logger.info(
                 "[%s] API server listening on http://%s:%d",
                 self.name, self._host, self._port,
