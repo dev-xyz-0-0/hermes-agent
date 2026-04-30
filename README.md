@@ -230,7 +230,8 @@ python -m pytest tests/tools/test_skills_sync.py -q                 # Tool-level
 python -m pytest tests/gateway/test_internal_event_bypass_pairing.py -q                 # Tool-level tests
 
 python -m pytest tests/run_agent/test_run_agent.py -q                 # Tool-level tests
+python -m pytest tests/run_agent/test_run_agent.py -q                 # Tool-level tests
 
-
+tests/run_agent/test_run_agent.py
 
 ```
