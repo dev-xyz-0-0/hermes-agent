@@ -95,6 +95,7 @@ def _make_runner(adapter):
 
     runner = object.__new__(GatewayRunner)
     runner.adapters = {adapter.platform: adapter}
+    runner._session_model_overrides = {}
     runner._voice_mode = {}
     runner._prefill_messages = []
     runner._ephemeral_system_prompt = ""

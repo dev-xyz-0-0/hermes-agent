@@ -32,6 +32,7 @@ def _make_runner():
     runner._pending_messages = {}
     runner._pending_approvals = {}
     runner.adapters = {}
+    runner._session_model_overrides = {}
     runner.hooks = MagicMock()
     runner.session_store = MagicMock()
     return runner

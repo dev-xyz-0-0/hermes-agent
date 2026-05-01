@@ -20,6 +20,7 @@ def _make_runner():
         platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="***")}
     )
     runner.adapters = {}
+    runner._session_model_overrides = {}
     runner._voice_mode = {}
     runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
     runner.session_store = MagicMock()

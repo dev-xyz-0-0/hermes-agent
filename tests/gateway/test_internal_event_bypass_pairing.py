@@ -17,6 +17,7 @@ from gateway.platforms.base import MessageEvent
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
 from unittest.mock import AsyncMock
+import uuid
 
 # ---------------------------------------------------------------------------
 # Global Isolation Fixtures
@@ -114,7 +115,7 @@ async def test_notify_on_complete_sets_internal_flag(
     monkeypatch.setattr("gateway.run.asyncio.sleep", _instant_sleep)
 
     runner.adapters[Platform.DISCORD] = discord_adapter
-
+    runner._session_model_overrides = {}
     await runner._run_process_watcher(watcher_dict())
 
     assert discord_adapter.handle_message.await_count == 1
@@ -199,7 +200,6 @@ async def test_internal_event_does_not_trigger_pairing(
         "Pairing code should NOT be generated for internal events"
     )
 
-
 @pytest.mark.asyncio
 async def test_non_internal_event_triggers_pairing(
     monkeypatch, runner, discord_adapter
@@ -211,7 +211,7 @@ async def test_non_internal_event_triggers_pairing(
         platform=Platform.DISCORD,
         chat_id="123",
         chat_type="dm",
-        user_id="unknown_user_999",
+        user_id=f"test_user_{uuid.uuid4()}",
     )
     # Normal event (not internal)
     event = MessageEvent(

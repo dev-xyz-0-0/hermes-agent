@@ -166,6 +166,7 @@ def _run_with_agent(monkeypatch, agent_cls):
 
     runner = gateway_run.GatewayRunner.__new__(gateway_run.GatewayRunner)
     runner.adapters = {}
+    runner._session_model_overrides = {}
     runner._ephemeral_system_prompt = ""
     runner._prefill_messages = []
     runner._reasoning_config = None
@@ -301,6 +302,7 @@ def test_401_credential_refresh_recovers(monkeypatch):
 
     runner = gateway_run.GatewayRunner.__new__(gateway_run.GatewayRunner)
     runner.adapters = {}
+    runner._session_model_overrides = {}
     runner._ephemeral_system_prompt = ""
     runner._prefill_messages = []
     runner._reasoning_config = None
@@ -374,6 +376,7 @@ def test_401_refresh_fails_is_non_retryable(monkeypatch):
 
     runner = gateway_run.GatewayRunner.__new__(gateway_run.GatewayRunner)
     runner.adapters = {}
+    runner._session_model_overrides = {}
     runner._ephemeral_system_prompt = ""
     runner._prefill_messages = []
     runner._reasoning_config = None
@@ -462,6 +465,7 @@ def test_prompt_too_long_triggers_compression(monkeypatch):
 
     runner = gateway_run.GatewayRunner.__new__(gateway_run.GatewayRunner)
     runner.adapters = {}
+    runner._session_model_overrides = {}
     runner._ephemeral_system_prompt = ""
     runner._prefill_messages = []
     runner._reasoning_config = None

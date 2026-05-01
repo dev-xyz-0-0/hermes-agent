@@ -126,6 +126,7 @@ async def test_shutdown_fires_finalize_for_active_agents(mock_invoke_hook):
     runner._pending_approvals = {}
     runner._shutdown_event = MagicMock()
     runner.adapters = {}
+    runner._session_model_overrides = {}
     runner._exit_reason = "test"
 
     agent1 = MagicMock()

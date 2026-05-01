@@ -27,6 +27,7 @@ def _make_runner():
     """Create a bare GatewayRunner without calling __init__."""
     runner = object.__new__(gateway_run.GatewayRunner)
     runner.adapters = {}
+    runner._session_model_overrides = {}
     runner._ephemeral_system_prompt = ""
     runner._prefill_messages = []
     runner._reasoning_config = None

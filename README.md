@@ -227,16 +227,34 @@ python -m pytest tests/hermes_cli/test_api_key_providers.py -q                 #
 
 python -m pytest tests/agent/test_error_classifier.py -q                 # Tool-level tests
 python -m pytest tests/tools/test_skills_sync.py -q                 # Tool-level tests
-python -m pytest tests/gateway/test_internal_event_bypass_pairing.py -q                 # Tool-level tests
+python -m pytest tests/gateway/test_model_switch_persistence.py -q                 # Tool-level tests
 
 python -m pytest tests/run_agent/test_run_agent.py -q                 # Tool-level tests
 python -m pytest tests/run_agent/test_primary_runtime_restore.py -q                 # Tool-level tests
 
-tests/run_agent/test_primary_runtime_restore.py
 
-python -m pytest tests/gateway/test_model_switch_persistence.py -q                 # Tool-level tests
-tests/gateway/test_internal_event_bypass_pairing.py
-tests//.py
+uv run pytest tests/gateway/test_internal_event_bypass_pairing.py -q
+uv run pytest tests/ -q          # Full suite (~3000 tests, ~3 min)
+
+tests/tools/test_send_message_missing_platforms.py
+
+
+python -m pytest tests/gateway/test_internal_event_bypass_pairing.py -q
+
+python -m pytest tests/tools/test_managed_server_tool_support.py -q
+
+uv run pytest tests/tools/test_managed_server_tool_support.py -q
+uv run pytest tests/gateway/test_internal_event_bypass_pairing.py -q
+uv run pytest tests/gateway/test_send_message_missing_platforms.py -q
+
+
+uv run pytest tests/gateway/test_internal_event_bypass_pairing.py -q
+
+
+
+uv run pytest --showconfig
+
+tests/run_agent/test_primary_runtime_restore.py
 
 ```
 

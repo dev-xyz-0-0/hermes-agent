@@ -32,6 +32,7 @@ def _make_runner():
     from gateway.run import GatewayRunner
     runner = object.__new__(GatewayRunner)
     runner.adapters = {}
+    runner._session_model_overrides = {}
     runner._voice_mode = {}
     runner._session_db = None
     runner._reasoning_config = None

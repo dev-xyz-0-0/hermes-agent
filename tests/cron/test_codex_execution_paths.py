@@ -146,6 +146,7 @@ def test_gateway_run_agent_codex_path_handles_internal_401_refresh(monkeypatch):
 
     runner = gateway_run.GatewayRunner.__new__(gateway_run.GatewayRunner)
     runner.adapters = {}
+    runner._session_model_overrides = {}
     runner._ephemeral_system_prompt = ""
     runner._prefill_messages = []
     runner._reasoning_config = None

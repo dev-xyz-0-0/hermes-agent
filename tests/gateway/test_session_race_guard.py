@@ -331,6 +331,7 @@ async def test_shutdown_skips_sentinel():
     runner._running_agents["telegram:dm:88888"] = real_agent
 
     runner.adapters = {}  # No adapters to disconnect
+    runner._session_model_overrides = {}
     runner._running = True
     runner._shutdown_event = asyncio.Event()
     runner._exit_reason = None
