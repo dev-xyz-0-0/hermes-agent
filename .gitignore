@@ -58,3 +58,6 @@ mini-swe-agent/
 # Nix
 .direnv/
 result
+
+build
+dist

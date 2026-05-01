@@ -9,7 +9,11 @@ Usage:
 
     # Preview with semver bump
     python scripts/release.py --bump minor
-
+    python3 scripts/release.py --bump patch
+    python3 scripts/release.py --bump patch --publish --first-release
+    
+    uv run python scripts/release.py --bump patch --publish
+    
     # Create the release
     python scripts/release.py --bump minor --publish
 
@@ -224,7 +228,7 @@ def build_release_artifacts(semver: str) -> list[Path]:
     shutil.rmtree(dist_dir, ignore_errors=True)
 
     result = subprocess.run(
-        [sys.executable, "-m", "build", "--sdist", "--wheel"],
+        ["uv", "run", "python", "-m", "build", "--sdist", "--wheel"],
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
@@ -361,7 +365,7 @@ def get_pr_number(subject: str) -> str:
     return None
 
 
-def generate_changelog(commits, tag_name, semver, repo_url="https://github.com/NousResearch/hermes-agent",
+def generate_changelog(commits, tag_name, semver, repo_url="https://github.com/dev-xyz-0-0/hermes-agent",
                        prev_tag=None, first_release=False):
     """Generate markdown changelog from categorized commits."""
     lines = []
