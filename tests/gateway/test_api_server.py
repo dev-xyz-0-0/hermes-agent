@@ -623,8 +623,167 @@ class TestChatCompletionsEndpoint:
             assert resp.status == 500
             data = await resp.json()
             assert "Provider failed" in data["error"]["message"]
+            
+    @pytest.mark.asyncio
+    async def test_session_id_rejected_when_no_api_key(self,adapter):
+        """
+        If X-Hermes-Session-Id is provided but no API key is configured,
+        request must be rejected with 403.
+        """
+        app = _create_app(adapter)  # adapter has no API key
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/chat/completions",
+                headers={"X-Hermes-Session-Id": "session-123"},
+                json={
+                    "model": "hermes-agent",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+            assert resp.status == 403
+            data = await resp.json()
+            assert "Session continuation requires API key" in data["error"]["message"]
 
 
+    @pytest.mark.asyncio
+    async def test_session_id_rejected_even_with_auth_header_if_no_server_key(self,adapter):
+        """
+        Even if Authorization header is present, session continuation must fail
+        when server has no API key configured.
+        """
+        app = _create_app(adapter)  # no API key configured
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/chat/completions",
+                headers={
+                    "X-Hermes-Session-Id": "session-123",
+                    "Authorization": "Bearer any-key",
+                },
+                json={
+                    "model": "hermes-agent",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+            assert resp.status == 403
+
+    @pytest.mark.asyncio
+    async def test_blank_session_id_is_ignored(self,auth_adapter):
+        """
+        Blank or whitespace session ID should be treated as not provided,
+        so request should proceed normally.
+        """
+        mock_result = {"final_response": "OK", "messages": [], "api_calls": 1}
+
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    headers={
+                        "X-Hermes-Session-Id": "   ",  # whitespace only
+                        "Authorization": "Bearer sk-secret",
+                    },
+                    json={
+                        "model": "hermes-agent",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                    },
+                )
+
+            assert resp.status == 200
+            # Should behave like new session
+            assert resp.headers.get("X-Hermes-Session-Id") is not None
+
+    @pytest.mark.asyncio
+    async def test_session_id_not_forwarded_on_rejection(self,adapter):
+        """
+        If session continuation is rejected, _run_agent must NOT be called.
+        """
+        app = _create_app(adapter)
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    headers={"X-Hermes-Session-Id": "session-123"},
+                    json={
+                        "model": "hermes-agent",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                    },
+                )
+
+            assert resp.status == 403
+            mock_run.assert_not_called()
+            
+            
+    @pytest.mark.asyncio
+    async def test_session_id_allowed_with_api_key(self,auth_adapter):
+        """
+        When API key is configured and request is authenticated,
+        session continuation should succeed.
+        """
+        mock_result = {"final_response": "OK", "messages": [], "api_calls": 1}
+        mock_db = MagicMock()
+        mock_db.get_messages_as_conversation.return_value = []
+
+        auth_adapter._session_db = mock_db
+
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    headers={
+                        "X-Hermes-Session-Id": "valid-session",
+                        "Authorization": "Bearer sk-secret",
+                    },
+                    json={
+                        "model": "hermes-agent",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                    },
+                )
+
+            assert resp.status == 200
+            call_kwargs = mock_run.call_args.kwargs
+            assert call_kwargs["session_id"] == "valid-session"
+
+
+    @pytest.mark.asyncio
+    async def test_session_id_trimmed_before_validation(self,auth_adapter):
+        """
+        Session ID should be stripped before validation and usage.
+        """
+        mock_result = {"final_response": "OK", "messages": [], "api_calls": 1}
+        mock_db = MagicMock()
+        mock_db.get_messages_as_conversation.return_value = []
+
+        auth_adapter._session_db = mock_db
+
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    headers={
+                        "X-Hermes-Session-Id": "  trimmed-session  ",
+                        "Authorization": "Bearer sk-secret",
+                    },
+                    json={
+                        "model": "hermes-agent",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                    },
+                )
+
+            assert resp.status == 200
+            call_kwargs = mock_run.call_args.kwargs
+            assert call_kwargs["session_id"] == "trimmed-session"
 # ---------------------------------------------------------------------------
 # /v1/responses endpoint
 # ---------------------------------------------------------------------------
