@@ -251,10 +251,13 @@ uv run pytest tests/gateway/test_send_message_missing_platforms.py -q
 uv run pytest tests/gateway/test_internal_event_bypass_pairing.py -q
 
 
+uv version --bump patch
+git log --oneline --decorate --graph > log.txt
+
+
+uv sync --all-extras --dev
 
 uv run pytest --showconfig
-
-tests/run_agent/test_primary_runtime_restore.py
 
 ```
 

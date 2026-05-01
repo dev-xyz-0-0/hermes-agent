@@ -1,0 +1,17 @@
+* 1b05953 (HEAD -> main, origin/main) remove mac.
+* 386ba4f fix all test with uv.
+* b54cf00 fix(gateway): /model switch now persists across messages - https://github.com/NousResearch/hermes-agent/pull/7081
+* 83b1b93 add in doctor and test for 403. https://github.com/NousResearch/hermes-agent/pull/6285 https://github.com/NousResearch/hermes-agent/pull/6930
+* 7a5edac fix(state): orphan children instead of cascade-deleting in prune/delete https://github.com/NousResearch/hermes-agent/pull/6513
+* d8c7b04 fix test cases.
+* 44eb887 fix(run_agent): recover primary client on openai transport errors https://github.com/NousResearch/hermes-agent/pull/7108/changes#top
+* c2a5e09 fix: retry 3 times with nudge when model returns truly empty response https://github.com/NousResearch/hermes-agent/pull/6488/
+* c147180 fix: strip <thought> tags from Gemma 4 responses https://github.com/NousResearch/hermes-agent/pull/8562
+* c091f56 fix(gateway): prevent background process notifications from triggering false pairing requests https://github.com/NousResearch/hermes-agent/pull/6434
+* 4fbcd0a fix(terminal): reject foreground timeout above cap to prevent session deadlocks https://github.com/NousResearch/hermes-agent/pull/7082/changes#diff-cc8fff30f7bfb36dfcafe23d7c6f73a44ab50816f0ed862effa5a567c4742df5
+* 77bb31a fix: restore Codex fallback auth-store lookup https://github.com/NousResearch/hermes-agent/pull/6462
+* d8d82d5 comment
+* bf5264e fix(security): require auth for session continuation, warn on missing API key https://github.com/NousResearch/hermes-agent/pull/6930/changes#diff-96ca58e7d400b944f85d5f5592b31089991d91739f8714d17f954182d522da4a
+* b7a89e0 feat(providers): add native xAI provider
+* 672f808 add readme
+* 1f044dc fork of hermes 0.8
