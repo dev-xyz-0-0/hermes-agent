@@ -1,15 +1,14 @@
-"""Tests that internal synthetic events (e.g. background process completion)
-bypass user authorization and do not trigger DM pairing.
+"""
+Tests that internal synthetic events bypass authorization and do not trigger pairing.
 
-Regression test for the bug where ``_run_process_watcher`` with
-``notify_on_complete=True`` injected a ``MessageEvent`` without ``user_id``,
-causing ``_is_user_authorized`` to reject it and the gateway to send a
-pairing code to the chat.
+Fully isolated version:
+- No global state leakage
+- Deterministic config + env
+- Safe monkeypatch usage
 """
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -17,6 +16,45 @@ from gateway.config import GatewayConfig, Platform
 from gateway.platforms.base import MessageEvent
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
+from unittest.mock import AsyncMock
+
+# ---------------------------------------------------------------------------
+# Global Isolation Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def isolate_env(monkeypatch):
+    """Ensure no env leakage across tests."""
+    for key in [
+        "DISCORD_ALLOW_ALL_USERS",
+        "DISCORD_ALLOWED_USERS",
+        "GATEWAY_ALLOW_ALL_USERS",
+        "GATEWAY_ALLOWED_USERS",
+    ]:
+        monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture
+def hermes_home(monkeypatch, tmp_path):
+    """Isolate _hermes_home per test."""
+    import gateway.run as gateway_run
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    return tmp_path
+
+
+@pytest.fixture
+def runner(hermes_home):
+    """Create a fresh GatewayRunner."""
+    return GatewayRunner(GatewayConfig())
+
+
+@pytest.fixture
+def discord_adapter():
+    return SimpleNamespace(
+        send=AsyncMock(),
+        handle_message=AsyncMock()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -35,24 +73,7 @@ class _FakeRegistry:
         return None
 
 
-def _build_runner(monkeypatch, tmp_path) -> GatewayRunner:
-    """Create a GatewayRunner with notifications set to 'all'."""
-    (tmp_path / "config.yaml").write_text(
-        "display:\n  background_process_notifications: all\n",
-        encoding="utf-8",
-    )
-
-    import gateway.run as gateway_run
-
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-
-    runner = GatewayRunner(GatewayConfig())
-    adapter = SimpleNamespace(send=AsyncMock(), handle_message=AsyncMock())
-    runner.adapters[Platform.DISCORD] = adapter
-    return runner
-
-
-def _watcher_dict_with_notify():
+def watcher_dict():
     return {
         "session_id": "proc_test_internal",
         "check_interval": 0,
@@ -69,55 +90,43 @@ def _watcher_dict_with_notify():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_notify_on_complete_sets_internal_flag(monkeypatch, tmp_path):
+async def test_notify_on_complete_sets_internal_flag(
+    monkeypatch, runner, discord_adapter
+):
     """Synthetic completion event must have internal=True."""
     import tools.process_registry as pr_module
 
     sessions = [
         SimpleNamespace(
-            output_buffer="done\n", exited=True, exit_code=0, command="echo test"
+            output_buffer="done\n",
+            exited=True,
+            exit_code=0,
+            command="echo test",
         ),
     ]
+
     monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))
 
     async def _instant_sleep(*_a, **_kw):
-        pass
-    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+        return None
 
-    runner = _build_runner(monkeypatch, tmp_path)
-    adapter = runner.adapters[Platform.DISCORD]
+    # Scoped patch (important)
+    monkeypatch.setattr("gateway.run.asyncio.sleep", _instant_sleep)
 
-    await runner._run_process_watcher(_watcher_dict_with_notify())
+    runner.adapters[Platform.DISCORD] = discord_adapter
 
-    assert adapter.handle_message.await_count == 1
-    event = adapter.handle_message.await_args.args[0]
+    await runner._run_process_watcher(watcher_dict())
+
+    assert discord_adapter.handle_message.await_count == 1
+    event = discord_adapter.handle_message.await_args.args[0]
+
     assert isinstance(event, MessageEvent)
     assert event.internal is True, "Synthetic completion event must be marked internal"
 
 
 @pytest.mark.asyncio
-async def test_internal_event_bypasses_authorization(monkeypatch, tmp_path):
-    """An internal event should skip _is_user_authorized entirely."""
-    import gateway.run as gateway_run
-
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    (tmp_path / "config.yaml").write_text("", encoding="utf-8")
-
-    runner = GatewayRunner(GatewayConfig())
-
-    # Create an internal event with no user_id (simulates the bug scenario)
-    source = SessionSource(
-        platform=Platform.DISCORD,
-        chat_id="123",
-        chat_type="dm",
-    )
-    event = MessageEvent(
-        text="[SYSTEM: Background process completed]",
-        source=source,
-        internal=True,
-    )
-
-    # Track if _is_user_authorized is called
+async def test_internal_event_bypasses_authorization(monkeypatch, runner):
+    """Internal event should skip authorization."""
     auth_called = False
     original_auth = GatewayRunner._is_user_authorized
 
@@ -128,8 +137,18 @@ async def test_internal_event_bypasses_authorization(monkeypatch, tmp_path):
 
     monkeypatch.setattr(GatewayRunner, "_is_user_authorized", tracking_auth)
 
-    # _handle_message will proceed past auth check and eventually fail on
-    # downstream logic. We just need to verify auth is skipped.
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="123",
+        chat_type="dm",
+    )
+
+    event = MessageEvent(
+        text="[SYSTEM: done]",
+        source=source,
+        internal=True,
+    )
+
     try:
         await runner._handle_message(event)
     except Exception:
@@ -141,17 +160,24 @@ async def test_internal_event_bypasses_authorization(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_internal_event_does_not_trigger_pairing(monkeypatch, tmp_path):
-    """An internal event with no user_id must not generate a pairing code."""
-    import gateway.run as gateway_run
+async def test_internal_event_does_not_trigger_pairing(
+    monkeypatch, runner, discord_adapter
+):
+    """Internal event must not generate pairing."""
+    runner.adapters[Platform.DISCORD] = discord_adapter
 
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    (tmp_path / "config.yaml").write_text("", encoding="utf-8")
+    generate_called = False
 
-    runner = GatewayRunner(GatewayConfig())
-    # Add adapter so pairing would have somewhere to send
-    adapter = SimpleNamespace(send=AsyncMock())
-    runner.adapters[Platform.DISCORD] = adapter
+    def tracking_generate(*args, **kwargs):
+        nonlocal generate_called
+        generate_called = True
+        return "dummy"
+
+    monkeypatch.setattr(
+        runner.pairing_store,
+        "generate_code",
+        tracking_generate,
+    )
 
     source = SessionSource(
         platform=Platform.DISCORD,
@@ -164,17 +190,6 @@ async def test_internal_event_does_not_trigger_pairing(monkeypatch, tmp_path):
         internal=True,
     )
 
-    # Track pairing code generation
-    generate_called = False
-    original_generate = runner.pairing_store.generate_code
-
-    def tracking_generate(*args, **kwargs):
-        nonlocal generate_called
-        generate_called = True
-        return original_generate(*args, **kwargs)
-
-    runner.pairing_store.generate_code = tracking_generate
-
     try:
         await runner._handle_message(event)
     except Exception:
@@ -186,23 +201,11 @@ async def test_internal_event_does_not_trigger_pairing(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_non_internal_event_without_user_triggers_pairing(monkeypatch, tmp_path):
-    """Verify the normal (non-internal) path still triggers pairing for unknown users."""
-    import gateway.run as gateway_run
-
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    (tmp_path / "config.yaml").write_text("", encoding="utf-8")
-
-    # Clear env vars that could let all users through (loaded by
-    # module-level dotenv in gateway/run.py from the real ~/.hermes/.env).
-    monkeypatch.delenv("DISCORD_ALLOW_ALL_USERS", raising=False)
-    monkeypatch.delenv("DISCORD_ALLOWED_USERS", raising=False)
-    monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
-    monkeypatch.delenv("GATEWAY_ALLOWED_USERS", raising=False)
-
-    runner = GatewayRunner(GatewayConfig())
-    adapter = SimpleNamespace(send=AsyncMock())
-    runner.adapters[Platform.DISCORD] = adapter
+async def test_non_internal_event_triggers_pairing(
+    monkeypatch, runner, discord_adapter
+):
+    """Normal event should trigger pairing."""
+    runner.adapters[Platform.DISCORD] = discord_adapter
 
     source = SessionSource(
         platform=Platform.DISCORD,
@@ -221,6 +224,238 @@ async def test_non_internal_event_without_user_triggers_pairing(monkeypatch, tmp
 
     # Should return None (unauthorized) and send pairing message
     assert result is None
-    assert adapter.send.await_count == 1
-    sent_text = adapter.send.await_args.args[1]
+    assert discord_adapter.send.await_count == 1
+
+    sent_text = discord_adapter.send.await_args.args[1]
     assert "don't recognize you" in sent_text
+    
+    
+# This test suite verifies a **specific regression scenario in your GatewayRunner message pipeline**:
+
+# > Internal/system-generated events must **bypass user authorization** and **must NOT trigger pairing logic**, even if they lack a `user_id`.
+
+# ---
+
+# ## Core concept being tested
+
+# Your system has two types of events:
+
+# ### 1. External (user) events
+
+# * Origin: Discord/Telegram user
+# * Require:
+
+#   * Authorization check (`_is_user_authorized`)
+#   * Pairing if unknown user
+
+# ### 2. Internal (synthetic/system) events
+
+# * Origin: background processes (e.g. `_run_process_watcher`)
+# * Properties:
+
+#   * `internal=True`
+#   * Often **no `user_id`**
+# * Must:
+
+#   * Skip authorization
+#   * Skip pairing
+#   * Still be processed normally
+
+# ---
+
+# ## What each test validates
+
+# ---
+
+# ### 1) `test_notify_on_complete_sets_internal_flag`
+
+# **Purpose**
+# Ensure that background process completion generates an event marked as internal.
+
+# **What happens**
+
+# * Simulates a completed process via fake registry
+# * Runs `_run_process_watcher()`
+# * Captures emitted event
+
+# **Assertion**
+
+# ```python
+# assert event.internal is True
+# ```
+
+# **Why this matters**
+# If `internal=True` is missing:
+
+# * Event gets treated as user input
+# * Leads to auth + pairing logic being triggered incorrectly
+
+# ---
+
+# ### 2) `test_internal_event_bypasses_authorization`
+
+# **Purpose**
+# Ensure internal events do NOT call `_is_user_authorized`.
+
+# **What happens**
+
+# * Creates an event:
+
+#   * `internal=True`
+#   * no `user_id`
+# * Monkeypatches `_is_user_authorized` to track calls
+# * Calls `_handle_message`
+
+# **Assertion**
+
+# ```python
+# assert not auth_called
+# ```
+
+# **Why this matters**
+# If authorization is triggered:
+
+# * Event gets rejected
+# * System-generated messages break
+# * Background workflows fail silently
+
+# ---
+
+# ### 3) `test_internal_event_does_not_trigger_pairing`
+
+# **Purpose**
+# Ensure internal events do NOT generate pairing codes.
+
+# **What happens**
+
+# * Creates internal event with no `user_id`
+# * Hooks into `pairing_store.generate_code`
+# * Runs `_handle_message`
+
+# **Assertion**
+
+# ```python
+# assert not generate_called
+# ```
+
+# **Why this matters**
+# This is the **actual regression bug**:
+
+# Without this safeguard:
+
+# * System event → treated as unknown user
+# * Gateway sends pairing code to chat
+# * Results in:
+
+#   * Spam
+#   * Confusing UX
+#   * Security concerns
+
+# ---
+
+# ### 4) `test_non_internal_event_triggers_pairing`
+
+# **Purpose**
+# Ensure normal behavior still works (control test).
+
+# **What happens**
+
+# * Creates:
+
+#   * `internal=False`
+#   * unknown `user_id`
+# * Runs `_handle_message`
+
+# **Assertions**
+
+# ```python
+# assert result is None
+# assert adapter.send.await_count == 1
+# ```
+
+# **Why this matters**
+# Confirms you didn’t break the real flow while fixing the bug.
+
+# ---
+
+# ## What bug this suite prevents
+
+# Before fix:
+
+# ```
+# _process_watcher →
+#   emits MessageEvent (no user_id) →
+#     _handle_message →
+#       _is_user_authorized → FAIL →
+#         triggers pairing →
+#           sends pairing code to Discord
+# ```
+
+# After fix:
+
+# ```
+# _process_watcher →
+#   emits MessageEvent (internal=True) →
+#     _handle_message →
+#       bypass auth →
+#       bypass pairing →
+#       processed correctly
+# ```
+
+# ---
+
+# ## What layer is being tested
+
+# This is a **behavioral integration test of the message pipeline**, specifically:
+
+# ```text
+# _process_watcher
+#     ↓
+# MessageEvent(internal=True)
+#     ↓
+# _handle_message
+#     ├── authorization gate
+#     ├── pairing logic
+#     └── adapter routing
+# ```
+
+# ---
+
+# ## Key invariant enforced by this test suite
+
+# ```text
+# IF event.internal == True:
+#     skip authorization
+#     skip pairing
+# ```
+
+# ---
+
+# ## Why this is critical in your system
+
+# Given your Hermes + Gateway architecture:
+
+# * Internal events = agent actions, background jobs, cron tasks
+# * These must behave like **trusted system messages**
+
+# If broken:
+
+# * Agents stop working
+# * Background workflows fail
+# * Chat gets polluted with pairing prompts
+# * Security model becomes inconsistent
+
+# ---
+
+# ## Summary
+
+# This test suite ensures:
+
+# 1. Internal events are correctly marked
+# 2. Authorization is skipped for internal events
+# 3. Pairing is NOT triggered for internal events
+# 4. Normal user flow remains unchanged
+
+# It protects a **core contract in your gateway:**
+
+# > System-generated events must never be treated as untrusted user input.

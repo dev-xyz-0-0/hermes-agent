@@ -234,4 +234,10 @@ python -m pytest tests/run_agent/test_primary_runtime_restore.py -q             
 
 tests/run_agent/test_primary_runtime_restore.py
 
+python -m pytest tests/gateway/test_internal_event_bypass_pairing.py -q                 # Tool-level tests
+tests/gateway/test_internal_event_bypass_pairing.py
+tests//.py
+
 ```
+
+https://github.com/NousResearch/hermes-agent/releases/tag/v2026.4.13
