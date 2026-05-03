@@ -32,6 +32,10 @@ _PROVIDER_PREFIXES: frozenset[str] = frozenset({
     "glm", "z-ai", "z.ai", "zhipu", "github", "github-copilot",
     "github-models", "kimi", "moonshot", "claude", "deep-seek",
     "opencode", "zen", "go", "vercel", "kilo", "dashscope", "aliyun", "qwen",
+    "mimo", "xiaomi-mimo",
+    "arcee-ai", "arceeai",
+    "xai", "x-ai", "x.ai", "grok",
+    "qwen-portal",
 })
 
 
