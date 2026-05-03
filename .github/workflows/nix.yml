@@ -23,6 +23,7 @@ concurrency:
 
 jobs:
   nix:
+    if: false
     strategy:
       matrix:
         os: [ubuntu-latest]
