@@ -1,27 +1,28 @@
-#!/usr/bin/env python3
+#!/usr/bin/env uv run python 
 """Hermes Agent Release Script
 
 Generates changelogs and creates GitHub releases with CalVer tags.
 
 Usage:
     # Preview changelog (dry run)
-    python scripts/release.py
+    uv run python  scripts/release.py
 
     # Preview with semver bump
-    python scripts/release.py --bump minor
-    python3 scripts/release.py --bump patch
-    python3 scripts/release.py --bump patch --publish --first-release
-    
+    uv run python  scripts/release.py --bump minor
+    uv run python scripts/release.py --bump patch
+    uv run python scripts/release.py --bump patch --publish --first-release
+    uv run python scripts/release.py --bump patch --publish --date 2026.3.15
+
     uv run python scripts/release.py --bump patch --publish
     
     # Create the release
-    python scripts/release.py --bump minor --publish
+    uv run python  scripts/release.py --bump minor --publish
 
     # First release (no previous tag)
-    python scripts/release.py --bump minor --publish --first-release
+    uv run python  scripts/release.py --bump minor --publish --first-release
 
     # Override CalVer date (e.g. for a belated release)
-    python scripts/release.py --bump minor --publish --date 2026.3.15
+    uv run python  scripts/release.py --bump minor --publish --date 2026.3.15
 """
 
 import argparse
