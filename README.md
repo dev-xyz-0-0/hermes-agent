@@ -263,6 +263,8 @@ uv sync --all-extras --dev
 
 uv run pytest --showconfig
 
+test
+
 ```
 
 https://github.com/NousResearch/hermes-agent/releases/tag/v2026.4.13
