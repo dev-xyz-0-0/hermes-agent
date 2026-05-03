@@ -252,11 +252,11 @@ uv run pytest tests/run_agent/test_run_agent_codex_responses.py -q
 
 uv run pytest tests/gateway/test_api_server.py -q
 
-uv run pytest tests/tools/test_approval.py -q
+uv run pytest tests/cron/test_scheduler.py -q
 
 uv version --bump patch
 git log --oneline --decorate --graph > log.txt
-
+tests/
 
 uv sync --all-extras --dev
 
