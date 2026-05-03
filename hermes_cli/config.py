@@ -961,6 +961,13 @@ OPTIONAL_ENV_VARS = {
         "password": False,
         "category": "messaging",
     },
+    "TELEGRAM_APPROVAL_USERS": {
+        "description": "Comma-separated Telegram user IDs allowed to approve the bot (get ID from @userinfobot)",
+        "prompt": "Allowed Telegram user IDs (comma-separated)",
+        "url": "https://t.me/userinfobot",
+        "password": False,
+        "category": "messaging",
+    },
     "DISCORD_BOT_TOKEN": {
         "description": "Discord bot token from Developer Portal",
         "prompt": "Discord bot token",
