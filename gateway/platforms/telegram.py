@@ -161,6 +161,7 @@ class TelegramAdapter(BasePlatformAdapter):
     def _is_callback_user_authorized(user_id: str) -> bool:
         """Return whether a Telegram inline-button caller may perform gated actions."""
         allowed_csv = os.getenv("TELEGRAM_APPROVAL_USERS", "").strip()
+        # No env var means approval-user restriction is disabled.
         if not allowed_csv:
             return True
         allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
