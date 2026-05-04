@@ -233,7 +233,7 @@ python -m pytest tests/run_agent/test_run_agent.py -q                 # Tool-lev
 python -m pytest tests/run_agent/test_primary_runtime_restore.py -q                 # Tool-level tests
 
 
-uv run pytest tests/agent/test_skill_utils.py -q
+uv run pytest tests/agent/test_skill_commands_reload.py -q
 uv run pytest tests/ -q          # Full suite (~3000 tests, ~3 min)
 
 tests/tools/test_send_message_missing_platforms.py
@@ -245,8 +245,8 @@ python -m pytest tests/tools/test_managed_server_tool_support.py -q
 
 uv run pytest tests/tools/test_managed_server_tool_support.py -q
 uv run pytest tests/gateway/test_internal_event_bypass_pairing.py -q
-uv run pytest tests/gateway/test_send_message_missing_platforms.py -q
-uv run pytest tests/cron/test_scheduler.py -q
+uv run pytest tests/gateway/test_reload_skills_command.py -q
+uv run pytest tests/agent/test_skill_commands_reload.py -q
 
 uv run pytest tests/run_agent/test_run_agent_codex_responses.py -q
 
