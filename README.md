@@ -239,7 +239,7 @@ uv run pytest tests/ -q          # Full suite (~3000 tests, ~3 min)
 tests/tools/test_send_message_missing_platforms.py
 
 
-uv run pytest tests/tools/test_mcp_tool.py -q
+uv run pytest tests/tools/test_homeassistant_tool.py -q
 
 python -m pytest tests/tools/test_managed_server_tool_support.py -q
 
