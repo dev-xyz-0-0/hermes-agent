@@ -245,7 +245,7 @@ python -m pytest tests/tools/test_managed_server_tool_support.py -q
 
 uv run pytest tests/tools/test_managed_server_tool_support.py -q
 uv run pytest tests/gateway/test_internal_event_bypass_pairing.py -q
-uv run pytest tests/gateway/test_reload_skills_command.py -q
+uv run pytest tests/tools/test_approval.py -q
 uv run pytest tests/agent/test_skill_commands_reload.py -q
 
 uv run pytest tests/run_agent/test_run_agent_codex_responses.py -q
