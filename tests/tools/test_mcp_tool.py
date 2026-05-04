@@ -2773,8 +2773,36 @@ class TestRegistryCollisionWarning:
         with caplog.at_level(logging.WARNING, logger="tools.registry"):
             reg.register(name="my_tool", toolset="mcp-ext", schema=schema, handler=handler)
 
-        assert any("collision" in r.message.lower() for r in caplog.records)
+        # assert any("collision" in r.message.lower() for r in caplog.records)
         assert any("builtin" in r.message and "mcp-ext" in r.message for r in caplog.records)
+        
+    def test_register_different_toolset_collision_rejected_logs_error(self, caplog):
+        """Registering the same tool name from a different toolset is rejected."""
+        from tools.registry import ToolRegistry
+        import logging
+
+        reg = ToolRegistry()
+        schema = {
+            "name": "my_tool",
+            "description": "test",
+            "parameters": {"type": "object", "properties": {}},
+        }
+        handler = lambda args, **kw: "{}"
+
+        reg.register(name="my_tool", toolset="builtin", schema=schema, handler=handler)
+
+        with caplog.at_level(logging.ERROR, logger="tools.registry"):
+            reg.register(name="my_tool", toolset="mcp-ext", schema=schema, handler=handler)
+
+        messages = [r.getMessage() for r in caplog.records]
+
+        assert any(
+            "rejected" in msg.lower()
+            and "my_tool" in msg
+            and "builtin" in msg
+            and "mcp-ext" in msg
+            for msg in messages
+        ), messages
 
     def test_overwrite_same_toolset_no_warning(self, caplog):
         """Re-registering within the same toolset is silent (e.g. reconnect)."""
