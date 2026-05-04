@@ -330,7 +330,13 @@ class ToolRegistry:
                 continue
             if entry.check_fn:
                 if entry.check_fn not in check_results:
-                    check_results[entry.check_fn] = _check_fn_cached(entry.check_fn)
+                                    
+                    try:
+                        check_results[entry.check_fn] = _check_fn_cached(entry.check_fn)
+                    except Exception:
+                        check_results[entry.check_fn] = False
+                        if not quiet:
+                            logger.debug("Tool %s check raised; skipping", name)
                 if not check_results[entry.check_fn]:
                     if not quiet:
                         logger.debug("Tool %s unavailable (check failed)", name)

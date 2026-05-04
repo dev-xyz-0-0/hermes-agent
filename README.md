@@ -239,7 +239,7 @@ uv run pytest tests/ -q          # Full suite (~3000 tests, ~3 min)
 tests/tools/test_send_message_missing_platforms.py
 
 
-python -m pytest tests/gateway/test_internal_event_bypass_pairing.py -q
+uv run pytest tests/gateway/test_whatsapp_connect.py -q
 
 python -m pytest tests/tools/test_managed_server_tool_support.py -q
 
