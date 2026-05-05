@@ -1672,7 +1672,7 @@ wheels = [
 
 [[package]]
 name = "hermes-agent"
-version = "0.8.5"
+version = "0.8.6"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
