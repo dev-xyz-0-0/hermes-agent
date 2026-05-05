@@ -2773,7 +2773,7 @@ class TestRegistryCollisionWarning:
         with caplog.at_level(logging.WARNING, logger="tools.registry"):
             reg.register(name="my_tool", toolset="mcp-ext", schema=schema, handler=handler)
 
-        # assert any("collision" in r.message.lower() for r in caplog.records)
+        assert any("collision" in r.message.lower() for r in caplog.records)
         assert any("builtin" in r.message and "mcp-ext" in r.message for r in caplog.records)
         
     def test_register_different_toolset_collision_rejected_logs_error(self, caplog):

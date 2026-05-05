@@ -240,6 +240,7 @@ class ToolRegistry:
         with self._lock:
             existing = self._tools.get(name)
             if existing and existing.toolset != toolset:
+                logger.warning("Tool collision: '%s' (%s) overwritten by %s", name, existing.toolset, toolset, )
                 # Allow MCP-to-MCP overwrites (legitimate: server refresh,
                 # or two MCP servers with overlapping tool names).
                 both_mcp = (
