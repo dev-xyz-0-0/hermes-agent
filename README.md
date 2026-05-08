@@ -256,6 +256,8 @@ uv run pytest tests/cron/test_scheduler.py -q
 uv run pytest tests/gateway/test_telegram_approval_buttons.py -q
 
 
+uv run pytest tests/gateway/test_approve_deny_commands.py -q
+
 tests/
 
 uv version --bump patch
