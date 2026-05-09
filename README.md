@@ -239,7 +239,7 @@ uv run pytest tests/ -q          # Full suite (~3000 tests, ~3 min)
 tests/tools/test_send_message_missing_platforms.py
 
 
-uv run pytest tests/tools/test_homeassistant_tool.py -q
+uv run pytest tests/gateway/test_telegram_format.py -q
 
 python -m pytest tests/tools/test_managed_server_tool_support.py -q
 
@@ -257,6 +257,9 @@ uv run pytest tests/gateway/test_telegram_approval_buttons.py -q
 
 
 uv run pytest tests/gateway/test_approve_deny_commands.py -q
+uv run pytest tests/agent/test_model_metadata.py -q
+
+tests/.py
 
 tests/
 

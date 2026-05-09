@@ -179,6 +179,23 @@ TOOL_CATEGORIES = {
                 ],
                 "tts_provider": "elevenlabs",
             },
+            {
+                "name": "Google Gemini TTS",
+                "badge": "preview",
+                "tag": "30 prebuilt voices, controllable via prompts",
+                "env_vars": [
+                    {"key": "GEMINI_API_KEY", "prompt": "Gemini API key", "url": "https://aistudio.google.com/app/apikey"},
+                ],
+                "tts_provider": "gemini",
+            },
+            {
+                "name": "xAI TTS",
+                "tag": "Grok voices - requires xAI API key",
+                "env_vars": [
+                    {"key": "XAI_API_KEY", "prompt": "xAI API key", "url": "https://console.x.ai/"},
+                ],
+                "tts_provider": "xai",
+            }
         ],
     },
     "web": {

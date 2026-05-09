@@ -166,9 +166,10 @@ ALIASES: Dict[str, str] = {
     "z.ai": "zai",
     "zhipu": "zai",
     
-     # xai
+    # xai
     "x-ai": "xai",
     "x.ai": "xai",
+    "grok": "xai",
 
     # kimi-for-coding (models.dev ID)
     "kimi": "kimi-for-coding",
