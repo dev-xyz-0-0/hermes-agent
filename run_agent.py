@@ -3254,7 +3254,7 @@ class AIAgent:
         allowed_keys = {
             "model", "instructions", "input", "tools", "store",
             "reasoning", "include", "max_output_tokens", "temperature",
-            "tool_choice", "parallel_tool_calls", "prompt_cache_key","extra_headers",
+            "tool_choice", "parallel_tool_calls", "prompt_cache_key",
         }
         normalized: Dict[str, Any] = {
             "model": model,
@@ -5316,28 +5316,22 @@ class AIAgent:
                 kwargs["include"] = ["reasoning.encrypted_content"]
             elif reasoning_enabled:
 
-            if reasoning_enabled:
-                if is_github_responses:
-                    # Copilot's Responses route advertises reasoning-effort support,
-                    # but not OpenAI-specific prompt cache or encrypted reasoning
-                    # fields. Keep the payload to the documented subset.
-                    github_reasoning = self._github_models_reasoning_extra_body()
-                    if github_reasoning is not None:
-                        kwargs["reasoning"] = github_reasoning
-                else:
-                    kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
-                    kwargs["include"] = ["reasoning.encrypted_content"]
-            elif not is_github_responses and not is_xai_responses:
-                kwargs["include"] = []
-                
-            if self.request_overrides:
-                kwargs.update(self.request_overrides)
+                if reasoning_enabled:
+                    if is_github_responses:
+                        # Copilot's Responses route advertises reasoning-effort support,
+                        # but not OpenAI-specific prompt cache or encrypted reasoning
+                        # fields. Keep the payload to the documented subset.
+                        github_reasoning = self._github_models_reasoning_extra_body()
+                        if github_reasoning is not None:
+                            kwargs["reasoning"] = github_reasoning
+                    else:
+                        kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
+                        kwargs["include"] = ["reasoning.encrypted_content"]
+                elif not is_github_responses:
+                    kwargs["include"] = []
 
-            if self.max_tokens is not None and not is_codex_backend:
-                kwargs["max_output_tokens"] = self.max_tokens
-                
-            if is_xai_responses and getattr(self, "session_id", None):
-                kwargs["extra_headers"] = {"x-grok-conv-id": self.session_id}
+                if self.max_tokens is not None:
+                    kwargs["max_output_tokens"] = self.max_tokens
 
             return kwargs
 
