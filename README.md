@@ -259,6 +259,9 @@ uv run pytest tests/gateway/test_telegram_approval_buttons.py -q
 uv run pytest tests/gateway/test_approve_deny_commands.py -q
 uv run pytest tests/agent/test_model_metadata.py -q
 
+uv run pytest tests/hermes_cli/test_api_key_providers.py -q
+
+
 tests/.py
 
 tests/

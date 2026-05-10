@@ -615,6 +615,22 @@ OPTIONAL_ENV_VARS = {
         "category": "provider",
         "advanced": True,
     },
+    "XAI_API_KEY": {
+        "description": "xAI API key",
+        "prompt": "xAI API key",
+        "url": "https://console.x.ai/",
+        "password": True,
+        "category": "provider",
+        "advanced": True,
+    },
+    "XAI_BASE_URL": {
+        "description": "xAI base URL override",
+        "prompt": "xAI base URL (leave empty for default)",
+        "url": None,
+        "password": False,
+        "category": "provider",
+        "advanced": True,
+    },
     "GLM_API_KEY": {
         "description": "Z.AI / GLM API key (also recognized as ZAI_API_KEY / Z_AI_API_KEY)",
         "prompt": "Z.AI / GLM API key",

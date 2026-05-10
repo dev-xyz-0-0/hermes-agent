@@ -135,7 +135,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "glm-4.5-flash",
     ],
     "xai": [
-
+        "grok-4.20-reasoning",
         "grok-4.20-0309-reasoning",
         "grok-4.20-0309-non-reasoning",
         "grok-4.20-multi-agent-0309",

@@ -122,7 +122,7 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         base_url_env_var="HF_BASE_URL",
     ),
     "xai": HermesOverlay(
-        transport="openai_chat",
+        transport="codex_responses",
         base_url_override="https://api.x.ai/v1",
         base_url_env_var="XAI_BASE_URL",
     ),
