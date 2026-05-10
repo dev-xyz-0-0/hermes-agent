@@ -5314,24 +5314,24 @@ class AIAgent:
             if reasoning_enabled and is_xai_responses:
                 # xAI reasons automatically — no effort param, just include encrypted content
                 kwargs["include"] = ["reasoning.encrypted_content"]
+
             elif reasoning_enabled:
+                if is_github_responses:
+                    # Copilot's Responses route advertises reasoning-effort support,
+                    # but not OpenAI-specific prompt cache or encrypted reasoning fields.
+                    # Keep the payload to the documented subset.
+                    github_reasoning = self._github_models_reasoning_extra_body()
+                    if github_reasoning is not None:
+                        kwargs["reasoning"] = github_reasoning
+                else:
+                    kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
+                    kwargs["include"] = ["reasoning.encrypted_content"]
 
-                if reasoning_enabled:
-                    if is_github_responses:
-                        # Copilot's Responses route advertises reasoning-effort support,
-                        # but not OpenAI-specific prompt cache or encrypted reasoning
-                        # fields. Keep the payload to the documented subset.
-                        github_reasoning = self._github_models_reasoning_extra_body()
-                        if github_reasoning is not None:
-                            kwargs["reasoning"] = github_reasoning
-                    else:
-                        kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
-                        kwargs["include"] = ["reasoning.encrypted_content"]
-                elif not is_github_responses:
-                    kwargs["include"] = []
+            elif not is_github_responses:
+                kwargs["include"] = []
 
-                if self.max_tokens is not None:
-                    kwargs["max_output_tokens"] = self.max_tokens
+            if self.max_tokens is not None:
+                kwargs["max_output_tokens"] = self.max_tokens
 
             return kwargs
 
