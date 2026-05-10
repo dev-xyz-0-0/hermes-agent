@@ -932,6 +932,7 @@ def select_provider_and_model(args=None):
         "kilocode": "Kilo Code",
         "alibaba": "Alibaba Cloud (DashScope)",
         "huggingface": "Hugging Face",
+        "xai": "xAI",
         "custom": "Custom endpoint",
     }
     active_label = provider_labels.get(active, active) if active else "none"
@@ -949,6 +950,7 @@ def select_provider_and_model(args=None):
         ("openai-codex", "OpenAI Codex"),
         ("copilot", "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)"),
         ("huggingface", "Hugging Face Inference Providers (20+ open models)"),
+        ("xai", "xAI (Grok models — direct API)"),
     ]
 
     extended_providers = [
