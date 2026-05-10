@@ -950,12 +950,12 @@ def select_provider_and_model(args=None):
         ("openai-codex", "OpenAI Codex"),
         ("copilot", "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)"),
         ("huggingface", "Hugging Face Inference Providers (20+ open models)"),
-        ("xai", "xAI (Grok models — direct API)"),
     ]
 
     extended_providers = [
         ("copilot-acp", "GitHub Copilot ACP (spawns `copilot --acp --stdio`)"),
         ("gemini", "Google AI Studio (Gemini models — OpenAI-compatible endpoint)"),
+        ("xai", "xAI (Grok models — direct API)"),
         ("zai", "Z.AI / GLM (Zhipu AI direct API)"),
         ("kimi-coding", "Kimi / Moonshot (Moonshot AI direct API)"),
         ("minimax", "MiniMax (global direct API)"),
