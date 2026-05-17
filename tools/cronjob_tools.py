@@ -26,6 +26,7 @@ from cron.jobs import (
     resume_job,
     trigger_job,
     update_job,
+    resolve_job_ref,  # add this
 )
 
 

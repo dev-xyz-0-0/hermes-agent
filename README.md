@@ -262,6 +262,12 @@ uv run pytest tests/agent/test_model_metadata.py -q
 uv run pytest tests/cron/test_scheduler.py -q
 uv run pytest tests/test_atomic_replace_symlinks.py -q
 
+uv run pytest tests/tools/test_cronjob_tools.py -q
+
+
+
+
+
 git diff > diff.txt
 
 tests/.py
