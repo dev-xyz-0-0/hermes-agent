@@ -1057,15 +1057,92 @@ class TestSilentDelivery:
             "deliver": "origin",
             "origin": {"platform": "telegram", "chat_id": "123"},
         }
+    def test_normal_response_delivers(self, caplog):
+        import logging
+        import pprint
+        import cron.scheduler as scheduler
 
-    def test_normal_response_delivers(self):
-        with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
-             patch("cron.scheduler.run_job", return_value=(True, "# output", "Results here", None)), \
-             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
-             patch("cron.scheduler._deliver_result") as deliver_mock, \
-             patch("cron.scheduler.mark_job_run"):
-            from cron.scheduler import tick
-            tick(verbose=False)
+        job = self._make_job()
+
+        print("\n===== DEBUG job from _make_job() =====")
+        print(pprint.pformat(job))
+
+        # Wrap real _resolve_delivery_target if it exists, so we can see
+        # whether tick() thinks this job is deliverable.
+        original_resolve_delivery_target = getattr(
+            scheduler,
+            "_resolve_delivery_target",
+            None,
+        )
+
+        def debug_resolve_delivery_target(job_arg):
+            result = original_resolve_delivery_target(job_arg)
+            print("\n===== DEBUG _resolve_delivery_target(job) =====")
+            print("input job:")
+            print(pprint.pformat(job_arg))
+            print("resolved delivery target:")
+            print(pprint.pformat(result))
+            return result
+
+        patches = [
+            patch("cron.scheduler.get_due_jobs", return_value=[job]),
+            patch("cron.scheduler.run_job", return_value=(True, "# output", "Results here", None)),
+            patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"),
+            patch("cron.scheduler._deliver_result"),
+            patch("cron.scheduler.mark_job_run"),
+        ]
+
+        if original_resolve_delivery_target is not None:
+            patches.append(
+                patch(
+                    "cron.scheduler._resolve_delivery_target",
+                    side_effect=debug_resolve_delivery_target,
+                )
+            )
+
+        with patches[0] as due_mock, \
+            patches[1] as run_mock, \
+            patches[2] as save_mock, \
+            patches[3] as deliver_mock, \
+            patches[4] as mark_mock:
+
+            if len(patches) > 5:
+                with patches[5] as resolve_mock:
+                    from cron.scheduler import tick
+                    with caplog.at_level(logging.DEBUG, logger="cron.scheduler"):
+                        tick(verbose=False)
+            else:
+                resolve_mock = None
+                from cron.scheduler import tick
+                with caplog.at_level(logging.DEBUG, logger="cron.scheduler"):
+                    tick(verbose=False)
+
+        print("\n===== DEBUG mock call counts =====")
+        print("get_due_jobs:", due_mock.call_count)
+        print("run_job:", run_mock.call_count)
+        print("save_job_output:", save_mock.call_count)
+        print("_deliver_result:", deliver_mock.call_count)
+        print("mark_job_run:", mark_mock.call_count)
+        if resolve_mock is not None:
+            print("_resolve_delivery_target:", resolve_mock.call_count)
+
+        print("\n===== DEBUG run_job call args =====")
+        print(pprint.pformat(run_mock.call_args_list))
+
+        print("\n===== DEBUG save_job_output call args =====")
+        print(pprint.pformat(save_mock.call_args_list))
+
+        print("\n===== DEBUG _deliver_result call args =====")
+        print(pprint.pformat(deliver_mock.call_args_list))
+
+        print("\n===== DEBUG mark_job_run call args =====")
+        print(pprint.pformat(mark_mock.call_args_list))
+
+        print("\n===== DEBUG cron.scheduler logs =====")
+        for record in caplog.records:
+            if record.name == "cron.scheduler":
+                print(f"{record.levelname}: {record.message}")
+
         deliver_mock.assert_called_once()
 
     def test_silent_response_suppresses_delivery(self, caplog):
@@ -1147,6 +1224,11 @@ class TestBuildJobPromptSilentHint:
 
     def test_hint_present_even_without_prompt(self):
         job = {"prompt": ""}
+        result = _build_job_prompt(job)
+        assert "[SILENT]" in result
+    
+    def test_hint_present_when_legacy_prompt_is_null(self):
+        job = {"id": "abc123deadbe", "name": None, "prompt": None}
         result = _build_job_prompt(job)
         assert "[SILENT]" in result
 

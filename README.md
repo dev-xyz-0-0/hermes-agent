@@ -259,7 +259,8 @@ uv run pytest tests/gateway/test_telegram_approval_buttons.py -q
 uv run pytest tests/gateway/test_approve_deny_commands.py -q
 uv run pytest tests/agent/test_model_metadata.py -q
 
-uv run pytest tests/run_agent/test_provider_parity.py -q
+uv run pytest tests/cron/test_scheduler.py -q
+uv run pytest tests/cron/test_jobs.py -q
 
 
 tests/.py
