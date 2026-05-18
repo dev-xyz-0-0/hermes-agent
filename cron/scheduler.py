@@ -359,18 +359,11 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     prevent arbitrary script execution via path traversal or absolute
     path injection.
     
-    Supported interpreters (chosen by file extension):
-
-    * ``.sh`` / ``.bash`` — run with ``/bin/bash``
-    * anything else — run with the current Python interpreter
-      (``sys.executable``), preserving the original behaviour for
-      Python-based pre-check and data-collection scripts.
-
     Shell support lets ``no_agent=True`` jobs ship classic bash watchdogs
     (the `memory-watchdog.sh` pattern) without wrapping them in Python.
 
     Args:
-        script_path: Path to the script.  Relative paths are resolved
+        script_path: Path to a Python script.  Relative paths are resolved
             against HERMES_HOME/scripts/.  Absolute and ~-prefixed paths
             are also validated to ensure they stay within the scripts dir.
 
@@ -405,20 +398,9 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     if not path.is_file():
         return False, f"Script path is not a file: {path}"
 
-
-    # Pick an interpreter by extension.  Bash for .sh/.bash, Python for
-    # everything else.  We deliberately do NOT honour the file's own
-    # shebang: the scripts dir is trusted, but keeping the interpreter
-    # choice explicit here keeps the allowed surface small and auditable.
-    suffix = path.suffix.lower()
-    if suffix in (".sh", ".bash"):
-        argv = ["/bin/bash", str(path)]
-    else:
-        argv = [sys.executable, str(path)]
-
     try:
         result = subprocess.run(
-            argv,
+            [sys.executable, str(path)],
             capture_output=True,
             text=True,
             timeout=_SCRIPT_TIMEOUT,
