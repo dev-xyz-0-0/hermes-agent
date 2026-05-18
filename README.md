@@ -263,10 +263,9 @@ uv run pytest tests/cron/test_scheduler.py -q
 uv run pytest tests/test_atomic_replace_symlinks.py -q
 
 uv run pytest tests/tools/test_cronjob_tools.py -q
+uv run pytest tests/cron/test_cron_no_agent.py -q
 
-
-
-
+generate summary on this commit :
 
 git diff > diff.txt
 
