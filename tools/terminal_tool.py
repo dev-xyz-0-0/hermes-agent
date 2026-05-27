@@ -1746,7 +1746,12 @@ TERMINAL_SCHEMA = {
             },
             "timeout": {
                 "type": "integer",
-                "description": "Max seconds to wait (default: 180). Returns INSTANTLY when command finishes — set high for long tasks, you won't wait unnecessarily.",
+                "description": (
+                    f"Max seconds to wait (default: 180, foreground max: {FOREGROUND_MAX_TIMEOUT}). "
+                    "Returns INSTANTLY when command finishes — set high for long tasks, you won't wait unnecessarily. "
+                    f"Foreground timeout above {FOREGROUND_MAX_TIMEOUT}s is clamped to the configured limit; "
+                    "use background=true for longer commands."
+                ),
                 "minimum": 1
             },
             "workdir": {
