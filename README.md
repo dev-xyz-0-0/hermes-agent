@@ -229,8 +229,13 @@ python -m pytest tests/agent/test_error_classifier.py -q                 # Tool-
 python -m pytest tests/tools/test_skills_sync.py -q                 # Tool-level tests
 python -m pytest tests/gateway/test_model_switch_persistence.py -q                 # Tool-level tests
 
-python -m pytest tests/run_agent/test_run_agent.py -q                 # Tool-level tests
+python -m pytest tests/run_agent/test_run_agent.py -q                 # Tool-level 
+
+python -m pytest tests/run_agent/test_run_agent_codex_responses.py -q                 # Tool-level 
+ 
 python -m pytest tests/run_agent/test_primary_runtime_restore.py -q                 # Tool-level tests
+
+
 
 
 uv run pytest tests/agent/test_skill_commands_reload.py -q
@@ -266,6 +271,16 @@ uv run pytest tests/tools/test_cronjob_tools.py -q
 uv run pytest tests/cron/test_cron_no_agent.py -q
  
 uv run pytest tests/cron/test_python_cron_no_agent.py -q
+
+
+uv run pytest tests/run_agent/test_run_agent.py -q                 # Tool-level 
+
+uv run pytest tests/run_agent/test_run_agent_codex_responses.py -q      
+
+
+
+uv run pytest tests/hermes_cli/test_models.py -q
+
 
 generate summary on this commit :
 
