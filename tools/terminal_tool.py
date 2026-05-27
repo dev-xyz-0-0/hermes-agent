@@ -329,6 +329,7 @@ def _prompt_for_sudo_password(timeout_seconds: int = 45) -> str:
         if "HERMES_SPINNER_PAUSE" in os.environ:
             del os.environ["HERMES_SPINNER_PAUSE"]
 
+
 def _safe_command_preview(command: Any, limit: int = 200) -> str:
     """Return a log-safe preview for possibly-invalid command values."""
     if command is None:
@@ -1409,8 +1410,14 @@ def terminal_tool(
                 }
                 if approval_note:
                     result_data["approval"] = approval_note
-                if pty_disabled_reason:
-                    result_data["pty_note"] = pty_disabled_reason
+
+                # Transparent timeout clamping note
+                max_timeout = effective_timeout
+                if timeout and timeout > max_timeout:
+                    result_data["timeout_note"] = (
+                        f"Requested timeout {timeout}s was clamped to "
+                        f"configured limit of {max_timeout}s"
+                    )
 
                 # Mark for agent notification on completion
                 if notify_on_complete and background:
@@ -1739,7 +1746,7 @@ TERMINAL_SCHEMA = {
             },
             "timeout": {
                 "type": "integer",
-                "description": f"Max seconds to wait (default: 180, foreground max: {FOREGROUND_MAX_TIMEOUT}). Returns INSTANTLY when command finishes — set high for long tasks, you won't wait unnecessarily. Foreground timeout above {FOREGROUND_MAX_TIMEOUT}s is rejected; use background=true for longer commands.",
+                "description": "Max seconds to wait (default: 180). Returns INSTANTLY when command finishes — set high for long tasks, you won't wait unnecessarily.",
                 "minimum": 1
             },
             "workdir": {
