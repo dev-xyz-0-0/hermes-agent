@@ -19,12 +19,15 @@ from hermes_cli.auth import (
     CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
     DEFAULT_AGENT_KEY_MIN_TTL_SECONDS,
     PROVIDER_REGISTRY,
+    _auth_store_lock,
     _codex_access_token_is_expiring,
     _decode_jwt_claims,
     _import_codex_cli_tokens,
     _load_auth_store,
     _load_provider_state,
     _resolve_zai_base_url,
+    _save_auth_store,
+    _save_provider_state,
     read_credential_pool,
     write_credential_pool,
 )
@@ -64,10 +67,10 @@ SUPPORTED_POOL_STRATEGIES = {
 }
 
 # Cooldown before retrying an exhausted credential.
-# 429 (rate-limited) cools down faster since quotas reset frequently.
-# 402 (billing/quota) and other codes use a longer default.
+# 429 (rate-limited) and 402 (billing/quota) both cool down after 1 hour.
+# Provider-supplied reset_at timestamps override these defaults.
 EXHAUSTED_TTL_429_SECONDS = 60 * 60          # 1 hour
-EXHAUSTED_TTL_DEFAULT_SECONDS = 24 * 60 * 60 # 24 hours
+EXHAUSTED_TTL_DEFAULT_SECONDS = 60 * 60      # 1 hour
 
 # Pool key prefix for custom OpenAI-compatible endpoints.
 # Custom endpoints all share provider='custom' but are keyed by their
@@ -477,6 +480,67 @@ class CredentialPool:
             logger.debug("Failed to sync from ~/.codex/auth.json: %s", exc)
         return entry
 
+    def _sync_device_code_entry_to_auth_store(self, entry: PooledCredential) -> None:
+        """Write refreshed pool entry tokens back to auth.json providers.
+
+        After a pool-level refresh, the pool entry has fresh tokens but
+        auth.json's ``providers.<id>`` still holds the pre-refresh state.
+        On the next ``load_pool()``, ``_seed_from_singletons()`` reads that
+        stale state and can overwrite the fresh pool entry — potentially
+        re-seeding a consumed single-use refresh token.
+
+        Applies to any OAuth provider whose singleton lives in auth.json
+        (currently Nous and OpenAI Codex).
+        """
+        if entry.source != "device_code":
+            return
+        try:
+            with _auth_store_lock():
+                auth_store = _load_auth_store()
+                if self.provider == "nous":
+                    state = _load_provider_state(auth_store, "nous")
+                    if state is None:
+                        return
+                    state["access_token"] = entry.access_token
+                    if entry.refresh_token:
+                        state["refresh_token"] = entry.refresh_token
+                    if entry.expires_at:
+                        state["expires_at"] = entry.expires_at
+                    if entry.agent_key:
+                        state["agent_key"] = entry.agent_key
+                    if entry.agent_key_expires_at:
+                        state["agent_key_expires_at"] = entry.agent_key_expires_at
+                    for extra_key in ("obtained_at", "expires_in", "agent_key_id",
+                                      "agent_key_expires_in", "agent_key_reused",
+                                      "agent_key_obtained_at"):
+                        val = entry.extra.get(extra_key)
+                        if val is not None:
+                            state[extra_key] = val
+                    if entry.inference_base_url:
+                        state["inference_base_url"] = entry.inference_base_url
+                    _save_provider_state(auth_store, "nous", state)
+
+                elif self.provider == "openai-codex":
+                    state = _load_provider_state(auth_store, "openai-codex")
+                    if not isinstance(state, dict):
+                        return
+                    tokens = state.get("tokens")
+                    if not isinstance(tokens, dict):
+                        return
+                    tokens["access_token"] = entry.access_token
+                    if entry.refresh_token:
+                        tokens["refresh_token"] = entry.refresh_token
+                    if entry.last_refresh:
+                        state["last_refresh"] = entry.last_refresh
+                    _save_provider_state(auth_store, "openai-codex", state)
+
+                else:
+                    return
+
+                _save_auth_store(auth_store)
+        except Exception as exc:
+            logger.debug("Failed to sync %s pool entry back to auth store: %s", self.provider, exc)
+
     def _refresh_entry(self, entry: PooledCredential, *, force: bool) -> Optional[PooledCredential]:
         if entry.auth_type != AUTH_TYPE_OAUTH or not entry.refresh_token:
             if force:
@@ -511,6 +575,13 @@ class CredentialPool:
                     except Exception as wexc:
                         logger.debug("Failed to write refreshed token to credentials file: %s", wexc)
             elif self.provider == "openai-codex":
+                # Proactively sync from ~/.codex/auth.json before refresh.
+                # The Codex CLI (or another Hermes profile) may have already
+                # consumed our refresh_token.  Syncing first avoids a
+                # "refresh_token_reused" error when the CLI has a newer pair.
+                synced = self._sync_codex_entry_from_cli(entry)
+                if synced is not entry:
+                    entry = synced
                 refreshed = auth_mod.refresh_codex_oauth_pure(
                     entry.access_token,
                     entry.refresh_token,
@@ -596,6 +667,37 @@ class CredentialPool:
                     # Credentials file had a valid (non-expired) token — use it directly
                     logger.debug("Credentials file has valid token, using without refresh")
                     return synced
+            # For openai-codex: the refresh_token may have been consumed by
+            # the Codex CLI between our proactive sync and the refresh call.
+            # Re-sync and retry once.
+            if self.provider == "openai-codex":
+                synced = self._sync_codex_entry_from_cli(entry)
+                if synced.refresh_token != entry.refresh_token:
+                    logger.debug("Retrying Codex refresh with synced token from ~/.codex/auth.json")
+                    try:
+                        refreshed = auth_mod.refresh_codex_oauth_pure(
+                            synced.access_token,
+                            synced.refresh_token,
+                        )
+                        updated = replace(
+                            synced,
+                            access_token=refreshed["access_token"],
+                            refresh_token=refreshed["refresh_token"],
+                            last_refresh=refreshed.get("last_refresh"),
+                            last_status=STATUS_OK,
+                            last_status_at=None,
+                            last_error_code=None,
+                        )
+                        self._replace_entry(synced, updated)
+                        self._persist()
+                        self._sync_device_code_entry_to_auth_store(updated)
+                        return updated
+                    except Exception as retry_exc:
+                        logger.debug("Codex retry refresh also failed: %s", retry_exc)
+                elif not self._entry_needs_refresh(synced):
+                    logger.debug("Codex CLI has valid token, using without refresh")
+                    self._sync_device_code_entry_to_auth_store(synced)
+                    return synced
             self._mark_exhausted(entry, None)
             return None
 
@@ -610,6 +712,10 @@ class CredentialPool:
         )
         self._replace_entry(entry, updated)
         self._persist()
+        # Sync refreshed tokens back to auth.json providers so that
+        # _seed_from_singletons() on the next load_pool() sees fresh state
+        # instead of re-seeding stale/consumed tokens.
+        self._sync_device_code_entry_to_auth_store(updated)
         return updated
 
     def _entry_needs_refresh(self, entry: PooledCredential) -> bool:
