@@ -3518,6 +3518,21 @@ class AIAgent:
     def _thread_identity(self) -> str:
         thread = threading.current_thread()
         return f"{thread.name}:{thread.ident}"
+    
+    def _api_timeout_seconds(self) -> float:
+        """Fail model API calls before the cron/gateway watchdog kills the job."""
+        try:
+            value = float(os.getenv("HERMES_API_TIMEOUT", "120"))
+        except (TypeError, ValueError):
+            value = 120.0
+        return max(10.0, value)
+
+    def _openai_max_retries(self) -> int:
+        """Let Hermes handle retries instead of the SDK multiplying timeout time."""
+        try:
+            return int(os.getenv("HERMES_OPENAI_MAX_RETRIES", "0"))
+        except (TypeError, ValueError):
+            return 0
 
     def _client_log_context(self) -> str:
         provider = getattr(self, "provider", "unknown")
@@ -3577,7 +3592,11 @@ class AIAgent:
                 self._client_log_context(),
             )
             return client
-        client = OpenAI(**client_kwargs)
+        openai_kwargs = dict(client_kwargs)
+        openai_kwargs.setdefault("timeout", self._api_timeout_seconds())
+        openai_kwargs.setdefault("max_retries", self._openai_max_retries())
+
+        client = OpenAI(**openai_kwargs)
         logger.info(
             "OpenAI client created (%s, shared=%s) %s",
             reason,
@@ -4348,7 +4367,7 @@ class AIAgent:
         def _call_chat_completions():
             """Stream a chat completions response."""
             import httpx as _httpx
-            _base_timeout = float(os.getenv("HERMES_API_TIMEOUT", 1800.0))
+            _base_timeout = self._api_timeout_seconds()
             _stream_read_timeout = float(os.getenv("HERMES_STREAM_READ_TIMEOUT", 60.0))
             stream_kwargs = {
                 **api_kwargs,
@@ -4722,8 +4741,10 @@ class AIAgent:
                 if request_client is not None:
                     self._close_request_openai_client(request_client, reason="stream_request_complete")
 
-        _stream_stale_timeout_base = float(os.getenv("HERMES_STREAM_STALE_TIMEOUT", 180.0))
-        # Scale the stale timeout for large contexts: slow models (like Opus)
+        _stream_stale_timeout_base = float(
+            os.getenv("HERMES_STREAM_STALE_TIMEOUT", str(self._api_timeout_seconds()))
+        )
+       # Scale the stale timeout for large contexts: slow models (like Opus)
         # can legitimately think for minutes before producing the first token
         # when the context is large.  Without this, the stale detector kills
         # healthy connections during the model's thinking phase, producing
@@ -4735,6 +4756,11 @@ class AIAgent:
             _stream_stale_timeout = max(_stream_stale_timeout_base, 240.0)
         else:
             _stream_stale_timeout = _stream_stale_timeout_base
+            
+        # Keep stale-stream detection below the cron/gateway watchdog.
+        # If the user wants longer, they can explicitly set HERMES_STREAM_STALE_TIMEOUT.
+        if "HERMES_STREAM_STALE_TIMEOUT" not in os.environ:
+            _stream_stale_timeout = min(_stream_stale_timeout, self._api_timeout_seconds())
 
         t = threading.Thread(target=_call, daemon=True)
         t.start()
@@ -5401,7 +5427,7 @@ class AIAgent:
         api_kwargs = {
             "model": self.model,
             "messages": sanitized_messages,
-            "timeout": float(os.getenv("HERMES_API_TIMEOUT", 1800.0)),
+            "timeout": self._api_timeout_seconds(),
         }
         if self.tools:
             api_kwargs["tools"] = self.tools
