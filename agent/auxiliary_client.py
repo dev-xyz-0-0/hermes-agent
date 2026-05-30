@@ -1035,7 +1035,13 @@ def _is_payment_error(exc: Exception) -> bool:
     """Detect payment/credit/quota exhaustion errors.
 
     Returns True for HTTP 402 (Payment Required) and for 429/other errors
-    whose message indicates billing exhaustion rather than rate limiting.
+    whose message indicates billing exhaustion or daily quota exhaustion
+    rather than transient rate limiting.
+
+    Daily token quota errors (e.g. Bedrock "Too many tokens per day",
+    Vertex AI "quota exceeded") are functionally equivalent to credit
+    exhaustion — the provider cannot serve the request until the quota
+    resets — and should trigger the same provider-fallback logic.
     """
     status = getattr(exc, "status_code", None)
     if status == 402:
@@ -1043,12 +1049,134 @@ def _is_payment_error(exc: Exception) -> bool:
     err_lower = str(exc).lower()
     # OpenRouter and other providers include "credits" or "afford" in 402 bodies,
     # but sometimes wrap them in 429 or other codes.
-    if status in (402, 429, None):
-        if any(kw in err_lower for kw in ("credits", "insufficient funds",
-                                           "can only afford", "billing",
-                                           "payment required")):
+    # Daily quota exhaustion from Bedrock, Vertex AI, and similar providers
+    # uses different language but is semantically identical to credit exhaustion.
+    if status in {402, 429, None}:
+        if any(kw in err_lower for kw in (
+            "credits", "insufficient funds",
+            "can only afford", "billing",
+            "payment required",
+            # Daily / monthly quota exhaustion keywords
+            "quota exceeded", "quota_exceeded",
+            "too many tokens per day", "daily limit",
+            "tokens per day", "daily quota",
+            "resource exhausted",  # Vertex AI / gRPC quota errors
+        )):
             return True
     return False
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Detect rate-limit errors that warrant provider fallback.
+
+    Returns True for HTTP 429 errors whose message indicates rate limiting
+    (as opposed to billing/quota exhaustion, which _is_payment_error handles).
+    Also catches OpenAI SDK RateLimitError instances that may not set
+    .status_code on the exception object.
+    """
+    status = getattr(exc, "status_code", None)
+    err_lower = str(exc).lower()
+
+    # OpenAI SDK's RateLimitError sometimes omits .status_code —
+    # detect by class name so we don't miss these.  (PR #8023 pattern)
+    if type(exc).__name__ == "RateLimitError":
+        return True
+
+    if status == 429:
+        # Distinguish rate-limit from billing: billing keywords are handled
+        # by _is_payment_error, everything else on 429 is a rate limit.
+        if any(kw in err_lower for kw in (
+            "rate limit", "rate_limit", "too many requests",
+            "try again", "retry after", "resets in",
+        )):
+            return True
+        # Generic 429 without billing keywords = likely a rate limit
+        if not any(kw in err_lower for kw in (
+            "credits", "insufficient funds", "billing",
+            "payment required", "can only afford",
+        )):
+            return True
+    return False
+
+
+def _is_connection_error(exc: Exception) -> bool:
+    """Detect connection/network errors that warrant provider fallback.
+
+    Returns True for errors indicating the provider endpoint is unreachable
+    (DNS failure, connection refused, TLS errors, timeouts).  These are
+    distinct from API errors (4xx/5xx) which indicate the provider IS
+    reachable but returned an error.
+    """
+    try:
+        from openai import APIConnectionError, APITimeoutError
+        if isinstance(exc, (APIConnectionError, APITimeoutError)):
+            return True
+    except ImportError:
+        pass
+    # urllib3 / httpx / httpcore connection errors
+    err_type = type(exc).__name__
+    if any(kw in err_type for kw in ("Connection", "Timeout", "DNS", "SSL")):
+        return True
+    err_lower = str(exc).lower()
+    if any(kw in err_lower for kw in (
+        "connection refused", "name or service not known",
+        "no route to host", "network is unreachable",
+        "timed out", "connection reset",
+        # httpcore / httpx streaming premature-close errors.  These surface
+        # when a proxy or provider drops the connection mid-stream and are
+        # transient by nature — the request should be retried or rerouted.
+        # See issue #18458.
+        "incomplete chunked read",
+        "peer closed connection",
+        "response ended prematurely",
+        "unexpected eof",
+        "remoteprotocolerror",
+        "localprotocolerror",
+    )):
+        return True
+    return False
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    """Detect auth failures that should trigger provider-specific refresh."""
+    status = getattr(exc, "status_code", None)
+    if status == 401:
+        return True
+    err_lower = str(exc).lower()
+    return "error code: 401" in err_lower or "authenticationerror" in type(exc).__name__.lower()
+
+
+def _is_unsupported_parameter_error(exc: Exception, param: str) -> bool:
+    """Detect provider 400s for an unsupported request parameter.
+
+    Different OpenAI-compatible endpoints phrase the same class of error a few
+    ways: ``Unsupported parameter: X``, ``unsupported_parameter`` with a
+    ``param`` field, ``X is not supported``, ``unknown parameter: X``,
+    ``unrecognized request argument: X``.  We match on both the parameter
+    name and a generic "unsupported/unknown/unrecognized parameter" marker so
+    call sites can reactively retry without the offending key instead of
+    surfacing a noisy auxiliary failure.
+
+    Generalizes the temperature-specific detector that originally shipped
+    with PR #15621 so the same retry strategy can cover ``max_tokens``,
+    ``seed``, ``top_p``, and any future quirk. Credit @nicholasrae (PR #15416)
+    for the generalization pattern.
+    """
+    param_lower = (param or "").lower()
+    if not param_lower:
+        return False
+    err_lower = str(exc).lower()
+    if param_lower not in err_lower:
+        return False
+    return any(marker in err_lower for marker in (
+        "unsupported parameter",
+        "unsupported_parameter",
+        "not supported",
+        "does not support",
+        "unknown parameter",
+        "unrecognized request argument",
+        "unrecognized parameter",
+        "invalid parameter",
+    ))
 
 
 def _try_payment_fallback(
