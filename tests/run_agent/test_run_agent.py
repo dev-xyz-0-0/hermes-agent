@@ -3504,3 +3504,222 @@ class TestDeadRetryCode:
             f"Expected 2 occurrences of 'if retry_count >= max_retries:' "
             f"but found {occurrences}"
         )
+
+class TestCodexStreamNullOutputRecovery:
+    """Regression tests for Codex Responses stream output=None recovery."""
+
+    class _BrokenIterationStream:
+        """Stream context manager that raises during iteration.
+
+        This mimics the OpenAI SDK failure where the stream has already emitted
+        useful response.output_item.done events, but then crashes while parsing a
+        terminal response whose output is None.
+        """
+
+        def __init__(self, events):
+            self._events = list(events)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield from self._events
+            raise TypeError("'NoneType' object is not iterable")
+
+        def get_final_response(self):
+            raise AssertionError("get_final_response should not be reached")
+
+    class _BrokenFinalResponseStream:
+        """Stream context manager that raises from get_final_response()."""
+
+        def __init__(self, events):
+            self._events = list(events)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield from self._events
+
+        def get_final_response(self):
+            raise TypeError("'NoneType' object is not iterable")
+
+    def test_recovers_output_item_when_sdk_raises_during_stream_iteration(self, agent):
+        """Codex stream should recover collected output_item.done if SDK raises during iteration."""
+        output_item = SimpleNamespace(
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[
+                SimpleNamespace(
+                    type="output_text",
+                    text="Recovered from streamed output item.",
+                )
+            ],
+        )
+        events = [
+            SimpleNamespace(type="response.output_item.done", item=output_item),
+        ]
+
+        client = MagicMock()
+        client.responses.stream.return_value = self._BrokenIterationStream(events)
+
+        response = agent._run_codex_stream(
+            {
+                "model": "gpt-5.4-codex",
+                "instructions": "test",
+                "input": [{"role": "user", "content": "hello"}],
+                "store": False,
+            },
+            client=client,
+        )
+
+        assert response.status == "completed"
+        assert response.output == [output_item]
+        assert response.output[0].content[0].text == "Recovered from streamed output item."
+        client.responses.stream.assert_called_once()
+
+    def test_recovers_text_delta_when_sdk_raises_during_stream_iteration(self, agent):
+        """Codex stream should synthesize a message from text deltas if no tool calls occurred."""
+        events = [
+            SimpleNamespace(type="response.output_text.delta", delta="Hello "),
+            SimpleNamespace(type="response.output_text.delta", delta="world"),
+        ]
+
+        client = MagicMock()
+        client.responses.stream.return_value = self._BrokenIterationStream(events)
+
+        response = agent._run_codex_stream(
+            {
+                "model": "gpt-5.4-codex",
+                "instructions": "test",
+                "input": [{"role": "user", "content": "hello"}],
+                "store": False,
+            },
+            client=client,
+        )
+
+        assert response.status == "completed"
+        assert response.output_text == "Hello world"
+        assert len(response.output) == 1
+        assert response.output[0].type == "message"
+        assert response.output[0].content[0].text == "Hello world"
+
+    def test_falls_back_when_sdk_raises_during_iteration_without_recoverable_output(self, agent):
+        """If iteration parser crashes with no output items or text, use create(stream=True) fallback."""
+        client = MagicMock()
+        client.responses.stream.return_value = self._BrokenIterationStream([])
+
+        fallback_response = SimpleNamespace(
+            status="completed",
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[
+                        SimpleNamespace(
+                            type="output_text",
+                            text="Recovered through fallback.",
+                        )
+                    ],
+                )
+            ],
+        )
+
+        with patch.object(
+            agent,
+            "_run_codex_create_stream_fallback",
+            return_value=fallback_response,
+        ) as mock_fallback:
+            response = agent._run_codex_stream(
+                {
+                    "model": "gpt-5.4-codex",
+                    "instructions": "test",
+                    "input": [{"role": "user", "content": "hello"}],
+                    "store": False,
+                },
+                client=client,
+            )
+
+        assert response is fallback_response
+        mock_fallback.assert_called_once()
+        assert mock_fallback.call_args.args[0]["model"] == "gpt-5.4-codex"
+        assert mock_fallback.call_args.kwargs["client"] is client
+
+    def test_recovers_output_item_when_get_final_response_raises(self, agent):
+        """Existing recovery path: stream iteration succeeds but final response parser crashes."""
+        output_item = SimpleNamespace(
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[
+                SimpleNamespace(
+                    type="output_text",
+                    text="Recovered after get_final_response failed.",
+                )
+            ],
+        )
+        events = [
+            SimpleNamespace(type="response.output_item.done", item=output_item),
+        ]
+
+        client = MagicMock()
+        client.responses.stream.return_value = self._BrokenFinalResponseStream(events)
+
+        response = agent._run_codex_stream(
+            {
+                "model": "gpt-5.4-codex",
+                "instructions": "test",
+                "input": [{"role": "user", "content": "hello"}],
+                "store": False,
+            },
+            client=client,
+        )
+
+        assert response.status == "completed"
+        assert response.output == [output_item]
+        assert response.output[0].content[0].text == "Recovered after get_final_response failed."
+
+    def test_create_stream_fallback_backfill_uses_keyword_only_has_tool_calls(self, agent):
+        """Regression: _backfill_codex_stream_response requires has_tool_calls as keyword-only."""
+        terminal_response = SimpleNamespace(status="completed", output=None)
+        output_item = SimpleNamespace(
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[
+                SimpleNamespace(
+                    type="output_text",
+                    text="Recovered from create stream fallback.",
+                )
+            ],
+        )
+
+        stream_events = [
+            SimpleNamespace(type="response.output_item.done", item=output_item),
+            SimpleNamespace(type="response.completed", response=terminal_response),
+        ]
+
+        client = MagicMock()
+        client.responses.create.return_value = iter(stream_events)
+
+        response = agent._run_codex_create_stream_fallback(
+            {
+                "model": "gpt-5.4-codex",
+                "instructions": "test",
+                "input": [{"role": "user", "content": "hello"}],
+                "store": False,
+            },
+            client=client,
+        )
+
+        assert response.output == [output_item]
+        client.responses.create.assert_called_once()
+        assert client.responses.create.call_args.kwargs["stream"] is True

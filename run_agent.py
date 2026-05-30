@@ -3891,23 +3891,28 @@ class AIAgent:
         has_tool_calls = False
         first_delta_fired = False
         self._reasoning_deltas_fired = False
-        # Accumulate streamed text so we can recover if get_final_response()
-        # returns empty output (e.g. chatgpt.com backend-api sends
-        # response.incomplete instead of response.completed).
+
+        # Accumulate streamed text so we can recover if the SDK/backend returns
+        # output=None or output=[] at the end of the stream.
         self._codex_streamed_text_parts: list = []
+
         for attempt in range(max_stream_retries + 1):
             collected_output_items: list = []
+
             try:
                 with active_client.responses.stream(**api_kwargs) as stream:
                     for event in stream:
                         if self._interrupt_requested:
                             break
+
                         event_type = getattr(event, "type", "")
-                        # Fire callbacks on text content deltas (suppress during tool calls)
+
+                        # Fire callbacks on text content deltas.
                         if "output_text.delta" in event_type or event_type == "response.output_text.delta":
                             delta_text = getattr(event, "delta", "")
                             if delta_text:
                                 self._codex_streamed_text_parts.append(delta_text)
+
                             if delta_text and not has_tool_calls:
                                 if not first_delta_fired:
                                     first_delta_fired = True
@@ -3917,23 +3922,26 @@ class AIAgent:
                                         except Exception:
                                             pass
                                 self._fire_stream_delta(delta_text)
-                        # Track tool calls to suppress text streaming
+
+                        # Track tool calls to avoid synthesizing final text from
+                        # text deltas that may be commentary around a tool call.
                         elif "function_call" in event_type:
                             has_tool_calls = True
-                        # Fire reasoning callbacks
+
+                        # Fire reasoning callbacks.
                         elif "reasoning" in event_type and "delta" in event_type:
                             reasoning_text = getattr(event, "delta", "")
                             if reasoning_text:
                                 self._fire_reasoning_delta(reasoning_text)
-                        # Collect completed output items — some backends
-                        # (chatgpt.com/backend-api/codex) stream valid items
-                        # via response.output_item.done but the SDK's
-                        # get_final_response() returns an empty output list.
+
+                        # Collect completed output items. This is the key recovery
+                        # source when the final SDK response has output=None.
                         elif event_type == "response.output_item.done":
                             done_item = getattr(event, "item", None)
                             if done_item is not None:
                                 collected_output_items.append(done_item)
-                        # Log non-completed terminal events for diagnostics
+
+                        # Log terminal non-completed events for diagnostics.
                         elif event_type in ("response.incomplete", "response.failed"):
                             resp_obj = getattr(event, "response", None)
                             status = getattr(resp_obj, "status", None) if resp_obj else None
@@ -3941,10 +3949,13 @@ class AIAgent:
                             logger.warning(
                                 "Codex Responses stream received terminal event %s "
                                 "(status=%s, incomplete_details=%s, streamed_chars=%d). %s",
-                                event_type, status, incomplete_details,
+                                event_type,
+                                status,
+                                incomplete_details,
                                 sum(len(p) for p in self._codex_streamed_text_parts),
                                 self._client_log_context(),
                             )
+
                     try:
                         final_response = stream.get_final_response()
                     except TypeError as exc:
@@ -3952,11 +3963,6 @@ class AIAgent:
                         # Codex backend can leave response.output=None.
                         # The SDK then crashes with:
                         # TypeError: 'NoneType' object is not iterable
-                        #
-                        # At this point we may already have collected useful
-                        # output_item.done or output_text.delta events, so
-                        # recover from those instead of letting the outer loop
-                        # treat this as a non-retryable local TypeError.
                         if self._is_codex_none_output_parser_error(exc):
                             logger.warning(
                                 "Codex stream final parser failed with output=None; "
@@ -3977,8 +3983,8 @@ class AIAgent:
                                 )
                             else:
                                 logger.warning(
-                                    "Codex stream parser failed but no stream output was "
-                                    "available to backfill; using create(stream=True) fallback. %s",
+                                    "Codex stream final parser failed but no stream output "
+                                    "was available to backfill; using create(stream=True) fallback. %s",
                                     self._client_log_context(),
                                 )
                                 return self._run_codex_create_stream_fallback(
@@ -3996,7 +4002,55 @@ class AIAgent:
                         source="responses.stream",
                     )
                     return final_response
-            except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
+
+            except TypeError as exc:
+                # Important: the SDK can raise the same output=None parser crash
+                # during `for event in stream`, before get_final_response() runs.
+                if self._is_codex_none_output_parser_error(exc):
+                    logger.warning(
+                        "Codex stream parser failed during stream iteration with output=None; "
+                        "attempting local stream backfill. collected_items=%d "
+                        "streamed_chars=%d %s",
+                        len(collected_output_items),
+                        sum(len(p) for p in self._codex_streamed_text_parts),
+                        self._client_log_context(),
+                    )
+
+                    if collected_output_items or (
+                        self._codex_streamed_text_parts and not has_tool_calls
+                    ):
+                        final_response = SimpleNamespace(
+                            status="completed",
+                            output=[],
+                            output_text="".join(self._codex_streamed_text_parts),
+                        )
+
+                        return self._backfill_codex_stream_response(
+                            final_response,
+                            collected_output_items,
+                            self._codex_streamed_text_parts,
+                            has_tool_calls=has_tool_calls,
+                            source="responses.stream.iteration",
+                        )
+
+                    logger.warning(
+                        "Codex stream parser failed during iteration but no stream output "
+                        "was available to backfill; using create(stream=True) fallback. %s",
+                        self._client_log_context(),
+                    )
+                    return self._run_codex_create_stream_fallback(
+                        api_kwargs,
+                        client=active_client,
+                    )
+
+                raise
+
+            except (
+                _httpx.RemoteProtocolError,
+                _httpx.ReadTimeout,
+                _httpx.ConnectError,
+                ConnectionError,
+            ) as exc:
                 if attempt < max_stream_retries:
                     logger.debug(
                         "Codex Responses stream transport failed (attempt %s/%s); retrying. %s error=%s",
@@ -4006,15 +4060,18 @@ class AIAgent:
                         exc,
                     )
                     continue
+
                 logger.debug(
                     "Codex Responses stream transport failed; falling back to create(stream=True). %s error=%s",
                     self._client_log_context(),
                     exc,
                 )
                 return self._run_codex_create_stream_fallback(api_kwargs, client=active_client)
+
             except RuntimeError as exc:
                 err_text = str(exc)
                 missing_completed = "response.completed" in err_text
+
                 if missing_completed and attempt < max_stream_retries:
                     logger.debug(
                         "Responses stream closed before completion (attempt %s/%s); retrying. %s",
@@ -4023,12 +4080,14 @@ class AIAgent:
                         self._client_log_context(),
                     )
                     continue
+
                 if missing_completed:
                     logger.debug(
                         "Responses stream did not emit response.completed; falling back to create(stream=True). %s",
                         self._client_log_context(),
                     )
                     return self._run_codex_create_stream_fallback(api_kwargs, client=active_client)
+
                 raise
 
     def _run_codex_create_stream_fallback(self, api_kwargs: dict, client: Any = None):
@@ -4048,6 +4107,7 @@ class AIAgent:
         terminal_response = None
         collected_output_items: list = []
         collected_text_deltas: list = []
+        has_tool_calls = False
         try:
             for event in stream_or_response:
                 event_type = getattr(event, "type", None)
@@ -4067,6 +4127,8 @@ class AIAgent:
                         delta = event.get("delta", "")
                     if delta:
                         collected_text_deltas.append(delta)
+                elif event_type and "function_call" in event_type:
+                    has_tool_calls = True
 
                 if event_type not in {"response.completed", "response.incomplete", "response.failed"}:
                     continue
@@ -4079,7 +4141,7 @@ class AIAgent:
                         terminal_response,
                         collected_output_items,
                         collected_text_deltas,
-                        has_tool_calls=False,
+                        has_tool_calls=has_tool_calls,
                         source="responses.create(stream=True)",
                     )
                     return terminal_response
