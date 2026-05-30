@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
-
+import pytest
 import tools.skills_tool as skills_tool_module
 from agent.skill_commands import (
     build_plan_path,
@@ -37,6 +37,17 @@ description: Description for {name}.
     (skill_dir / "SKILL.md").write_text(content)
     return skill_dir
 
+
+def _symlink_category(skills_dir: Path, linked_root: Path, category: str) -> Path:
+    """Create a category symlink under skills_dir pointing outside the tree."""
+    external_category = linked_root / category
+    external_category.mkdir(parents=True, exist_ok=True)
+    symlink_path = skills_dir / category
+    try:
+        symlink_path.symlink_to(external_category, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable in test environment: {exc}")
+    return external_category
 
 class TestScanSkillCommands:
     def test_finds_skills(self, tmp_path):
