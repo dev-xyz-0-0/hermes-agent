@@ -1112,13 +1112,49 @@ class TelegramAdapter(BasePlatformAdapter):
                 return slug
 
         try:
+            # Filter out providers with 0 models so they do not appear in Telegram.
+            filtered_providers = []
+
+            for p in providers:
+                count = p.get("total_models")
+
+                if count is None:
+                    count = len(p.get("models", []))
+
+                try:
+                    count = int(count)
+                except (TypeError, ValueError):
+                    count = 0
+
+                if count <= 0:
+                    logger.info(
+                        "[%s] Skipping model picker provider with 0 models: %s",
+                        self.name,
+                        {
+                            "slug": p.get("slug"),
+                            "name": p.get("name"),
+                            "total_models": p.get("total_models"),
+                            "models_count": len(p.get("models", [])),
+                        },
+                    )
+                    continue
+
+                filtered_providers.append(p)
+
+            providers = filtered_providers
+
             # Build provider buttons — 2 per row
             buttons: list = []
             for p in providers:
-                count = p.get("total_models", len(p.get("models", [])))
+                count = p.get("total_models")
+
+                if count is None:
+                    count = len(p.get("models", []))
+
                 label = f"{p['name']} ({count})"
                 if p.get("is_current"):
                     label = f"✓ {label}"
+
                 # Compact callback data: mp:<slug>  (max 64 bytes)
                 buttons.append(
                     InlineKeyboardButton(label, callback_data=f"mp:{p['slug']}")
@@ -1145,7 +1181,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 message_thread_id=int(thread_id) if thread_id else None,
             )
 
-            # Store picker state keyed by chat_id
+            # Store picker state keyed by chat_id.
+            # Important: store the filtered providers, not the original list.
             self._model_picker_state[str(chat_id)] = {
                 "msg_id": msg.message_id,
                 "providers": providers,
