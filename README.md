@@ -279,7 +279,7 @@ uv run pytest tests/run_agent/test_run_agent_codex_responses.py -q
 
 
 
-uv run pytest tests/agent/test_skill_commands.py -q
+uv run pytest tests/hermes_cli/test_auth_codex_provider.py -q
 
 
 generate summary on this commit :
