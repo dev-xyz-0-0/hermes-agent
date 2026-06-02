@@ -2,6 +2,36 @@
 
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
+
+## CodeGraph Usage
+
+Use CodeGraph first for codebase understanding.
+
+Before editing:
+1. Check relevant symbols, callers, imports, and dependencies using CodeGraph.
+2. Trace the execution path before proposing a fix.
+3. Read only the files needed for the task.
+4. Prefer small, targeted patches.
+
+Useful commands:
+
+```bash
+codegraph status
+codegraph init -i
+
+Use the CodeGraph MCP tools first when available.
+
+Primary tool:
+- mcp__codegraph.codegraph_context
+
+Useful tools:
+- mcp__codegraph.codegraph_search
+- mcp__codegraph.codegraph_callers
+- mcp__codegraph.codegraph_callees
+- mcp__codegraph.codegraph_impact
+- mcp__codegraph.codegraph_trace
+
+
 ## Development Environment
 
 ```bash
