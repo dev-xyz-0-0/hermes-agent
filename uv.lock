@@ -1676,6 +1676,7 @@ version = "0.8.13"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
+    { name = "croniter" },
     { name = "edge-tts" },
     { name = "exa-py" },
     { name = "fal-client" },
@@ -1810,6 +1811,7 @@ requires-dist = [
     { name = "aiohttp", marker = "extra == 'sms'", specifier = "==3.13.5" },
     { name = "anthropic", specifier = "==0.97.0" },
     { name = "atroposlib", marker = "extra == 'rl'", git = "https://github.com/NousResearch/atropos.git?rev=c20c85256e5a45ad31edf8b7276e9c5ee1995a30" },
+    { name = "croniter", specifier = "==6.2.2" },
     { name = "croniter", marker = "extra == 'cron'", specifier = "==6.2.2" },
     { name = "daytona", marker = "extra == 'daytona'", specifier = "==0.171.0" },
     { name = "dingtalk-stream", marker = "extra == 'dingtalk'", specifier = "==0.24.3" },
