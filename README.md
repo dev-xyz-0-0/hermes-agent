@@ -279,7 +279,7 @@ uv run pytest tests/run_agent/test_run_agent.py -q
 
 
 
-uv run pytest tests/gateway/test_empty_model_recovery.py -q
+uv run pytest tests/agent/test_credential_pool.py -q
 
 
 generate summary on this commit :
