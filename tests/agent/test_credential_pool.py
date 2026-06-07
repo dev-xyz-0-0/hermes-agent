@@ -1463,3 +1463,314 @@ def test_release_lease_decrements_counter(tmp_path, monkeypatch):
 
     pool.release_lease("cred-1")
     assert pool.active_lease_count("cred-1") == 0
+
+
+class TestLeastUsedStrategy:
+    """Regression: least_used strategy must increment request_count on select."""
+
+    def test_request_count_increments(self):
+        """Each select() call should increment the chosen entry's request_count."""
+        from unittest.mock import patch as _patch
+        from agent.credential_pool import CredentialPool, PooledCredential, STRATEGY_LEAST_USED
+
+        entries = [
+            PooledCredential(provider="test", id="a", label="a", auth_type="api_key",
+                             source="a", access_token="tok-a", priority=0, request_count=0),
+            PooledCredential(provider="test", id="b", label="b", auth_type="api_key",
+                             source="b", access_token="tok-b", priority=1, request_count=0),
+        ]
+        with _patch("agent.credential_pool.get_pool_strategy", return_value=STRATEGY_LEAST_USED):
+            pool = CredentialPool("test", entries)
+
+        # First select should pick entry with lowest count (both 0 → first)
+        e1 = pool.select()
+        assert e1 is not None
+        count_after_first = e1.request_count
+        assert count_after_first == 1, f"Expected 1 after first select, got {count_after_first}"
+
+        # Second select should pick the OTHER entry (now has lower count)
+        e2 = pool.select()
+        assert e2 is not None
+        assert e2.id != e1.id or e2.request_count == 2, (
+            "least_used should alternate or increment"
+        )
+
+# ── OpenAI Codex OAuth cross-process sync tests ────────────────────────────
+
+def _codex_auth_store(access: str, refresh: str) -> dict:
+    return {
+        "version": 1,
+        "active_provider": "openai-codex",
+        "providers": {
+            "openai-codex": {
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": access,
+                    "refresh_token": refresh,
+                    "id_token": "id-" + access,
+                },
+                "last_refresh": "2026-04-28T00:00:00Z",
+            }
+        },
+    }
+
+
+def test_sync_codex_entry_from_auth_store_adopts_newer_tokens(tmp_path, monkeypatch):
+    """When auth.json has newer Codex tokens, the pool entry should adopt them."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(tmp_path, _codex_auth_store("access-OLD", "refresh-OLD"))
+
+    from agent.credential_pool import load_pool
+
+    pool = load_pool("openai-codex")
+    entry = pool.select()
+    assert entry is not None
+    assert entry.access_token == "access-OLD"
+    assert entry.refresh_token == "refresh-OLD"
+
+    # Simulate `hermes auth openai-codex` replacing the token pair on disk.
+    _write_auth_store(tmp_path, _codex_auth_store("access-NEW", "refresh-NEW"))
+
+    synced = pool._sync_codex_entry_from_auth_store(entry)
+    assert synced is not entry
+    assert synced.access_token == "access-NEW"
+    assert synced.refresh_token == "refresh-NEW"
+    assert synced.last_status is None
+    assert synced.last_error_code is None
+    assert synced.last_error_reset_at is None
+
+
+def test_sync_codex_entry_noop_when_tokens_match(tmp_path, monkeypatch):
+    """When auth.json has the same tokens, sync should be a no-op."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(tmp_path, _codex_auth_store("access-same", "refresh-same"))
+
+    from agent.credential_pool import load_pool
+
+    pool = load_pool("openai-codex")
+    entry = pool.select()
+    assert entry is not None
+
+    synced = pool._sync_codex_entry_from_auth_store(entry)
+    assert synced is entry
+
+
+def test_codex_exhausted_entry_recovers_via_auth_store_sync(tmp_path, monkeypatch):
+    """An exhausted Codex entry should recover when auth.json has newer tokens.
+
+    Reproduces the Discord report (p1aceho1der, Apr 2026): after a Codex
+    rate-limit reset the user ran `hermes model` to reauth, but the pool
+    entry stayed marked EXHAUSTED with last_error_reset_at many hours in
+    the future — so `_available_entries` kept returning empty and every
+    request failed with "no available entries (all exhausted or empty)".
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    from agent.credential_pool import load_pool, STATUS_EXHAUSTED
+    from dataclasses import replace as dc_replace
+
+    _write_auth_store(tmp_path, _codex_auth_store("access-OLD", "refresh-OLD"))
+
+    pool = load_pool("openai-codex")
+    entry = pool.select()
+    assert entry is not None
+
+    # Mark entry as exhausted with last_error_reset_at one hour in the
+    # future (Codex 429 weekly-window pattern).
+    now = time.time()
+    exhausted = dc_replace(
+        entry,
+        last_status=STATUS_EXHAUSTED,
+        last_status_at=now,
+        last_error_code=429,
+        last_error_reset_at=now + 3600,
+    )
+    pool._replace_entry(entry, exhausted)
+    pool._persist()
+
+    # Sanity: before the reauth, _available_entries refuses to return
+    # this entry because last_error_reset_at is in the future.
+    # (clear_expired would only clear it AFTER exhausted_until elapsed.)
+    available_before = pool._available_entries(clear_expired=True, refresh=False)
+    assert available_before == []
+
+    # Simulate `hermes model` / `hermes auth` refreshing the tokens.
+    _write_auth_store(tmp_path, _codex_auth_store("access-FRESH", "refresh-FRESH"))
+
+    available = pool._available_entries(clear_expired=True, refresh=False)
+    assert len(available) == 1
+    assert available[0].access_token == "access-FRESH"
+    assert available[0].refresh_token == "refresh-FRESH"
+    assert available[0].last_status is None
+    assert available[0].last_error_reset_at is None
+
+
+def test_codex_exhausted_entry_stays_stuck_without_auth_store_update(tmp_path, monkeypatch):
+    """Regression guard: if auth.json tokens haven't changed, the exhausted
+    entry must stay stuck behind its reset window — sync must not spuriously
+    clear status just because the entry is STATUS_EXHAUSTED."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    from agent.credential_pool import load_pool, STATUS_EXHAUSTED
+    from dataclasses import replace as dc_replace
+
+    _write_auth_store(tmp_path, _codex_auth_store("access-same", "refresh-same"))
+
+    pool = load_pool("openai-codex")
+    entry = pool.select()
+    assert entry is not None
+
+    now = time.time()
+    exhausted = dc_replace(
+        entry,
+        last_status=STATUS_EXHAUSTED,
+        last_status_at=now,
+        last_error_code=429,
+        last_error_reset_at=now + 3600,
+    )
+    pool._replace_entry(entry, exhausted)
+    pool._persist()
+
+    # auth.json unchanged → sync returns same entry → exhausted_until check
+    # still skips it.
+    available = pool._available_entries(clear_expired=True, refresh=False)
+    assert available == []
+
+
+# ---------------------------------------------------------------------------
+# Codex OAuth terminal error quarantine
+# ---------------------------------------------------------------------------
+
+
+def _codex_auth_store(access_token: str, refresh_token: str) -> dict:
+    return {
+        "version": 1,
+        "active_provider": "openai-codex",
+        "providers": {
+            "openai-codex": {
+                "tokens": {
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                },
+            }
+        },
+    }
+
+
+def test_is_terminal_codex_oauth_refresh_error():
+    from hermes_cli.auth import AuthError, _is_terminal_codex_oauth_refresh_error
+
+    assert _is_terminal_codex_oauth_refresh_error(
+        AuthError("Refresh failed", provider="openai-codex", code="codex_refresh_failed", relogin_required=True)
+    )
+    assert _is_terminal_codex_oauth_refresh_error(
+        AuthError("No token", provider="openai-codex", code="codex_auth_missing_refresh_token", relogin_required=True)
+    )
+    assert _is_terminal_codex_oauth_refresh_error(
+        AuthError("Revoked", provider="openai-codex", code="invalid_grant", relogin_required=True)
+    )
+    assert _is_terminal_codex_oauth_refresh_error(
+        AuthError("Reused", provider="openai-codex", code="refresh_token_reused", relogin_required=True)
+    )
+    # transient 429/5xx: relogin_required=False -> not terminal
+    assert not _is_terminal_codex_oauth_refresh_error(
+        AuthError("Rate limit", provider="openai-codex", code="codex_refresh_failed", relogin_required=False)
+    )
+    # xAI error does not trigger Codex check
+    assert not _is_terminal_codex_oauth_refresh_error(
+        AuthError("Revoked", provider="xai-oauth", code="xai_refresh_failed", relogin_required=True)
+    )
+    # Generic exception
+    assert not _is_terminal_codex_oauth_refresh_error(ValueError("oops"))
+
+
+def test_codex_oauth_terminal_refresh_clears_auth_json_and_removes_pool_entries(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_OAUTH_ACCESS_TOKEN", raising=False)
+
+    _write_auth_store(tmp_path, _codex_auth_store("old-access-token", "old-refresh-token"))
+
+    from agent.credential_pool import PooledCredential, load_pool
+    import hermes_cli.auth as auth_mod
+    from hermes_cli.auth import AuthError
+
+    pool = load_pool("openai-codex")
+    selected = pool.select()
+    assert selected is not None
+    assert selected.source == "device_code"
+
+    # Add a manual API-key entry that must survive the quarantine.
+    pool.add_entry(PooledCredential.from_dict("openai-codex", {
+        "id": "manual-key",
+        "source": "manual",
+        "auth_type": "api_key",
+        "access_token": "manual-codex-key",
+    }))
+
+    refresh_calls = {"count": 0}
+
+    def _terminal_refresh_failure(*_args, **_kwargs):
+        refresh_calls["count"] += 1
+        raise AuthError(
+            "Refresh session has been revoked",
+            provider="openai-codex",
+            code="codex_refresh_failed",
+            relogin_required=True,
+        )
+
+    monkeypatch.setattr(auth_mod, "refresh_codex_oauth_pure", _terminal_refresh_failure)
+
+    assert pool.try_refresh_current() is None
+
+    # Only the manual entry survives.
+    assert [entry.id for entry in pool.entries()] == ["manual-key"]
+
+    # Auth.json tokens must be cleared.
+    auth_payload = json.loads((tmp_path / "hermes" / "auth.json").read_text())
+    codex_state = auth_payload["providers"]["openai-codex"]
+    tokens = codex_state.get("tokens", {})
+    assert not tokens.get("access_token")
+    assert not tokens.get("refresh_token")
+    assert codex_state["last_auth_error"]["code"] == "codex_refresh_failed"
+    assert codex_state["last_auth_error"]["relogin_required"] is True
+
+    # Persisted pool must also have only the manual entry.
+    assert [entry["id"] for entry in auth_payload["credential_pool"]["openai-codex"]] == ["manual-key"]
+
+    # A second try_refresh_current must not call refresh_codex_oauth_pure again.
+    assert pool.try_refresh_current() is None
+    assert refresh_calls["count"] == 1
+
+
+def test_codex_oauth_nonterminal_refresh_does_not_quarantine(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_OAUTH_ACCESS_TOKEN", raising=False)
+
+    _write_auth_store(tmp_path, _codex_auth_store("old-access-token", "old-refresh-token"))
+
+    from agent.credential_pool import load_pool
+    import hermes_cli.auth as auth_mod
+    from hermes_cli.auth import AuthError
+
+    pool = load_pool("openai-codex")
+    assert pool.select() is not None
+
+    def _transient_failure(*_args, **_kwargs):
+        raise AuthError(
+            "Rate limited",
+            provider="openai-codex",
+            code="codex_refresh_failed",
+            relogin_required=False,
+        )
+
+    monkeypatch.setattr(auth_mod, "refresh_codex_oauth_pure", _transient_failure)
+
+    pool.try_refresh_current()
+
+    # Tokens must NOT be cleared from auth.json.
+    auth_payload = json.loads((tmp_path / "hermes" / "auth.json").read_text())
+    tokens = auth_payload["providers"]["openai-codex"].get("tokens", {})
+    assert tokens.get("access_token") == "old-access-token"
+    assert tokens.get("refresh_token") == "old-refresh-token"

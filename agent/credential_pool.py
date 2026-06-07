@@ -10,7 +10,7 @@ import uuid
 import os
 import re
 from dataclasses import dataclass, fields, replace
-from datetime import datetime
+from datetime import datetime , timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hermes_constants import OPENROUTER_BASE_URL
