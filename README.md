@@ -275,16 +275,16 @@ uv run pytest tests/cron/test_python_cron_no_agent.py -q
 
 uv run pytest tests/tools/test_skills_sync.py -q                 # Tool-level 
 
-uv run pytest tests/run_agent/test_run_agent_codex_responses.py -q      
+uv run pytest tests/run_agent/test_run_agent.py -q      
 
 
 
-uv run pytest tests/hermes_cli/test_auth_codex_provider.py -q
+uv run pytest tests/gateway/test_empty_model_recovery.py -q
 
 
 generate summary on this commit :
 
-git diff > diff.txt
+git diff HEAD > diff.txt
 
 tests/.py
 
