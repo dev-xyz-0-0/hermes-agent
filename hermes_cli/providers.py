@@ -60,6 +60,7 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
     ),
     "openai-api": HermesOverlay(
         transport="codex_responses",
+        extra_env_vars=("OPENAI_API_KEY",),
         base_url_override="https://api.openai.com/v1",
         base_url_env_var="OPENAI_BASE_URL",
     ),
