@@ -88,6 +88,30 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "openai/gpt-5.4-pro",
         "openai/gpt-5.4-nano",
     ],
+    # Native OpenAI Chat Completions (api.openai.com). Used by /model counts and
+    # provider_model_ids fallback when /v1/models is unavailable.
+    "openai": [
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5-mini",
+        "gpt-5.3-codex",
+        "gpt-5.2-codex",
+        "gpt-4.1",
+        "gpt-4o",
+        "gpt-4o-mini",
+    ],
+    "openai-api": [
+        "gpt-5.5",
+        "gpt-5.5-pro",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.4-nano",
+        "gpt-5-mini",
+        "gpt-5.3-codex",
+        "gpt-4.1",
+        "gpt-4o",
+        "gpt-4o-mini",
+    ],
     "openai-codex": [
         "gpt-5.5",
         "gpt-5.4-mini",
@@ -490,6 +514,7 @@ def check_nous_free_tier() -> bool:
 _PROVIDER_LABELS = {
     "openrouter": "OpenRouter",
     "openai-codex": "OpenAI Codex",
+    "openai-api": "OpenAI API",
     "copilot-acp": "GitHub Copilot ACP",
     "nous": "Nous Portal",
     "copilot": "GitHub Copilot",
@@ -1074,6 +1099,19 @@ def provider_model_ids(provider: Optional[str]) -> list[str]:
         from hermes_cli.codex_models import get_codex_model_ids
 
         return get_codex_model_ids()
+    
+    if normalized in ("openai", "openai-api"):
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if api_key:
+            base_raw = os.getenv("OPENAI_BASE_URL", "").strip().rstrip("/")
+            base = base_raw or "https://api.openai.com/v1"
+            try:
+                live = fetch_api_models(api_key, base)
+                if live:
+                    return live
+            except Exception:
+                pass
+            
     if normalized in {"copilot", "copilot-acp"}:
         try:
             live = _fetch_github_models(_resolve_copilot_catalog_api_key())
