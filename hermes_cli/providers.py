@@ -163,7 +163,7 @@ class ProviderDef:
 
 ALIASES: Dict[str, str] = {
     # openrouter
-    "openai": "openrouter",     # bare "openai" → route through aggregator
+    "openai": "openai",     # bare "openai" → route through aggregator
 
     # zai
     "glm": "zai",
@@ -245,6 +245,7 @@ ALIASES: Dict[str, str] = {
 _LABEL_OVERRIDES: Dict[str, str] = {
     "nous": "Nous Portal",
     "openai-codex": "OpenAI Codex",
+    "openai-api": "OpenAI API",
     "copilot-acp": "GitHub Copilot ACP",
     "local": "Local endpoint",
 }
@@ -362,10 +363,12 @@ def get_label(provider_id: str) -> str:
 # For direct import compat, expose as module-level dict
 # Built on demand by get_label() calls
 LABELS: Dict[str, str] = {
-    # Static entries for backward compat — get_label() is the proper API
+    # Static entries for backward compat — get_label() is the proper API 
     "openrouter": "OpenRouter",
     "nous": "Nous Portal",
     "openai-codex": "OpenAI Codex",
+    "openai-api": "OpenAI API",
+    "xai": "xAI",
     "copilot-acp": "GitHub Copilot ACP",
     "github-copilot": "GitHub Copilot",
     "anthropic": "Anthropic",
