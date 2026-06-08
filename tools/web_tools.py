@@ -88,7 +88,7 @@ def _get_backend() -> str:
     keys manually without running setup.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in ("parallel", "firecrawl", "tavily", "exa"):
+    if configured in ("parallel", "firecrawl", "tavily", "exa","xai"):
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
@@ -117,6 +117,16 @@ def _is_backend_available(backend: str) -> bool:
         return check_firecrawl_api_key()
     if backend == "tavily":
         return _has_env("TAVILY_API_KEY")
+    if backend == "xai":
+        # Cheap probe — env var OR auth.json has OAuth tokens. Must not
+        # call resolve_xai_http_credentials() here because the OAuth path
+        # can trigger a network token refresh, and _is_backend_available
+        # runs on every web_search dispatch + every `hermes tools` repaint.
+        try:
+            from tools.xai_http import has_xai_credentials
+            return has_xai_credentials()
+        except Exception:
+            return False
     return False
 
 # ─── Firecrawl Client ────────────────────────────────────────────────────────
@@ -189,6 +199,7 @@ def _web_requires_env() -> list[str]:
         "TAVILY_API_KEY",
         "FIRECRAWL_API_KEY",
         "FIRECRAWL_API_URL",
+         "XAI_API_KEY"
     ]
     if managed_nous_tools_enabled():
         requires.extend(

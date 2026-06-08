@@ -258,7 +258,7 @@ uv run pytest tests/run_agent/test_run_agent_codex_responses.py -q
 uv run pytest tests/agent/test_auxiliary_client.py -q
 
 uv run pytest tests/cron/test_scheduler.py -q
-uv run pytest tests/gateway/test_telegram_approval_buttons.py -q
+uv run pytest tests/tools/test_xai_web_search_tool.py -q
 
 
 uv run pytest tests/gateway/test_approve_deny_commands.py -q
@@ -284,7 +284,7 @@ uv run pytest tests/agent/test_auxiliary_client.py-q
 
 generate summary on this commit :
 
-git diff HEAD > diff.txt
+git diff > diff.txt
 
 tests/.py
 
