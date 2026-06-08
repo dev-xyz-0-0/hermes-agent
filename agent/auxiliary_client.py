@@ -302,24 +302,27 @@ class _CodexCompletionsAdapter:
         if isinstance(extra_body, dict):
             reasoning_cfg = extra_body.get("reasoning")
             if isinstance(reasoning_cfg, dict):
-                if reasoning_cfg.get("enabled") is False:
-                    # Reasoning explicitly disabled — do not set reasoning
-                    # or include.  The Codex backend still thinks by
-                    # default, but we honor the caller's intent where the
-                    # API allows it.
-                    pass
-                else:
-                    effort = reasoning_cfg.get("effort", "medium")
-                    # Codex backend rejects "minimal"; clamp to "low" to
-                    # match the main-agent Codex transport behavior.
+                reasoning_enabled = False
+                effort = None
+
+                if reasoning_cfg.get("enabled") is True:
+                    reasoning_enabled = True
+                    effort = reasoning_cfg.get("effort") or "medium"
+                elif reasoning_cfg.get("effort"):
+                    reasoning_enabled = True
+                    effort = reasoning_cfg["effort"]
+
+                if reasoning_enabled:
                     if effort == "minimal":
                         effort = "low"
+
                     resp_kwargs["reasoning"] = {
                         "effort": effort,
                         "summary": "auto",
                     }
                     resp_kwargs["include"] = ["reasoning.encrypted_content"]
-
+            
+            
         # Tools support for flush_memories and similar callers
         tools = kwargs.get("tools")
         if tools:

@@ -255,7 +255,7 @@ uv run pytest tests/agent/test_skill_commands_reload.py -q
 
 uv run pytest tests/run_agent/test_run_agent_codex_responses.py -q
 
-uv run pytest tests/gateway/test_api_server.py -q
+uv run pytest tests/agent/test_auxiliary_client.py -q
 
 uv run pytest tests/cron/test_scheduler.py -q
 uv run pytest tests/gateway/test_telegram_approval_buttons.py -q

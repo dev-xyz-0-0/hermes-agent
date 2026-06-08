@@ -613,14 +613,16 @@ class TestGetTextAuxiliaryClient:
         call_kwargs = mock_openai.call_args
         assert call_kwargs.kwargs["base_url"] == "http://localhost:1234/v1"
 
-    def test_codex_fallback_when_nothing_else(self, codex_auth_dir):
+    def test_forced_main_falls_to_codex(self, codex_auth_dir, monkeypatch):
         with patch("agent.auxiliary_client._read_nous_auth", return_value=None), \
-             patch("agent.auxiliary_client.OpenAI") as mock_openai:
-            client, model = get_text_auxiliary_client()
-        assert model == "gpt-5.2-codex"
-        # Returns a CodexAuxiliaryClient wrapper, not a raw OpenAI client
+            patch("agent.auxiliary_client._resolve_custom_runtime", return_value=(None, None)), \
+            patch("agent.auxiliary_client._resolve_api_key_provider", return_value=(None, None)), \
+            patch("agent.auxiliary_client.OpenAI"):
+            client, model = _resolve_forced_provider("main")
+
         from agent.auxiliary_client import CodexAuxiliaryClient
         assert isinstance(client, CodexAuxiliaryClient)
+        assert model == "gpt-5.2-codex"
 
     def test_codex_pool_entry_takes_priority_over_auth_store(self):
         class _Entry:
@@ -1461,15 +1463,16 @@ class TestCodexAdapterReasoningTranslation:
         assert "reasoning" not in captured
         assert "include" not in captured
 
-    def test_reasoning_default_effort_when_only_enabled_flag(self):
-        """extra_body={"reasoning": {}} (truthy enabled by omission) → default 'medium'."""
+    def test_empty_reasoning_config_does_not_enable_reasoning_by_default(self):
+        """Regression: empty reasoning config must not send encrypted_content include."""
         adapter, captured = self._build_adapter()
         adapter.create(
             messages=[{"role": "user", "content": "hi"}],
             extra_body={"reasoning": {}},
         )
-        assert captured.get("reasoning") == {"effort": "medium", "summary": "auto"}
-        assert captured.get("include") == ["reasoning.encrypted_content"]
+
+        assert "reasoning" not in captured
+        assert "include" not in captured
 
     def test_no_extra_body_means_no_reasoning_keys(self):
         """Baseline: without extra_body, no reasoning/include is sent (preserves
@@ -1497,3 +1500,47 @@ class TestCodexAdapterReasoningTranslation:
             extra_body={"reasoning": "medium"},  # wrong shape — must not crash
         )
         assert "reasoning" not in captured
+        
+        
+    def test_empty_reasoning_config_does_not_enable_reasoning_by_default(self):
+        """Regression: default must not send include[reasoning.encrypted_content]."""
+        adapter, captured = self._build_adapter()
+        adapter.create(
+            messages=[{"role": "user", "content": "hi"}],
+            extra_body={"reasoning": {}},
+        )
+
+        assert "reasoning" not in captured
+        assert "include" not in captured
+
+
+    def test_reasoning_enabled_true_sends_reasoning_and_encrypted_content(self):
+        adapter, captured = self._build_adapter()
+        adapter.create(
+            messages=[{"role": "user", "content": "hi"}],
+            extra_body={"reasoning": {"enabled": True}},
+        )
+
+        assert captured.get("reasoning") == {"effort": "medium", "summary": "auto"}
+        assert captured.get("include") == ["reasoning.encrypted_content"]
+
+
+    def test_reasoning_effort_still_opts_in_reasoning(self):
+        adapter, captured = self._build_adapter()
+        adapter.create(
+            messages=[{"role": "user", "content": "hi"}],
+            extra_body={"reasoning": {"effort": "low"}},
+        )
+
+        assert captured.get("reasoning") == {"effort": "low", "summary": "auto"}
+        assert captured.get("include") == ["reasoning.encrypted_content"]
+        
+    def test_reasoning_enabled_true_defaults_to_medium(self):
+        adapter, captured = self._build_adapter()
+        adapter.create(
+            messages=[{"role": "user", "content": "hi"}],
+            extra_body={"reasoning": {"enabled": True}},
+        )
+
+        assert captured.get("reasoning") == {"effort": "medium", "summary": "auto"}
+        assert captured.get("include") == ["reasoning.encrypted_content"]
