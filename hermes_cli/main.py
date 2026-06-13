@@ -932,6 +932,7 @@ def select_provider_and_model(args=None):
         "kilocode": "Kilo Code",
         "alibaba": "Alibaba Cloud (DashScope)",
         "huggingface": "Hugging Face",
+        "evolink": "EvoLink",
         "xai": "xAI",
         "openai-api": "OpenAI API",
         "custom": "Custom endpoint",
@@ -958,6 +959,7 @@ def select_provider_and_model(args=None):
         ("gemini", "Google AI Studio (Gemini models — OpenAI-compatible endpoint)"),
         ("xai", "xAI (Grok models — direct API)"),
         ("openai-api", "OpenAI API (OpenAI models — direct API)"),
+        ("evolink", "EvoLink (multi-provider OpenAI-compatible API)"),
         ("zai", "Z.AI / GLM (Zhipu AI direct API)"),
         ("kimi-coding", "Kimi / Moonshot (Moonshot AI direct API)"),
         ("minimax", "MiniMax (global direct API)"),
@@ -1061,7 +1063,7 @@ def select_provider_and_model(args=None):
         _model_flow_anthropic(config, current_model)
     elif selected_provider == "kimi-coding":
         _model_flow_kimi(config, current_model)
-    elif selected_provider in ("openai-api","gemini","xai","zai", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface"):
+    elif selected_provider in ("openai-api","gemini","xai","zai", "evolink", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface"):
         _model_flow_api_key_provider(config, selected_provider, current_model)
 
 

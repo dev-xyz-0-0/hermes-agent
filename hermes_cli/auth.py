@@ -197,6 +197,14 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("DEEPSEEK_API_KEY",),
         base_url_env_var="DEEPSEEK_BASE_URL",
     ),
+    "evolink": ProviderConfig(
+        id="evolink",
+        name="EvoLink",
+        auth_type="api_key",
+        inference_base_url="https://direct.evolink.ai/v1",
+        api_key_env_vars=("EVOLINK_API_KEY",),
+        base_url_env_var="EVOLINK_BASE_URL",
+    ),
     "xai": ProviderConfig(
         id="xai",
         name="xAI",
@@ -837,6 +845,7 @@ def resolve_provider(
         "hf": "huggingface", "hugging-face": "huggingface", "huggingface-hub": "huggingface",
         "go": "opencode-go", "opencode-go-sub": "opencode-go",
         "kilo": "kilocode", "kilo-code": "kilocode", "kilo-gateway": "kilocode",
+        "evolink-ai": "evolink", "evolink.ai": "evolink",
         # Local server aliases — route through the generic custom provider
         "lmstudio": "custom", "lm-studio": "custom", "lm_studio": "custom",
         "ollama": "custom", "vllm": "custom", "llamacpp": "custom",
