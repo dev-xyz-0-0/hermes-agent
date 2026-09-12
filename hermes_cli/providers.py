@@ -99,6 +99,11 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="openai_chat",
         base_url_env_var="DEEPSEEK_BASE_URL",
     ),
+    "evolink": HermesOverlay(
+        transport="openai_chat",
+        is_aggregator=True,
+        base_url_env_var="EVOLINK_BASE_URL",
+    ),
     "alibaba": HermesOverlay(
         transport="openai_chat",
         base_url_env_var="DASHSCOPE_BASE_URL",
@@ -215,6 +220,10 @@ ALIASES: Dict[str, str] = {
 
     # deepseek
     "deep-seek": "deepseek",
+
+    # EvoLink
+    "evolink-ai": "evolink",
+    "evolink.ai": "evolink",
 
     # alibaba
     "dashscope": "alibaba",
@@ -378,6 +387,7 @@ LABELS: Dict[str, str] = {
     "minimax": "MiniMax",
     "minimax-cn": "MiniMax (China)",
     "deepseek": "DeepSeek",
+    "evolink": "EvoLink",
     "alibaba": "Alibaba Cloud (DashScope)",
     "vercel": "Vercel AI Gateway",
     "opencode": "OpenCode Zen",
