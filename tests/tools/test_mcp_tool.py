@@ -16,11 +16,17 @@ import pytest
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_mcp_tool(name="read_file", description="Read a file", input_schema=None):
+def _make_mcp_tool(
+    name="read_file",
+    description="Read a file",
+    input_schema=None,
+    annotations=None,
+):
     """Create a fake MCP Tool object matching the SDK interface."""
     tool = SimpleNamespace()
     tool.name = name
     tool.description = description
+    tool.annotations = annotations
     tool.inputSchema = input_schema or {
         "type": "object",
         "properties": {
@@ -255,6 +261,218 @@ class TestToolHandler:
         finally:
             _servers.pop("test_srv", None)
 
+
+# ---------------------------------------------------------------------------
+# MCP trust / approval gating
+# ---------------------------------------------------------------------------
+
+class TestMCPTrustGating:
+    def setup_method(self):
+        from tools.mcp_tool import (
+            _server_trust_levels,
+            _tool_read_only_hints,
+        )
+        _server_trust_levels.clear()
+        _tool_read_only_hints.clear()
+
+    def teardown_method(self):
+        from tools.mcp_tool import (
+            _server_trust_levels,
+            _tool_read_only_hints,
+            _servers,
+        )
+        _server_trust_levels.clear()
+        _tool_read_only_hints.clear()
+        _servers.pop("approval_srv", None)
+
+    def test_normalize_server_trust(self):
+        from tools.mcp_tool import (
+            _normalize_server_trust,
+            _TRUST_FULL,
+            _TRUST_UNTRUSTED,
+        )
+
+        assert _normalize_server_trust(None) == _TRUST_FULL
+        assert _normalize_server_trust("full") == _TRUST_FULL
+        assert _normalize_server_trust(" FULL ") == _TRUST_FULL
+        assert _normalize_server_trust("untrusted") == _TRUST_UNTRUSTED
+        assert _normalize_server_trust("UNTRUSTED") == _TRUST_UNTRUSTED
+        assert _normalize_server_trust("banana") == _TRUST_UNTRUSTED
+
+    @pytest.mark.parametrize(
+        "annotations",
+        [
+            {"readOnlyHint": True},
+            {"read_only_hint": True},
+            SimpleNamespace(readOnlyHint=True),
+            SimpleNamespace(read_only_hint=True),
+        ],
+    )
+    def test_read_only_hint_true_compatibility(self, annotations):
+        from tools.mcp_tool import _get_mcp_read_only_hint
+
+        tool = _make_mcp_tool("safe", annotations=annotations)
+        assert _get_mcp_read_only_hint(tool) is True
+
+    @pytest.mark.parametrize(
+        "annotations",
+        [
+            None,
+            {},
+            {"readOnlyHint": False},
+            {"readOnlyHint": "true"},
+            SimpleNamespace(read_only_hint=False),
+            SimpleNamespace(read_only_hint=None, readOnlyHint=False),
+        ],
+    )
+    def test_read_only_hint_missing_or_false_fails_closed(self, annotations):
+        from tools.mcp_tool import _get_mcp_read_only_hint
+
+        tool = _make_mcp_tool("write", annotations=annotations)
+        assert _get_mcp_read_only_hint(tool) is False
+
+    def test_full_server_does_not_require_approval(self):
+        from tools.mcp_tool import (
+            _mcp_tool_requires_approval,
+            _server_trust_levels,
+            _tool_read_only_hints,
+            _TRUST_FULL,
+        )
+
+        _server_trust_levels["approval_srv"] = _TRUST_FULL
+        _tool_read_only_hints["approval_srv"] = {"multiply": False}
+        assert _mcp_tool_requires_approval("approval_srv", "multiply") is False
+
+    def test_untrusted_read_only_tool_does_not_require_approval(self):
+        from tools.mcp_tool import (
+            _mcp_tool_requires_approval,
+            _server_trust_levels,
+            _tool_read_only_hints,
+            _TRUST_UNTRUSTED,
+        )
+
+        _server_trust_levels["approval_srv"] = _TRUST_UNTRUSTED
+        _tool_read_only_hints["approval_srv"] = {"add": True}
+        assert _mcp_tool_requires_approval("approval_srv", "add") is False
+
+    def test_untrusted_write_tool_requires_approval(self):
+        from tools.mcp_tool import (
+            _mcp_tool_requires_approval,
+            _server_trust_levels,
+            _tool_read_only_hints,
+            _TRUST_UNTRUSTED,
+        )
+
+        _server_trust_levels["approval_srv"] = _TRUST_UNTRUSTED
+        _tool_read_only_hints["approval_srv"] = {"multiply": False}
+        assert _mcp_tool_requires_approval("approval_srv", "multiply") is True
+
+    def test_untrusted_missing_tool_metadata_requires_approval(self):
+        from tools.mcp_tool import (
+            _mcp_tool_requires_approval,
+            _server_trust_levels,
+            _tool_read_only_hints,
+            _TRUST_UNTRUSTED,
+        )
+
+        _server_trust_levels["approval_srv"] = _TRUST_UNTRUSTED
+        _tool_read_only_hints["approval_srv"] = {}
+        assert _mcp_tool_requires_approval("approval_srv", "unknown") is True
+
+    def test_denied_untrusted_tool_never_calls_mcp(self):
+        from tools.mcp_tool import (
+            _make_tool_handler,
+            _server_trust_levels,
+            _tool_read_only_hints,
+            _servers,
+            _TRUST_UNTRUSTED,
+        )
+
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock()
+        _servers["approval_srv"] = _make_mock_server(
+            "approval_srv", session=mock_session
+        )
+        _server_trust_levels["approval_srv"] = _TRUST_UNTRUSTED
+        _tool_read_only_hints["approval_srv"] = {"multiply": False}
+
+        handler = _make_tool_handler("approval_srv", "multiply", 120)
+        with patch("tools.mcp_tool._request_mcp_tool_approval", return_value=False):
+            result = json.loads(handler({"a": 3, "b": 9}))
+
+        assert "not approved" in result["error"]
+        mock_session.call_tool.assert_not_called()
+
+    def test_approved_untrusted_tool_calls_mcp_once(self):
+        from tools.mcp_tool import (
+            _make_tool_handler,
+            _server_trust_levels,
+            _tool_read_only_hints,
+            _servers,
+            _TRUST_UNTRUSTED,
+        )
+
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(
+            return_value=_make_call_result("27", is_error=False)
+        )
+        _servers["approval_srv"] = _make_mock_server(
+            "approval_srv", session=mock_session
+        )
+        _server_trust_levels["approval_srv"] = _TRUST_UNTRUSTED
+        _tool_read_only_hints["approval_srv"] = {"multiply": False}
+
+        handler = _make_tool_handler("approval_srv", "multiply", 120)
+
+        def fake_run(coro, timeout=30):
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
+
+        with patch("tools.mcp_tool._request_mcp_tool_approval", return_value=True), \
+             patch("tools.mcp_tool._run_on_mcp_loop", side_effect=fake_run):
+            result = json.loads(handler({"a": 3, "b": 9}))
+
+        assert result["result"] == "27"
+        mock_session.call_tool.assert_called_once_with(
+            "multiply", arguments={"a": 3, "b": 9}
+        )
+
+    def test_untrusted_read_only_handler_bypasses_approval(self):
+        from tools.mcp_tool import (
+            _make_tool_handler,
+            _server_trust_levels,
+            _tool_read_only_hints,
+            _servers,
+            _TRUST_UNTRUSTED,
+        )
+
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(
+            return_value=_make_call_result("12", is_error=False)
+        )
+        _servers["approval_srv"] = _make_mock_server(
+            "approval_srv", session=mock_session
+        )
+        _server_trust_levels["approval_srv"] = _TRUST_UNTRUSTED
+        _tool_read_only_hints["approval_srv"] = {"add": True}
+        handler = _make_tool_handler("approval_srv", "add", 120)
+
+        def fake_run(coro, timeout=30):
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
+
+        with patch("tools.mcp_tool._request_mcp_tool_approval") as approval, \
+             patch("tools.mcp_tool._run_on_mcp_loop", side_effect=fake_run):
+            result = json.loads(handler({"a": 3, "b": 9}))
+
+        assert result["result"] == "12"
+        approval.assert_not_called()
 
 # ---------------------------------------------------------------------------
 # Tool registration (discovery + register)

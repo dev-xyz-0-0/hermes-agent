@@ -419,6 +419,98 @@ def resolve_gateway_approval(session_key: str, choice: str,
     return len(targets)
 
 
+def request_explicit_approval(*, title: str, description: str, command: str = "") -> bool:
+    """Request one-shot human approval for a sensitive non-terminal action.
+
+    This is a generic approval primitive for callers such as MCP tools.  The
+    caller is responsible for deciding that approval is required; this helper
+    only transports that request to the active gateway or CLI and blocks until
+    the user answers.
+
+    Security properties:
+      - one-shot only: only ``once`` is accepted as approval
+      - fail-closed: missing channels, notification failures, timeouts,
+        unregisters, and exceptions all deny the operation
+      - no dangerous-command detection or allowlist persistence is performed
+
+    Returns:
+        True only when the user explicitly approves this invocation once.
+    """
+    display_command = command or title
+    session_key = get_current_session_key()
+
+    # Prefer the gateway transport whenever the active session has a callback.
+    with _lock:
+        notify_cb = _gateway_notify_cbs.get(session_key)
+
+    if notify_cb is not None:
+        approval_data = {
+            "command": display_command,
+            "description": description,
+            "pattern_key": title,
+            "pattern_keys": [],
+            "approval_type": "explicit",
+            "allow_permanent": False,
+        }
+        entry = _ApprovalEntry(approval_data)
+
+        with _lock:
+            _gateway_queues.setdefault(session_key, []).append(entry)
+
+        try:
+            notify_cb(approval_data)
+        except Exception as exc:
+            logger.warning("Explicit approval notify failed: %s", exc)
+            with _lock:
+                queue = _gateway_queues.get(session_key, [])
+                if entry in queue:
+                    queue.remove(entry)
+                if not queue:
+                    _gateway_queues.pop(session_key, None)
+            return False
+
+        timeout = _get_approval_config().get("gateway_timeout", 300)
+        try:
+            timeout = int(timeout)
+        except (ValueError, TypeError):
+            timeout = 300
+
+        resolved = entry.event.wait(timeout=timeout)
+
+        with _lock:
+            queue = _gateway_queues.get(session_key, [])
+            if entry in queue:
+                queue.remove(entry)
+            if not queue:
+                _gateway_queues.pop(session_key, None)
+
+        # One-shot approval only.  Session/always choices deliberately do not
+        # authorize generic actions such as MCP writes.
+        return bool(resolved and entry.result == "once")
+
+    # CLI fallback.  Generic approvals are intentionally one-shot even though
+    # the existing prompt can display a session option.
+    if os.getenv("HERMES_INTERACTIVE"):
+        try:
+            choice = prompt_dangerous_approval(
+                display_command,
+                description,
+                allow_permanent=False,
+            )
+        except Exception:
+            logger.exception("Explicit CLI approval failed for %r", title)
+            return False
+        return choice == "once"
+
+    logger.warning(
+        "Explicit approval denied because no interactive approval channel is "
+        "available (title=%r, session=%r)",
+        title,
+        session_key,
+    )
+    return False
+
+
 def has_blocking_approval(session_key: str) -> bool:
     """Check if a session has one or more blocking gateway approvals waiting."""
     with _lock:

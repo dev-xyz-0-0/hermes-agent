@@ -244,7 +244,8 @@ uv run pytest tests/ -q          # Full suite (~3000 tests, ~3 min)
 tests/tools/test_send_message_missing_platforms.py
 
 
-uv run pytest tests/gateway/test_telegram_format.py -q
+uv run pytest tests/tools/test_approval_mcp.py -q
+uv run pytest tests/tools/test_approval.py -q
 
 python -m pytest tests/tools/test_managed_server_tool_support.py -q
 

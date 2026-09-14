@@ -17,6 +17,7 @@ Example config::
         command: "npx"
         args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
         env: {}
+        trust: "untrusted"   # full | untrusted (default: full)
         timeout: 120         # per-tool-call timeout in seconds (default: 120)
         connect_timeout: 60  # initial connection timeout (default: 60)
       github:
@@ -1067,6 +1068,11 @@ class MCPServerTask:
 
 _servers: Dict[str, MCPServerTask] = {}
 
+_TRUST_FULL = "full"
+_TRUST_UNTRUSTED = "untrusted"
+_server_trust_levels: Dict[str, str] = {}
+_tool_read_only_hints: Dict[str, Dict[str, bool]] = {}
+
 # Dedicated event loop running in a background daemon thread.
 _mcp_loop: Optional[asyncio.AbstractEventLoop] = None
 _mcp_thread: Optional[threading.Thread] = None
@@ -1079,6 +1085,96 @@ _lock = threading.Lock()
 # fails or times out.  PIDs are added after connection and removed on
 # normal server shutdown.
 _stdio_pids: set = set()
+
+
+def _normalize_server_trust(value: Any) -> str:
+    """Normalize MCP server trust level.
+
+    Missing trust defaults to ``full`` for backward compatibility. Unknown
+    values fail closed to ``untrusted``.
+    """
+    if value is None:
+        return _TRUST_FULL
+
+    normalized = str(value).strip().lower()
+    if normalized == _TRUST_FULL:
+        return _TRUST_FULL
+    if normalized == _TRUST_UNTRUSTED:
+        return _TRUST_UNTRUSTED
+
+    logger.warning(
+        "Unknown MCP trust level %r; treating server as untrusted",
+        value,
+    )
+    return _TRUST_UNTRUSTED
+
+
+def _get_mcp_read_only_hint(mcp_tool: Any) -> bool:
+    """Return True only when an MCP tool explicitly declares read-only.
+
+    Supports both protocol camelCase and Python-SDK snake_case forms. Missing,
+    malformed, or non-boolean values fail closed to write-capable.
+    """
+    annotations = getattr(mcp_tool, "annotations", None)
+    if annotations is None:
+        return False
+
+    if isinstance(annotations, dict):
+        if annotations.get("readOnlyHint") is True:
+            return True
+        if annotations.get("read_only_hint") is True:
+            return True
+        return False
+
+    value = getattr(annotations, "read_only_hint", None)
+    if value is not None:
+        return value is True
+
+    return getattr(annotations, "readOnlyHint", None) is True
+
+
+def _mcp_tool_requires_approval(server_name: str, tool_name: str) -> bool:
+    """Return True when an MCP call must receive explicit human approval."""
+    with _lock:
+        trust = _server_trust_levels.get(server_name, _TRUST_FULL)
+        read_only = _tool_read_only_hints.get(server_name, {}).get(
+            tool_name, False
+        )
+
+    return trust == _TRUST_UNTRUSTED and read_only is not True
+
+
+def _request_mcp_tool_approval(
+    server_name: str,
+    tool_name: str,
+    args: dict,
+) -> bool:
+    """Request one-shot approval for an untrusted MCP tool call."""
+    from tools.approval import request_explicit_approval
+
+    try:
+        rendered_args = json.dumps(
+            args,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+    except Exception:
+        rendered_args = repr(args)
+
+    max_chars = 4000
+    if len(rendered_args) > max_chars:
+        rendered_args = rendered_args[:max_chars] + "\n... [truncated]"
+
+    return request_explicit_approval(
+        title=f"MCP approval: {server_name}/{tool_name}",
+        command=f"MCP {server_name}.{tool_name}",
+        description=(
+            f"MCP tool '{tool_name}' on untrusted server "
+            f"'{server_name}' wants to run.\n\n"
+            f"Arguments:\n{rendered_args}"
+        ),
+    )
 
 
 def _snapshot_child_pids() -> set:
@@ -1172,7 +1268,10 @@ def _load_mcp_config() -> Dict[str, dict]:
     Returns a dict of ``{server_name: server_config}`` or empty dict.
     Server config can contain either ``command``/``args``/``env`` for stdio
     transport or ``url``/``headers`` for HTTP transport, plus optional
-    ``timeout``, ``connect_timeout``, and ``auth`` overrides.
+    ``timeout``, ``connect_timeout``, ``auth``, and ``trust`` overrides.
+
+    ``trust`` may be ``full`` or ``untrusted``. Untrusted servers require
+    approval for tools that do not explicitly advertise ``readOnlyHint=True``.
 
     ``${ENV_VAR}`` placeholders in string values are resolved from
     ``os.environ`` (which includes ``~/.hermes/.env`` loaded at startup).
@@ -1222,6 +1321,10 @@ async def _connect_server(name: str, config: dict) -> MCPServerTask:
 def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """Return a sync handler that calls an MCP tool via the background loop.
 
+    For servers configured with ``trust: untrusted``, any tool that does not
+    explicitly advertise ``readOnlyHint=True`` requires one-shot human
+    approval before the MCP RPC is sent.
+
     The handler conforms to the registry's dispatch interface:
     ``handler(args_dict, **kwargs) -> str``
     """
@@ -1233,6 +1336,51 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             return json.dumps({
                 "error": f"MCP server '{server_name}' is not connected"
             })
+
+        # Security boundary: approval must happen BEFORE session.call_tool().
+        if _mcp_tool_requires_approval(server_name, tool_name):
+            logger.info(
+                "MCP tool %s/%s requires approval "
+                "(server trust=untrusted, readOnlyHint!=true)",
+                server_name,
+                tool_name,
+            )
+            try:
+                approved = _request_mcp_tool_approval(
+                    server_name,
+                    tool_name,
+                    args,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "MCP approval request failed for %s/%s",
+                    server_name,
+                    tool_name,
+                )
+                return json.dumps({
+                    "error": _sanitize_error(
+                        f"MCP approval failed: {type(exc).__name__}: {exc}"
+                    )
+                })
+
+            if not approved:
+                logger.info(
+                    "MCP tool %s/%s denied by user",
+                    server_name,
+                    tool_name,
+                )
+                return json.dumps({
+                    "error": (
+                        f"MCP tool '{tool_name}' on untrusted server "
+                        f"'{server_name}' was not approved"
+                    )
+                })
+
+            logger.info(
+                "MCP tool %s/%s approved by user",
+                server_name,
+                tool_name,
+            )
 
         async def _call():
             result = await server.session.call_tool(tool_name, arguments=args)
@@ -1248,14 +1396,12 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                     )
                 })
 
-            # Collect text from content blocks
             parts: List[str] = []
             for block in (result.content or []):
                 if hasattr(block, "text"):
                     parts.append(block.text)
             text_result = "\n".join(parts) if parts else ""
 
-            # Prefer structuredContent (machine-readable JSON) over plain text
             structured = getattr(result, "structuredContent", None)
             if structured is not None:
                 return json.dumps({"result": structured})
@@ -1275,7 +1421,6 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             })
 
     return _handler
-
 
 def _make_list_resources_handler(server_name: str, tool_timeout: float):
     """Return a sync handler that lists resources from an MCP server."""
@@ -1740,6 +1885,13 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
     registered_names: List[str] = []
     toolset_name = f"mcp-{name}"
 
+    trust = _normalize_server_trust(config.get("trust"))
+    with _lock:
+        _server_trust_levels[name] = trust
+        _tool_read_only_hints[name] = {}
+
+    logger.info("MCP server '%s': trust=%s", name, trust)
+
     # Selective tool loading: honour include/exclude lists from config.
     # Rules (matching issue #690 spec):
     #   tools.include — whitelist: only these tool names are registered
@@ -1761,6 +1913,18 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
         if not _should_register(mcp_tool.name):
             logger.debug("MCP server '%s': skipping tool '%s' (filtered by config)", name, mcp_tool.name)
             continue
+
+        read_only = _get_mcp_read_only_hint(mcp_tool)
+        with _lock:
+            _tool_read_only_hints.setdefault(name, {})[mcp_tool.name] = read_only
+
+        logger.debug(
+            "MCP server '%s': tool '%s' readOnlyHint=%s",
+            name,
+            mcp_tool.name,
+            read_only,
+        )
+
         schema = _convert_mcp_schema(name, mcp_tool)
         tool_name_prefixed = schema["name"]
 
@@ -2114,6 +2278,9 @@ def shutdown_mcp_servers():
 
     # Fast path: nothing to shut down.
     if not servers_snapshot:
+        with _lock:
+            _server_trust_levels.clear()
+            _tool_read_only_hints.clear()
         _stop_mcp_loop()
         return
 
@@ -2129,6 +2296,8 @@ def shutdown_mcp_servers():
                 )
         with _lock:
             _servers.clear()
+            _server_trust_levels.clear()
+            _tool_read_only_hints.clear()
 
     with _lock:
         loop = _mcp_loop
