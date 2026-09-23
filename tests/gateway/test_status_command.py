@@ -149,7 +149,10 @@ async def test_handle_message_persists_agent_token_counts(monkeypatch):
     assert result == "ok"
     runner.session_store.update_session.assert_called_once_with(
         session_entry.session_key,
+        input_tokens=120,
+        output_tokens=45,
         last_prompt_tokens=80,
+        model='openai/test-model'
     )
 
 

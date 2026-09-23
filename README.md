@@ -246,6 +246,9 @@ tests/tools/test_send_message_missing_platforms.py
 
 uv run pytest tests/tools/test_approval_mcp.py -q
 uv run pytest tests/tools/test_approval.py -q
+uv run pytest tests/gateway/test_status_command.py -q
+
+
 
 python -m pytest tests/tools/test_managed_server_tool_support.py -q
 

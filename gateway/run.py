@@ -3189,12 +3189,13 @@ class GatewayRunner:
                             skip_db=agent_persisted,
                         )
             
-            # Token counts and model are now persisted by the agent directly.
-            # Keep only last_prompt_tokens here for context-window tracking and
-            # compression decisions.
+            # Update session with actual prompt token count and model from the agent
             self.session_store.update_session(
                 session_entry.session_key,
+                input_tokens=agent_result.get("input_tokens", 0),
+                output_tokens=agent_result.get("output_tokens", 0),
                 last_prompt_tokens=agent_result.get("last_prompt_tokens", 0),
+                model=agent_result.get("model"),
             )
 
             # Auto voice reply: send TTS audio before the text response
