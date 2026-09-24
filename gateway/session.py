@@ -807,20 +807,34 @@ class SessionStore:
         return entry
 
     def update_session(
-        self,
+        self, 
         session_key: str,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
         last_prompt_tokens: int = None,
+        model: str = None,
     ) -> None:
-        """Update lightweight session metadata after an interaction."""
-        with self._lock:
-            self._ensure_loaded_locked()
-
-            if session_key in self._entries:
-                entry = self._entries[session_key]
-                entry.updated_at = _now()
-                if last_prompt_tokens is not None:
-                    entry.last_prompt_tokens = last_prompt_tokens
-                self._save()
+        """Update a session's metadata after an interaction."""
+        self._ensure_loaded()
+        
+        if session_key in self._entries:
+            entry = self._entries[session_key]
+            entry.updated_at = datetime.now()
+            entry.input_tokens += input_tokens
+            entry.output_tokens += output_tokens
+            if last_prompt_tokens is not None:
+                entry.last_prompt_tokens = last_prompt_tokens
+            entry.total_tokens = entry.input_tokens + entry.output_tokens
+            self._save()
+            
+            if self._db:
+                try:
+                    self._db.update_token_counts(
+                        entry.session_id, input_tokens, output_tokens,
+                        model=model,
+                    )
+                except Exception as e:
+                    logger.debug("Session DB operation failed: %s", e)
 
     def reset_session(self, session_key: str) -> Optional[SessionEntry]:
         """Force reset a session, creating a new session ID."""
