@@ -1024,10 +1024,98 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=str(e))
 
     async def send_exec_approval(
-        self, chat_id: str, command: str, session_key: str,
+        self,
+        chat_id: str,
+        command: str,
+        session_key: str,
         description: str = "dangerous command",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
+        """Send an inline-keyboard approval prompt with interactive buttons.
+
+        The buttons call ``resolve_gateway_approval()`` to unblock the waiting
+        agent thread — same mechanism as the text ``/approve`` flow.
+        """
+        if not self._bot:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            cmd_preview = command[:3500] + "..." if len(command) > 3500 else command
+
+            text = (
+                "⚠️ Command Approval Required\n\n"
+                f"{cmd_preview}\n\n"
+                f"Reason: {description}"
+            )
+
+            # Resolve thread context for thread replies
+            thread_id = None
+            if metadata:
+                thread_id = (
+                    metadata.get("thread_id")
+                    or metadata.get("message_thread_id")
+                )
+
+            import itertools
+
+            if not hasattr(self, "_approval_counter"):
+                self._approval_counter = itertools.count(1)
+
+            approval_id = next(self._approval_counter)
+
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "✅ Allow Once",
+                        callback_data=f"ea:once:{approval_id}",
+                    ),
+                    InlineKeyboardButton(
+                        "✅ Session",
+                        callback_data=f"ea:session:{approval_id}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "✅ Always",
+                        callback_data=f"ea:always:{approval_id}",
+                    ),
+                    InlineKeyboardButton(
+                        "❌ Deny",
+                        callback_data=f"ea:deny:{approval_id}",
+                    ),
+                ],
+            ])
+
+            kwargs: Dict[str, Any] = {
+                "chat_id": int(chat_id),
+                "text": text,
+                "reply_markup": keyboard,
+            }
+
+            if thread_id:
+                kwargs["message_thread_id"] = int(thread_id)
+
+            msg = await self._bot.send_message(**kwargs)
+
+            # Store session_key keyed by approval_id for callback handler
+            self._approval_state[approval_id] = session_key
+
+            return SendResult(
+                success=True,
+                message_id=str(msg.message_id),
+            )
+
+        except Exception as e:
+            logger.exception(
+                "[%s] send_exec_approval failed",
+                self.name,
+            )
+            return SendResult(
+                success=False,
+                error=str(e),
+            )
+
+
         """Send an inline-keyboard approval prompt with interactive buttons.
 
         The buttons call ``resolve_gateway_approval()`` to unblock the waiting

@@ -149,6 +149,288 @@ class TestTelegramExecApproval:
         kwargs = adapter._bot.send_message.call_args[1]
         assert "..." in kwargs["text"]
         assert len(kwargs["text"]) < 5000
+        
+    @pytest.mark.asyncio
+    async def test_does_not_use_parse_mode(self):
+        """Approval messages must be sent as plain text.
+
+        Arbitrary MCP commands may contain Telegram Markdown-sensitive
+        characters. Using Markdown/MarkdownV2 can cause Telegram to reject
+        otherwise valid approval prompts.
+        """
+        adapter = _make_adapter()
+
+        mock_msg = MagicMock()
+        mock_msg.message_id = 42
+        adapter._bot.send_message = AsyncMock(return_value=mock_msg)
+
+        await adapter.send_exec_approval(
+            chat_id="12345",
+            command="echo test",
+            session_key="s",
+            description="test command",
+        )
+
+        kwargs = adapter._bot.send_message.call_args[1]
+
+        assert "parse_mode" not in kwargs
+
+
+    @pytest.mark.asyncio
+    async def test_markdown_special_characters_are_sent_as_plain_text(self):
+        """Commands containing Markdown-sensitive characters must not break."""
+        adapter = _make_adapter()
+
+        mock_msg = MagicMock()
+        mock_msg.message_id = 42
+        adapter._bot.send_message = AsyncMock(return_value=mock_msg)
+
+        command = (
+            "python script.py "
+            "--token='abc_def' "
+            "--value='*test*' "
+            "--json='{\"key\":\"[value](url)\"}' "
+            "--code='`dangerous`'"
+        )
+
+        result = await adapter.send_exec_approval(
+            chat_id="12345",
+            command=command,
+            session_key="s",
+            description="MCP execution_test",
+        )
+
+        assert result.success is True
+
+        kwargs = adapter._bot.send_message.call_args[1]
+
+        # The command should appear unchanged.
+        assert command in kwargs["text"]
+
+        # Most importantly, Telegram should not be asked to parse it.
+        assert "parse_mode" not in kwargs
+
+
+    @pytest.mark.asyncio
+    async def test_backticks_do_not_break_approval_message(self):
+        """Regression test for Telegram 'Can't parse entities' failures."""
+        adapter = _make_adapter()
+
+        mock_msg = MagicMock()
+        mock_msg.message_id = 42
+        adapter._bot.send_message = AsyncMock(return_value=mock_msg)
+
+        command = "echo `hello` && echo ```test```"
+
+        result = await adapter.send_exec_approval(
+            chat_id="12345",
+            command=command,
+            session_key="s",
+        )
+
+        assert result.success is True
+
+        kwargs = adapter._bot.send_message.call_args[1]
+
+        assert command in kwargs["text"]
+        assert "parse_mode" not in kwargs
+
+
+    @pytest.mark.asyncio
+    async def test_mcp_json_arguments_do_not_break_approval_message(self):
+        """Realistic MCP tool arguments should be safe in Telegram prompts."""
+        adapter = _make_adapter()
+
+        mock_msg = MagicMock()
+        mock_msg.message_id = 42
+        adapter._bot.send_message = AsyncMock(return_value=mock_msg)
+
+        command = (
+            'mcp_dev_okx_solana_execute_swap '
+            '{"token_address":"HUcEu35oz1yku1yLBSYRL1UyAnAh59ZCkAYPRe2xpump",'
+            '"amount":"1000000",'
+            '"slippage":"0.5%"}'
+        )
+
+        result = await adapter.send_exec_approval(
+            chat_id="12345",
+            command=command,
+            session_key="agent:main:telegram:12345",
+            description="Execute MCP trading tool",
+        )
+
+        assert result.success is True
+
+        kwargs = adapter._bot.send_message.call_args[1]
+
+        assert command in kwargs["text"]
+        assert "parse_mode" not in kwargs
+
+
+    @pytest.mark.asyncio
+    async def test_description_with_markdown_characters_is_safe(self):
+        """Descriptions can also contain Telegram Markdown characters."""
+        adapter = _make_adapter()
+
+        mock_msg = MagicMock()
+        mock_msg.message_id = 42
+        adapter._bot.send_message = AsyncMock(return_value=mock_msg)
+
+        description = (
+            "Execute *dangerous* tool for user_name "
+            "[approval] with `arguments`"
+        )
+
+        result = await adapter.send_exec_approval(
+            chat_id="12345",
+            command="echo test",
+            session_key="s",
+            description=description,
+        )
+
+        assert result.success is True
+
+        kwargs = adapter._bot.send_message.call_args[1]
+
+        assert description in kwargs["text"]
+        assert "parse_mode" not in kwargs
+
+
+    @pytest.mark.asyncio
+    async def test_unicode_and_emoji_are_preserved(self):
+        """Unicode should survive approval-message construction unchanged."""
+        adapter = _make_adapter()
+
+        mock_msg = MagicMock()
+        mock_msg.message_id = 42
+        adapter._bot.send_message = AsyncMock(return_value=mock_msg)
+
+        command = "echo '测试 🚀 日本語 한글'"
+
+        result = await adapter.send_exec_approval(
+            chat_id="12345",
+            command=command,
+            session_key="s",
+        )
+
+        assert result.success is True
+
+        kwargs = adapter._bot.send_message.call_args[1]
+
+        assert command in kwargs["text"]
+        assert "parse_mode" not in kwargs
+
+
+    @pytest.mark.asyncio
+    async def test_long_command_is_truncated_to_expected_preview_length(self):
+        """Command preview should be bounded before sending to Telegram."""
+        adapter = _make_adapter()
+
+        mock_msg = MagicMock()
+        mock_msg.message_id = 1
+        adapter._bot.send_message = AsyncMock(return_value=mock_msg)
+
+        long_cmd = "x" * 5000
+
+        await adapter.send_exec_approval(
+            chat_id="12345",
+            command=long_cmd,
+            session_key="s",
+        )
+
+        kwargs = adapter._bot.send_message.call_args[1]
+        text = kwargs["text"]
+
+        # New implementation truncates the command itself at 3500 chars.
+        assert ("x" * 3500) in text
+        assert ("x" * 3501) not in text
+        assert "..." in text
+
+        # Still plain text.
+        assert "parse_mode" not in kwargs
+
+
+    @pytest.mark.asyncio
+    async def test_send_message_failure_returns_error(self):
+        """Telegram API failures should return SendResult(success=False)."""
+        adapter = _make_adapter()
+
+        adapter._bot.send_message = AsyncMock(
+            side_effect=RuntimeError("Telegram API unavailable")
+        )
+
+        result = await adapter.send_exec_approval(
+            chat_id="12345",
+            command="echo test",
+            session_key="s",
+        )
+
+        assert result.success is False
+        assert "Telegram API unavailable" in result.error
+
+
+    @pytest.mark.asyncio
+    async def test_failed_send_does_not_store_approval_state(self):
+        """Approval state must only be stored after Telegram accepts message."""
+        adapter = _make_adapter()
+
+        adapter._bot.send_message = AsyncMock(
+            side_effect=RuntimeError("send failed")
+        )
+
+        result = await adapter.send_exec_approval(
+            chat_id="12345",
+            command="echo test",
+            session_key="secret-session-key",
+        )
+
+        assert result.success is False
+        assert adapter._approval_state == {}
+
+
+    @pytest.mark.asyncio
+    async def test_message_thread_id_fallback(self):
+        """message_thread_id metadata should work when thread_id is absent."""
+        adapter = _make_adapter()
+
+        mock_msg = MagicMock()
+        mock_msg.message_id = 42
+        adapter._bot.send_message = AsyncMock(return_value=mock_msg)
+
+        await adapter.send_exec_approval(
+            chat_id="12345",
+            command="ls",
+            session_key="s",
+            metadata={"message_thread_id": "777"},
+        )
+
+        kwargs = adapter._bot.send_message.call_args[1]
+
+        assert kwargs["message_thread_id"] == 777
+
+
+    @pytest.mark.asyncio
+    async def test_thread_id_takes_precedence_over_message_thread_id(self):
+        """thread_id should take precedence when both metadata values exist."""
+        adapter = _make_adapter()
+
+        mock_msg = MagicMock()
+        mock_msg.message_id = 42
+        adapter._bot.send_message = AsyncMock(return_value=mock_msg)
+
+        await adapter.send_exec_approval(
+            chat_id="12345",
+            command="ls",
+            session_key="s",
+            metadata={
+                "thread_id": "111",
+                "message_thread_id": "222",
+            },
+        )
+
+        kwargs = adapter._bot.send_message.call_args[1]
+
+        assert kwargs["message_thread_id"] == 111
 
 
 # ===========================================================================
