@@ -348,8 +348,40 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     return None
 
 
-_SCRIPT_TIMEOUT = 120  # seconds
+_DEFAULT_SCRIPT_TIMEOUT = 120  # seconds
+_SCRIPT_TIMEOUT = _DEFAULT_SCRIPT_TIMEOUT
 
+def _get_script_timeout() -> int:
+    """Resolve cron pre-run script timeout from module/env/config with a safe default."""
+    if _SCRIPT_TIMEOUT != _DEFAULT_SCRIPT_TIMEOUT:
+        try:
+            timeout = int(float(_SCRIPT_TIMEOUT))
+            if timeout > 0:
+                return timeout
+        except Exception:
+            logger.warning("Invalid patched _SCRIPT_TIMEOUT=%r; using env/config/default", _SCRIPT_TIMEOUT)
+
+    env_value = os.getenv("HERMES_CRON_SCRIPT_TIMEOUT", "").strip()
+    if env_value:
+        try:
+            timeout = int(float(env_value))
+            if timeout > 0:
+                return timeout
+        except Exception:
+            logger.warning("Invalid HERMES_CRON_SCRIPT_TIMEOUT=%r; using config/default", env_value)
+
+    try:
+        cfg = load_config() or {}
+        cron_cfg = cfg.get("cron", {}) if isinstance(cfg, dict) else {}
+        configured = cron_cfg.get("script_timeout_seconds")
+        if configured is not None:
+            timeout = int(float(configured))
+            if timeout > 0:
+                return timeout
+    except Exception as exc:
+        logger.debug("Failed to load cron script timeout from config: %s", exc)
+
+    return _DEFAULT_SCRIPT_TIMEOUT
 
 def _run_job_script(script_path: str) -> tuple[bool, str]:
     """Execute a cron job's data-collection script and capture its output.
@@ -358,9 +390,6 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     absolute paths are resolved and validated against this directory to
     prevent arbitrary script execution via path traversal or absolute
     path injection.
-    
-    Shell support lets ``no_agent=True`` jobs ship classic bash watchdogs
-    (the `memory-watchdog.sh` pattern) without wrapping them in Python.
 
     Args:
         script_path: Path to a Python script.  Relative paths are resolved
@@ -398,16 +427,37 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     if not path.is_file():
         return False, f"Script path is not a file: {path}"
 
+    script_timeout = _get_script_timeout()
+
+    # Propagate HERMES_HOME into the child environment. The cron daemon may
+    # have resolved HERMES_HOME via config file, command-line flag, or active
+    # profile sticky-file even when the shell environment doesn't have it set
+    # — but subprocess.run() without env= inherits only the shell env, not
+    # the resolved value. Without this, cron-spawned scripts silently read
+    # ~/.hermes (default profile) instead of the active profile, causing
+    # cross-profile data corruption (see #18594).
+    child_env = dict(os.environ)
+    child_env.setdefault("HERMES_HOME", str(_hermes_home))
+
     try:
         result = subprocess.run(
             [sys.executable, str(path)],
             capture_output=True,
             text=True,
-            timeout=_SCRIPT_TIMEOUT,
+            timeout=script_timeout,
             cwd=str(path.parent),
+            env=child_env,
         )
         stdout = (result.stdout or "").strip()
         stderr = (result.stderr or "").strip()
+
+        # Redact secrets from both stdout and stderr before any return path.
+        try:
+            from agent.redact import redact_sensitive_text
+            stdout = redact_sensitive_text(stdout)
+            stderr = redact_sensitive_text(stderr)
+        except Exception:
+            pass
 
         if result.returncode != 0:
             parts = [f"Script exited with code {result.returncode}"]
@@ -417,20 +467,12 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
                 parts.append(f"stdout:\n{stdout}")
             return False, "\n".join(parts)
 
-        # Redact any secrets that may appear in script output before
-        # they are injected into the LLM prompt context.
-        try:
-            from agent.redact import redact_sensitive_text
-            stdout = redact_sensitive_text(stdout)
-        except Exception:
-            pass
         return True, stdout
 
     except subprocess.TimeoutExpired:
-        return False, f"Script timed out after {_SCRIPT_TIMEOUT}s: {path}"
+        return False, f"Script timed out after {script_timeout}s: {path}"
     except Exception as exc:
         return False, f"Script execution failed: {exc}"
-
 
 def _parse_wake_gate(script_output: str) -> bool:
     """Parse the last non-empty stdout line of a cron job's pre-check script

@@ -173,6 +173,106 @@ class TestRunJobScript:
         assert success is True
         parsed = json.loads(output)
         assert parsed["new_prs"][0]["number"] == 42
+        
+    def test_script_sees_hermes_home_when_shell_env_dropped(self, cron_env, monkeypatch):
+        """Regression test for #18594: if the cron daemon resolved HERMES_HOME
+        at startup but the shell env later drops it (e.g. systemd unit without
+        Environment=HERMES_HOME=, launchd, docker exec into a container),
+        scripts must still see the resolved value, not silently fall back to
+        ~/.hermes (the default profile) via get_hermes_home()'s fallback.
+
+        Simulates this by patching the scheduler's resolved _hermes_home AND
+        patching get_hermes_home() at its module location so the sandbox
+        check still finds the scripts dir. The subprocess must then receive
+        HERMES_HOME in its env even though the parent shell doesn't have it.
+        """
+        from cron import scheduler as sched_mod
+        from cron.scheduler import _run_job_script
+
+        # Scheduler-resolved profile-mode hermes_home
+        monkeypatch.setattr(sched_mod, "_hermes_home", cron_env)
+
+        # hermes_constants.get_hermes_home() at its module location keeps
+        # resolving to cron_env for the sandbox check (the scheduler reads
+        # HERMES_HOME from env at each call). This represents a world where
+        # the scheduler has a stable view even when shell env shifts mid-run.
+        import hermes_constants
+        monkeypatch.setattr(
+            hermes_constants, "get_hermes_home", lambda: cron_env
+        )
+
+        # Shell env drops HERMES_HOME. Without env= in subprocess.run, the
+        # child sees nothing for this var.
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+
+        script = cron_env / "scripts" / "echo_env.py"
+        script.write_text(textwrap.dedent("""\
+            import os
+            print(os.environ.get("HERMES_HOME", "<UNSET>"))
+        """))
+
+        success, output = _run_job_script(str(script))
+        assert success is True
+        assert output == str(cron_env), (
+            f"Expected child to see HERMES_HOME={cron_env}, got {output!r}. "
+            "If this is '<UNSET>', the scheduler regressed and scripts will "
+            "silently run against the default profile (#18594)."
+        )
+
+    def test_script_env_does_not_overwrite_explicit_shell_value(self, cron_env, monkeypatch):
+        """If the shell env DOES have HERMES_HOME set (e.g. user launched
+        hermes with HERMES_HOME=/custom/path), that value must win over
+        the scheduler's resolved _hermes_home.  Use setdefault semantics."""
+        from cron import scheduler as sched_mod
+        from cron.scheduler import _run_job_script
+
+        # Scheduler thinks hermes_home is cron_env, but shell env overrides
+        # it to a different value.
+        monkeypatch.setattr(sched_mod, "_hermes_home", cron_env)
+        override_path = str(cron_env.parent / "override-hermes-home")
+        monkeypatch.setenv("HERMES_HOME", override_path)
+
+        # Make the sandbox check still pass (use the override path for
+        # scripts dir lookup too, or keep cron_env — script lives in cron_env).
+        import hermes_constants
+        monkeypatch.setattr(
+            hermes_constants, "get_hermes_home", lambda: cron_env
+        )
+
+        script = cron_env / "scripts" / "echo_env.py"
+        script.write_text(textwrap.dedent("""\
+            import os
+            print(os.environ.get("HERMES_HOME", "<UNSET>"))
+        """))
+
+        success, output = _run_job_script(str(script))
+        assert success is True
+        assert output == override_path, (
+            "Shell env HERMES_HOME must override the scheduler's resolved value"
+        )
+
+    def test_script_inherits_other_env_vars(self, cron_env, monkeypatch):
+        """Regression guard: the env propagation must use `dict(os.environ)`
+        as the base so other env vars (PATH, HOME, HERMES_PROFILE, etc.)
+        still flow through.  Using a clean env{HERMES_HOME: ...} would break
+        anything the user script depends on."""
+        from cron import scheduler as sched_mod
+        from cron.scheduler import _run_job_script
+
+        monkeypatch.setattr(sched_mod, "_hermes_home", cron_env)
+        monkeypatch.setenv("HERMES_CUSTOM_MARKER", "visible-in-child")
+
+        script = cron_env / "scripts" / "echo_marker.py"
+        script.write_text(textwrap.dedent("""\
+            import os
+            print(os.environ.get("HERMES_CUSTOM_MARKER", "<UNSET>"))
+        """))
+
+        success, output = _run_job_script(str(script))
+        assert success is True
+        assert output == "visible-in-child"
+        
+        
 
 
 class TestBuildJobPromptWithScript:
