@@ -1048,6 +1048,8 @@ def select_provider_and_model(args=None):
         _model_flow_nous(config, current_model, args=args)
     elif selected_provider == "openai-codex":
         _model_flow_openai_codex(config, current_model)
+    elif selected_provider == "xai-oauth":
+        _model_flow_xai_oauth(config, current_model)
     elif selected_provider == "copilot-acp":
         _model_flow_copilot_acp(config, current_model)
     elif selected_provider == "copilot":
@@ -1362,6 +1364,139 @@ def _model_flow_openai_codex(config, current_model=""):
     else:
         print("No change.")
 
+def _model_flow_xai_oauth(config, current_model=""):
+    """xAI Grok OAuth provider: ensure logged in, then pick model."""
+
+    from hermes_cli.auth import (
+        get_xai_oauth_auth_status,
+        resolve_xai_oauth_runtime_credentials,
+        _prompt_model_selection,
+        _save_model_choice,
+        _update_config_for_provider,
+        _login_xai_oauth,
+        PROVIDER_REGISTRY,
+    )
+
+    from hermes_cli.auth_xai import DEFAULT_XAI_OAUTH_BASE_URL
+
+    from hermes_cli.xai_models import (
+        get_xai_model_ids,
+        format_xai_retirement_warning,
+    )
+
+    import argparse
+
+    # ---------------------------------------------------------------
+    # 1. Check existing configured model
+    # ---------------------------------------------------------------
+
+    warning = format_xai_retirement_warning(current_model)
+
+    if warning:
+        print()
+        print(f"Warning: {warning}")
+        print()
+
+    # ---------------------------------------------------------------
+    # 2. Check OAuth login
+    # ---------------------------------------------------------------
+
+    status = get_xai_oauth_auth_status()
+
+    if not status.get("logged_in"):
+
+        print("Not logged into xAI Grok OAuth. Starting login...")
+        print()
+
+        try:
+            mock_args = argparse.Namespace(
+                timeout=20.0,
+                no_browser=False,
+            )
+
+            _login_xai_oauth(
+                mock_args,
+                PROVIDER_REGISTRY["xai-oauth"],
+            )
+
+        except SystemExit:
+            print("Login cancelled or failed.")
+            return
+
+        except Exception as exc:
+            print(f"Login failed: {exc}")
+            return
+
+    # ---------------------------------------------------------------
+    # 3. Resolve runtime credentials
+    # ---------------------------------------------------------------
+
+    try:
+
+        creds = resolve_xai_oauth_runtime_credentials()
+
+    except Exception as exc:
+
+        print(
+            f"Unable to resolve xAI OAuth credentials: {exc}"
+        )
+
+        return
+
+    access_token = creds.get("api_key")
+
+    if not access_token:
+
+        print("xAI OAuth access token is unavailable.")
+
+        return
+
+    # ---------------------------------------------------------------
+    # 4. Discover available models
+    # ---------------------------------------------------------------
+
+    xai_models = get_xai_model_ids(
+        access_token=access_token,
+        base_url=creds.get("base_url"),
+    )
+
+    if not xai_models:
+
+        print("No xAI Grok models available.")
+
+        return
+
+    # ---------------------------------------------------------------
+    # 5. Interactive model selection
+    # ---------------------------------------------------------------
+
+    selected = _prompt_model_selection(
+        xai_models,
+        current_model=current_model,
+    )
+
+    # ---------------------------------------------------------------
+    # 6. Save
+    # ---------------------------------------------------------------
+
+    if selected:
+
+        _save_model_choice(selected)
+
+        _update_config_for_provider(
+            "xai-oauth",
+            creds.get("base_url")
+            or DEFAULT_XAI_OAUTH_BASE_URL,
+        )
+
+        print(
+            f"Default model set to: {selected} "
+            "(via xAI Grok OAuth)"
+        )
+
+    else:
+
+        print("No change.")
 
 
 def _model_flow_custom(config):
