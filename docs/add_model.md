@@ -425,3 +425,5 @@ questions instead:
 
 If those boundaries stay clean, adding providers remains repeatable instead of
 turning into a trail of special cases.
+
+include them in models.py

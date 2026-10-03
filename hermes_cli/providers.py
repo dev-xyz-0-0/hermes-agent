@@ -132,6 +132,12 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         base_url_override="https://api.x.ai/v1",
         base_url_env_var="XAI_BASE_URL",
     ),
+    "xai-oauth": HermesOverlay(
+        transport="codex_responses",
+        auth_type="oauth_external",
+        base_url_override="https://api.x.ai/v1",
+        base_url_env_var="XAI_BASE_URL",
+    ),
 }
 
 
@@ -176,6 +182,7 @@ ALIASES: Dict[str, str] = {
     "x-ai": "xai",
     "x.ai": "xai",
     "grok": "xai",
+    "grok-oauth": "xai-oauth",
 
     # kimi-for-coding (models.dev ID)
     "kimi": "kimi-for-coding",
@@ -247,6 +254,7 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "nous": "Nous Portal",
     "openai-codex": "OpenAI Codex",
     "openai-api": "OpenAI API",
+    "xai-oauth": "xAI Grok OAuth",
     "copilot-acp": "GitHub Copilot ACP",
     "local": "Local endpoint",
 }
@@ -370,6 +378,7 @@ LABELS: Dict[str, str] = {
     "openai-codex": "OpenAI Codex",
     "openai-api": "OpenAI API",
     "xai": "xAI",
+    "xai-oauth": "xAI Grok OAuth",
     "copilot-acp": "GitHub Copilot ACP",
     "github-copilot": "GitHub Copilot",
     "anthropic": "Anthropic",
