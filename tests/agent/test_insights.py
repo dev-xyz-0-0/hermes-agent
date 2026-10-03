@@ -2,7 +2,6 @@
 
 import time
 import pytest
-from pathlib import Path
 
 from hermes_state import SessionDB
 from agent.insights import (
@@ -581,7 +580,6 @@ class TestEdgeCases:
 
     def test_tool_usage_from_tool_calls_json(self, db):
         """Tool usage should be extracted from tool_calls JSON when tool_name is NULL."""
-        import json as _json
         db.create_session(session_id="s1", source="cli", model="test")
         # Assistant message with tool_calls (this is what CLI produces)
         db.append_message("s1", role="assistant", content="Let me search",

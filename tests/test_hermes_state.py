@@ -2,7 +2,6 @@
 
 import time
 import pytest
-from pathlib import Path
 
 from hermes_state import SessionDB
 
@@ -1368,7 +1367,6 @@ class TestConcurrentWriteSafety:
         """Connection timeout should be >= 30s to survive CLI/gateway contention."""
         # Access the underlying connection timeout via sqlite3 introspection.
         # There is no public API, so we check the kwarg via the module default.
-        import sqlite3
         import inspect
         from hermes_state import SessionDB as _SessionDB
         src = inspect.getsource(_SessionDB.__init__)

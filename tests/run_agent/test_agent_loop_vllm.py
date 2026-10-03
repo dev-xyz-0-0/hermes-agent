@@ -18,9 +18,7 @@ Run:
     pytest tests/test_agent_loop_vllm.py -v -k "single"
 """
 
-import asyncio
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any, Dict

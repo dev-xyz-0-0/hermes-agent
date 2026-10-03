@@ -8,7 +8,7 @@ when launchd will auto-respawn.
 
 import subprocess
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 

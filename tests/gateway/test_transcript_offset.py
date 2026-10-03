@@ -12,7 +12,6 @@ messages.  The fix adds ``history_offset`` (the filtered history length)
 to ``_run_agent``'s return dict and uses it for the slice.
 """
 
-import pytest
 
 
 # ---------------------------------------------------------------------------

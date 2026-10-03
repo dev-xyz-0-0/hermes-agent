@@ -793,7 +793,7 @@ class MCPServerTask:
         After the initial ``await`` (list_tools), all mutations are synchronous
         — atomic from the event loop's perspective.
         """
-        from tools.registry import registry, tool_error
+        from tools.registry import registry
         from toolsets import TOOLSETS
 
         async with self._refresh_lock:
@@ -1879,7 +1879,7 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
     Returns:
         List of registered prefixed tool names.
     """
-    from tools.registry import registry, tool_error
+    from tools.registry import registry
     from toolsets import create_custom_toolset, TOOLSETS
 
     registered_names: List[str] = []

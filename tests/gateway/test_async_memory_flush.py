@@ -9,8 +9,7 @@ Verifies that:
 
 import pytest
 from datetime import datetime, timedelta
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from gateway.config import Platform, GatewayConfig, SessionResetPolicy
 from gateway.session import SessionSource, SessionStore, SessionEntry

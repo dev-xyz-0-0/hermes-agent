@@ -4,7 +4,7 @@ Regression test for the is_coding_plan NameError that crashed setup when
 selecting zai, kimi-coding, minimax, or minimax-cn providers.
 """
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 
 @pytest.fixture

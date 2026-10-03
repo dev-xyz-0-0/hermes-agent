@@ -1745,7 +1745,8 @@ class AIAgent:
             prompt = self._SKILL_REVIEW_PROMPT
 
         def _run_review():
-            import contextlib, os as _os
+            import contextlib
+            import os as _os
             review_agent = None
             try:
                 with open(_os.devnull, "w") as _devnull, \

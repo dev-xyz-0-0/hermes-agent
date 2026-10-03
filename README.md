@@ -236,7 +236,7 @@ python -m pytest tests/run_agent/test_run_agent_codex_responses.py -q           
 python -m pytest tests/run_agent/test_primary_runtime_restore.py -q                 # Tool-level tests
 
 
-
+uv run ruff check .
 
 uv run pytest tests/agent/test_skill_commands_reload.py -q
 uv run pytest tests/ -q          # Full suite (~3000 tests, ~3 min)

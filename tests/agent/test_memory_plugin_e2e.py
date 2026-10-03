@@ -6,11 +6,7 @@ external deps, no API keys).
 """
 
 import json
-import os
 import sqlite3
-import tempfile
-import pytest
-from unittest.mock import patch, MagicMock
 
 from agent.memory_provider import MemoryProvider
 from agent.memory_manager import MemoryManager

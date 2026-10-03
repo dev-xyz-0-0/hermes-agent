@@ -5,7 +5,6 @@ All tests use mocks -- no real MCP servers or subprocesses are started.
 
 import asyncio
 import json
-import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1307,7 +1306,7 @@ class TestConfigurableTimeouts:
 
     def test_timeout_passed_to_handler(self):
         """The tool handler uses the server's configured timeout."""
-        from tools.mcp_tool import _make_tool_handler, _servers, MCPServerTask
+        from tools.mcp_tool import _make_tool_handler, _servers
 
         mock_session = MagicMock()
         mock_session.call_tool = AsyncMock(
@@ -1761,7 +1760,6 @@ class TestUtilityToolRegistration:
 # SamplingHandler tests
 # ===========================================================================
 
-import math
 import time
 
 from mcp.types import (

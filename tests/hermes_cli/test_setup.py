@@ -1,10 +1,8 @@
 """Tests for setup_model_provider — verifies the delegation to
 select_provider_and_model() and config dict sync."""
-import json
 import sys
 import types
 
-from hermes_cli.auth import get_active_provider
 from hermes_cli.config import load_config, save_config
 from hermes_cli.setup import setup_model_provider
 

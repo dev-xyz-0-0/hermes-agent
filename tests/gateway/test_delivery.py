@@ -1,6 +1,6 @@
 """Tests for the delivery routing module."""
 
-from gateway.config import Platform, GatewayConfig, PlatformConfig, HomeChannel
+from gateway.config import Platform, GatewayConfig
 from gateway.delivery import DeliveryRouter, DeliveryTarget, parse_deliver_spec
 from gateway.session import SessionSource
 

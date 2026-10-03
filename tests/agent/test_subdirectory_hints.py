@@ -1,8 +1,6 @@
 """Tests for progressive subdirectory hint discovery."""
 
-import os
 import pytest
-from pathlib import Path
 
 from agent.subdirectory_hints import SubdirectoryHintTracker
 

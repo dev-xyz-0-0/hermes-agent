@@ -5,7 +5,6 @@ Tests the multi-turn agent engine using mocked servers, without needing
 real API keys or running servers.
 """
 
-import asyncio
 import json
 import sys
 from dataclasses import dataclass

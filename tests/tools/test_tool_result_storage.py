@@ -5,7 +5,6 @@ from unittest.mock import MagicMock, patch
 
 from tools.budget_config import (
     DEFAULT_RESULT_SIZE_CHARS,
-    DEFAULT_TURN_BUDGET_CHARS,
     DEFAULT_PREVIEW_SIZE_CHARS,
     BudgetConfig,
 )
@@ -13,7 +12,6 @@ from tools.tool_result_storage import (
     HEREDOC_MARKER,
     PERSISTED_OUTPUT_TAG,
     PERSISTED_OUTPUT_CLOSING_TAG,
-    STORAGE_DIR,
     _build_persisted_message,
     _heredoc_marker,
     _write_to_sandbox,

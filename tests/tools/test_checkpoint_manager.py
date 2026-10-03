@@ -1,9 +1,6 @@
 """Tests for tools/checkpoint_manager.py — CheckpointManager."""
 
 import logging
-import os
-import json
-import shutil
 import subprocess
 import pytest
 from pathlib import Path
@@ -17,8 +14,6 @@ from tools.checkpoint_manager import (
     _git_env,
     _dir_file_count,
     format_checkpoint_list,
-    DEFAULT_EXCLUDES,
-    CHECKPOINT_BASE,
 )
 
 

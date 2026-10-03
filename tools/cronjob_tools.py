@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from cron.jobs import (
     AmbiguousJobReference,
     create_job,
-    get_job,
     list_jobs,
     parse_schedule,
     pause_job,

@@ -2482,7 +2482,6 @@ class TestSafeWriter:
 
     def test_double_wrap_prevented(self):
         """Wrapping an already-wrapped stream doesn't add layers."""
-        import sys
         from run_agent import _SafeWriter
         from io import StringIO
         inner = StringIO()
@@ -3126,7 +3125,7 @@ class TestInterruptVprintForceTrue:
                 if "force=True" not in stripped:
                     violations.append(f"line {i}: {stripped}")
         assert not violations, (
-            f"Interrupt _vprint calls missing force=True:\n"
+            "Interrupt _vprint calls missing force=True:\n"
             + "\n".join(violations)
         )
 

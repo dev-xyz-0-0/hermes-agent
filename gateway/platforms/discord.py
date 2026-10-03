@@ -498,7 +498,7 @@ class DiscordAdapter(BasePlatformAdapter):
             acquired, existing = acquire_scoped_lock('discord-bot-token', self._token_lock_identity, metadata={'platform': 'discord'})
             if not acquired:
                 owner_pid = existing.get('pid') if isinstance(existing, dict) else None
-                message = f'Discord bot token already in use' + (f' (PID {owner_pid})' if owner_pid else '') + '. Stop the other gateway first.'
+                message = 'Discord bot token already in use' + (f' (PID {owner_pid})' if owner_pid else '') + '. Stop the other gateway first.'
                 logger.error('[%s] %s', self.name, message)
                 self._set_fatal_error('discord_token_lock', message, retryable=False)
                 return False

@@ -139,7 +139,7 @@ class SlackAdapter(BasePlatformAdapter):
             acquired, existing = acquire_scoped_lock('slack-app-token', app_token, metadata={'platform': 'slack'})
             if not acquired:
                 owner_pid = existing.get('pid') if isinstance(existing, dict) else None
-                message = f'Slack app token already in use' + (f' (PID {owner_pid})' if owner_pid else '') + '. Stop the other gateway first.'
+                message = 'Slack app token already in use' + (f' (PID {owner_pid})' if owner_pid else '') + '. Stop the other gateway first.'
                 logger.error('[%s] %s', self.name, message)
                 self._set_fatal_error('slack_token_lock', message, retryable=False)
                 return False

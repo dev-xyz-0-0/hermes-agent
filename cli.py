@@ -3835,7 +3835,7 @@ class HermesCLI:
                         elif p.get("api_url"):
                             _cprint(f"    {p['api_url']} (use /model <name> --provider {p['slug']})")
                         else:
-                            _cprint(f"    (no models listed)")
+                            _cprint("    (no models listed)")
                         _cprint("")
                 else:
                     _cprint("  No authenticated providers found.")
@@ -7578,7 +7578,8 @@ class HermesCLI:
                 _cprint(f"\n{_DIM}Suspend (Ctrl+Z) is not supported on Windows.{_RST}")
                 event.app.invalidate()
                 return
-            import os, signal as _sig
+            import os
+            import signal as _sig
             from prompt_toolkit.application import run_in_terminal
             from hermes_cli.skin_engine import get_active_skin
             agent_name = get_active_skin().get_branding("agent_name", "Hermes Agent")

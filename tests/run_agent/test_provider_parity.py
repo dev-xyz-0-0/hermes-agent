@@ -4,12 +4,10 @@ and handles responses properly for all supported providers.
 Ensures changes to one provider path don't silently break another.
 """
 
-import json
-import os
 import sys
 import types
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 

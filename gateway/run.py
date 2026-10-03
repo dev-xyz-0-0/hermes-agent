@@ -5461,7 +5461,7 @@ class GatewayRunner:
         """Handle /reload-mcp command -- disconnect and reconnect all MCP servers."""
         loop = asyncio.get_event_loop()
         try:
-            from tools.mcp_tool import shutdown_mcp_servers, discover_mcp_tools, _load_mcp_config, _servers, _lock
+            from tools.mcp_tool import shutdown_mcp_servers, discover_mcp_tools, _servers, _lock
 
             # Capture old server names before shutdown
             with _lock:
@@ -6424,7 +6424,8 @@ class GatewayRunner:
         reused — preserving the frozen system prompt and tool schemas for
         prompt cache hits.
         """
-        import hashlib, json as _j
+        import hashlib
+        import json as _j
 
         # Fingerprint the FULL credential string instead of using a short
         # prefix. OAuth/JWT-style tokens frequently share a common prefix

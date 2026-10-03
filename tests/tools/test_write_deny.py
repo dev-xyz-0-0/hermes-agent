@@ -1,7 +1,6 @@
 """Tests for _is_write_denied() — verifies deny list blocks sensitive paths on all platforms."""
 
 import os
-import pytest
 from pathlib import Path
 
 from tools.file_operations import _is_write_denied

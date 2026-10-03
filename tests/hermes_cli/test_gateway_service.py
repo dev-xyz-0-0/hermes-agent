@@ -529,8 +529,6 @@ class TestSystemServiceIdentityRootHandling:
 
     def test_auto_detected_root_is_rejected(self, monkeypatch):
         """When root is auto-detected (not explicitly requested), raise."""
-        import pwd
-        import grp
 
         monkeypatch.delenv("SUDO_USER", raising=False)
         monkeypatch.setenv("USER", "root")
@@ -554,8 +552,6 @@ class TestSystemServiceIdentityRootHandling:
 
     def test_non_root_user_passes_through(self, monkeypatch):
         """Normal non-root user works as before."""
-        import pwd
-        import grp
 
         monkeypatch.delenv("SUDO_USER", raising=False)
         monkeypatch.setenv("USER", "nobody")

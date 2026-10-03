@@ -1,17 +1,13 @@
 """Tests for hermes_cli/webhook.py — webhook subscription CLI."""
 
 import json
-import os
 import pytest
 from argparse import Namespace
-from pathlib import Path
 
 from hermes_cli.webhook import (
     webhook_command,
     _load_subscriptions,
-    _save_subscriptions,
     _subscriptions_path,
-    _is_webhook_enabled,
 )
 
 

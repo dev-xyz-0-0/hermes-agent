@@ -1,8 +1,5 @@
 """Tests for Matrix platform adapter."""
 import asyncio
-import json
-import re
-import sys
 import types
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock

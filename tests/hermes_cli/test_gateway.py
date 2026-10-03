@@ -2,7 +2,6 @@
 
 import signal
 from types import SimpleNamespace
-from unittest.mock import patch, call
 
 import hermes_cli.gateway as gateway
 
@@ -205,7 +204,6 @@ class TestWaitForGatewayExit:
 
     def test_force_kills_after_grace_period(self, monkeypatch):
         """When the process doesn't exit, SIGKILL the saved PID."""
-        import time as _time
 
         # Simulate monotonic time advancing past force_after
         call_num = 0
@@ -234,7 +232,6 @@ class TestWaitForGatewayExit:
 
     def test_handles_process_already_gone_on_kill(self, monkeypatch):
         """ProcessLookupError during SIGKILL is not fatal."""
-        import time as _time
 
         call_num = 0
         def fake_monotonic():

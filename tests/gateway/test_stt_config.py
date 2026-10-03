@@ -1,7 +1,7 @@
 """Gateway STT config tests — honor stt.enabled: false from config.yaml."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 import yaml

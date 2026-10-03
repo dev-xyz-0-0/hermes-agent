@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import time
 
-import pytest
 
 
 def _write_auth_store(tmp_path, payload: dict) -> None:

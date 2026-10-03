@@ -7,8 +7,6 @@ Covers:
 - status_callback invocation
 """
 
-import json
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest

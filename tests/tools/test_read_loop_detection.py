@@ -25,7 +25,6 @@ from tools.file_tools import (
     get_read_files_summary,
     clear_read_tracker,
     notify_other_tool_call,
-    _read_tracker,
 )
 
 

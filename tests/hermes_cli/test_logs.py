@@ -2,15 +2,12 @@
 
 import os
 import textwrap
-from datetime import datetime, timedelta
-from io import StringIO
+from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 from hermes_cli.logs import (
-    LOG_FILES,
     _extract_level,
     _matches_filters,
     _parse_line_timestamp,

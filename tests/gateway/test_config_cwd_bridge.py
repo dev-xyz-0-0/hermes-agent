@@ -9,9 +9,7 @@ the semantics by reimplementing the relevant config bridge snippet and
 asserting the expected env var outcomes.
 """
 
-import os
 import json
-import pytest
 
 
 def _simulate_config_bridge(cfg: dict, initial_env: dict | None = None):

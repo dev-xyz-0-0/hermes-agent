@@ -7,9 +7,8 @@ requirements check, and toolset verification.
 import os
 from unittest.mock import patch
 
-import pytest
 
-from gateway.config import Platform, PlatformConfig, HomeChannel
+from gateway.config import Platform, PlatformConfig
 
 
 # ── Config loading ──────────────────────────────────────────────────

@@ -20,7 +20,7 @@ import pytest
 from unittest.mock import patch
 
 from gateway.config import Platform, GatewayConfig
-from gateway.session import SessionSource, SessionStore, build_session_key
+from gateway.session import SessionSource, SessionStore
 
 
 @pytest.fixture()

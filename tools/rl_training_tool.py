@@ -234,7 +234,7 @@ def _get_env_config_fields(env_file_path: str) -> Dict[str, Dict[str, Any]]:
         env_class = None
         for name, obj in vars(module).items():
             if isinstance(obj, type) and name != "BaseEnv":
-                if hasattr(obj, "config_init") and callable(getattr(obj, "config_init")):
+                if hasattr(obj, "config_init") and callable(obj.config_init):
                     env_class = obj
                     break
         

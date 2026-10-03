@@ -1,10 +1,7 @@
 """Tests for detect_external_credentials() -- Phase 2 credential sync."""
 
 import json
-from pathlib import Path
-from unittest.mock import patch
 
-import pytest
 
 from hermes_cli.auth import detect_external_credentials
 

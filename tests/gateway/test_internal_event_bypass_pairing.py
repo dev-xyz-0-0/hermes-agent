@@ -7,7 +7,6 @@ Fully isolated version:
 - Safe monkeypatch usage
 """
 
-import asyncio
 from types import SimpleNamespace
 
 import pytest

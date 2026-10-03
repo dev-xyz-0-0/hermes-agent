@@ -7,7 +7,6 @@ compression fires), users see >100% in /stats, gateway status, and
 memory tool output.
 """
 
-import pytest
 
 
 class TestContextCompressorUsagePercent:

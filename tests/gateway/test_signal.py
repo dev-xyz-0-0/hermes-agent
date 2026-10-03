@@ -1,6 +1,5 @@
 """Tests for Signal messenger platform adapter."""
 import base64
-import json
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch, AsyncMock
@@ -365,7 +364,6 @@ class TestSignalAuthorization:
 class TestSignalSendMessage:
     def test_signal_in_platform_map(self):
         """Signal should be in the send_message tool's platform map."""
-        from tools.send_message_tool import send_message_tool
         # Just verify the import works and Signal is a valid platform
         from gateway.config import Platform
         assert Platform.SIGNAL.value == "signal"

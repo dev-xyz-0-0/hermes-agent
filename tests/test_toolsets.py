@@ -1,14 +1,11 @@
 """Tests for toolsets.py — toolset resolution, validation, and composition."""
 
-import pytest
 
 from toolsets import (
     TOOLSETS,
     get_toolset,
     resolve_toolset,
     resolve_multiple_toolsets,
-    get_all_toolsets,
-    get_toolset_names,
     validate_toolset,
     create_custom_toolset,
     get_toolset_info,

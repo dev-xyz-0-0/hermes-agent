@@ -7,7 +7,6 @@ from gateway.platforms.base import (
     BasePlatformAdapter,
     GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE,
     MessageEvent,
-    MessageType,
     _safe_url_for_log,
 )
 

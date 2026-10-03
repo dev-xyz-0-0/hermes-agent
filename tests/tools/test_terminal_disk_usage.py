@@ -1,6 +1,5 @@
 """Tests for get_active_environments_info disk usage calculation."""
 
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest

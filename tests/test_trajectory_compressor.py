@@ -1,6 +1,5 @@
 """Tests for trajectory_compressor.py — config, metrics, and compression logic."""
 
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch, MagicMock
 

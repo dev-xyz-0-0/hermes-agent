@@ -1,6 +1,5 @@
 """Tests for xAI Grok model discovery and retirement handling."""
 
-from unittest.mock import patch
 
 import pytest
 

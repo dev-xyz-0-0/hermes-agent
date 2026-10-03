@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, patch
 from run_agent import (
     _sanitize_surrogates,
     _sanitize_messages_surrogates,
-    _SURROGATE_RE,
 )
 
 

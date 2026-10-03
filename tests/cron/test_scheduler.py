@@ -5,7 +5,6 @@ import logging
 import os
 from unittest.mock import AsyncMock, patch, MagicMock
 
-import pytest
 
 from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt
 from tools.env_passthrough import clear_env_passthrough

@@ -3,7 +3,6 @@
 import json
 from unittest.mock import call, patch
 
-import pytest
 
 from model_tools import (
     handle_function_call,

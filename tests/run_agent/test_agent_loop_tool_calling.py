@@ -18,12 +18,11 @@ Run:
     pytest tests/test_agent_loop_tool_calling.py -v -k "single"  # run one test
 """
 
-import asyncio
 import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict
 from unittest.mock import patch
 
 import pytest

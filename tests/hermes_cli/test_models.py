@@ -1,6 +1,6 @@
 """Tests for the hermes_cli models module."""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from hermes_cli.models import (
     OPENROUTER_MODELS, menu_labels, model_ids, detect_provider_for_model,

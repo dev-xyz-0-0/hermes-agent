@@ -7,8 +7,6 @@ from unittest.mock import MagicMock
 
 from tools.file_operations import (
     _is_write_denied,
-    WRITE_DENIED_PATHS,
-    WRITE_DENIED_PREFIXES,
     ReadResult,
     WriteResult,
     PatchResult,
@@ -16,8 +14,6 @@ from tools.file_operations import (
     SearchMatch,
     LintResult,
     ShellFileOperations,
-    BINARY_EXTENSIONS,
-    IMAGE_EXTENSIONS,
     MAX_LINE_LENGTH,
 )
 

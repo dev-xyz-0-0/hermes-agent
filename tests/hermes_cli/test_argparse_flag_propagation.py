@@ -13,8 +13,6 @@ so the subparser only sets the attribute when the user explicitly provides it.
 
 import argparse
 import os
-import sys
-from unittest.mock import patch
 
 import pytest
 

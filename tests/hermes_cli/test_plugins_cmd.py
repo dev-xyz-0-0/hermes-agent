@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import types
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -217,7 +214,6 @@ class TestCmdInstall:
 
     def test_install_requires_identifier(self):
         from hermes_cli.plugins_cmd import cmd_install
-        import argparse
 
         with pytest.raises(SystemExit):
             cmd_install("")
@@ -391,7 +387,6 @@ class TestCopyExampleFiles:
     """Test example file copying."""
 
     def test_copies_example_files(self, tmp_path):
-        from hermes_cli.plugins_cmd import _copy_example_files
         from unittest.mock import MagicMock
 
         console = MagicMock()
@@ -407,7 +402,6 @@ class TestCopyExampleFiles:
         console.print.assert_called()
 
     def test_skips_existing_files(self, tmp_path):
-        from hermes_cli.plugins_cmd import _copy_example_files
         from unittest.mock import MagicMock
 
         console = MagicMock()
@@ -424,7 +418,6 @@ class TestCopyExampleFiles:
         assert real_file.read_text() == "existing: true"
 
     def test_handles_copy_error_gracefully(self, tmp_path):
-        from hermes_cli.plugins_cmd import _copy_example_files
         from unittest.mock import MagicMock, patch
 
         console = MagicMock()

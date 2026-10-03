@@ -3,7 +3,7 @@ import io
 import types
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 # Try importing real nio; skip entire file if not available.
 # A MagicMock in sys.modules (from another test) is not the real package.

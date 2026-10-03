@@ -9,12 +9,9 @@ Covers:
 6. Full 429 rotation cycle: retry-same → rotate → exhaust → fallback
 """
 
-import os
-import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 # ---------------------------------------------------------------------------

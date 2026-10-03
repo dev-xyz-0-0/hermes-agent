@@ -1,9 +1,8 @@
 """Tests for save_config_value() in cli.py — atomic write behavior."""
 
-import os
 import yaml
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 

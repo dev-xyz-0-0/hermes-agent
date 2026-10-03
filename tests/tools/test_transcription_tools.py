@@ -5,7 +5,6 @@ model auto-correction, config loading, validation edge cases, and
 end-to-end dispatch.  All external dependencies are mocked.
 """
 
-import os
 import struct
 import subprocess
 import wave

@@ -1,12 +1,7 @@
 """Tests for MCP stability fixes — event loop handler, PID tracking, shutdown robustness."""
 
-import asyncio
-import os
-import signal
-import threading
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
-import pytest
 
 
 # ---------------------------------------------------------------------------

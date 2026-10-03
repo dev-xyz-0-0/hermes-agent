@@ -140,7 +140,6 @@ def set_approval_callback(cb):
 
 # Dangerous command detection + approval now consolidated in tools/approval.py
 from tools.approval import (
-    check_dangerous_command as _check_dangerous_command_impl,
     check_all_command_guards as _check_all_guards_impl,
 )
 
@@ -748,7 +747,8 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             sandbox_kwargs["memory"] = memory
         if disk > 0:
             try:
-                import inspect, modal
+                import inspect
+                import modal
                 if "ephemeral_disk" in inspect.signature(modal.Sandbox.create).parameters:
                     sandbox_kwargs["ephemeral_disk"] = disk
             except Exception:
