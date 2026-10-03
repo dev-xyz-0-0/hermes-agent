@@ -11,7 +11,8 @@ Usage:
     uv run python  scripts/release.py --bump minor
     uv run python scripts/release.py --bump patch
     uv run python scripts/release.py --bump patch --publish --first-release
-    uv run python scripts/release.py --bump patch --publish --date 2026.9.26
+    uv run python scripts/release.py --bump patch --publish --date 2026.10.1
+    uv run python  scripts/release.py --bump minor --publish --date 2026.10.1
 
     uv run python scripts/release.py --bump patch --publish
     
@@ -22,7 +23,7 @@ Usage:
     uv run python  scripts/release.py --bump minor --publish --first-release
 
     # Override CalVer date (e.g. for a belated release)
-    uv run python  scripts/release.py --bump minor --publish --date 2026.3.15
+    uv run python  scripts/release.py --bump minor --publish --date <year>.<month>.<date>
 """
 
 import argparse
