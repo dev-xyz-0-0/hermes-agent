@@ -1,544 +1,741 @@
-# General guide: adding model providers to Hermes
+# General Guide: Adding Model Providers to Hermes
 
-I would standardize your customized Hermes around this lifecycle:
+The cleanest way to add a model provider to Hermes is to treat **provider configuration, authentication, model discovery, runtime credentials, and inference transport as separate concerns**.
+
+The target lifecycle is:
 
 ```text
-                     Hermes
-                        │
-                model.provider
-                        │
-                        ▼
-               PROVIDER_REGISTRY
-                        │
-            ┌───────────┴───────────┐
-            │                       │
-         API Key                  OAuth
-            │                       │
-            ▼                       ▼
-       environment            auth_<name>.py
-            │                       │
-            └───────────┬───────────┘
-                        ▼
-              Runtime Credentials
-                        │
-              ┌─────────┴─────────┐
-              │                   │
-        OpenAI-compatible     Responses API
-              │                   │
-              ▼                   ▼
-          /chat/...           /responses
-              │                   │
-              └─────────┬─────────┘
-                        ▼
-                      LLM
+Provider
+   │
+   ▼
+Authentication
+   │
+   ▼
+Runtime Credentials
+   │
+   ▼
+Model Discovery
+   │
+   ▼
+Model Selection
+   │
+   ▼
+Inference Transport
+   │
+   ▼
+Model API
 ```
 
-There are therefore **four separate questions** whenever you add a model:
+For example, the xAI OAuth integration becomes:
 
-1. Who is the **provider**?
-2. How does Hermes **authenticate**?
-3. Which **API protocol** does it use?
-4. Which **model IDs** does that provider expose?
+```text
+xai-oauth
+   │
+   ├── auth.py
+   │      provider registration
+   │
+   ├── auth_xai.py
+   │      OAuth login
+   │      token storage
+   │      token refresh
+   │      runtime credentials
+   │
+   ├── xai_models.py
+   │      model discovery
+   │      fallback models
+   │      model filtering
+   │      retirement handling
+   │
+   └── main.py
+          login orchestration
+          model selection
+          configuration update
+```
 
-Do not combine these concepts.
+## 1. Define the provider
+
+Start by deciding what the provider actually represents.
+
+Do not assume:
+
+```text
+provider == model
+```
+
+A provider describes **how Hermes connects**, while the model is what Hermes requests.
 
 For example:
 
 ```text
-Provider       Auth             Transport              Model
-────────────────────────────────────────────────────────────────
-OpenAI         API key          Responses/Chat          gpt-*
-OpenAI Codex   OAuth            Responses               gpt-*
-xAI            API key          OpenAI-compatible       grok-*
-xAI OAuth      OAuth            Responses               grok-*
-Anthropic      API key/OAuth    Anthropic Messages      claude-*
-OpenRouter     API key          OpenAI-compatible       many
+Provider        Authentication     Model
+------------------------------------------------
+openai-api      API key            gpt-*
+openai-codex    OAuth              gpt-*
+xai             API key            grok-*
+xai-oauth       OAuth              grok-*
+anthropic       API key/OAuth      claude-*
 ```
 
-That separation will make your fork much easier to maintain.
+This distinction is particularly important when one vendor supports multiple authentication mechanisms.
 
-## Step 1 — Register the provider
+For xAI, we deliberately preserve:
 
-Every provider should first get an entry in:
+```text
+xai
+    API-key authentication
 
-```python
-PROVIDER_REGISTRY
+xai-oauth
+    OAuth authentication
 ```
 
-For a basic API-key provider:
-
-```python
-"example": ProviderConfig(
-    id="example",
-    name="Example AI",
-    auth_type="api_key",
-    inference_base_url="https://api.example.com/v1",
-    api_key_env_vars=("EXAMPLE_API_KEY",),
-    base_url_env_var="EXAMPLE_BASE_URL",
-),
-```
-
-Commit:
-
-```bash
-git commit -m "feat(provider): register Example AI provider"
-```
-
-This commit should contain **no transport implementation**.
+rather than replacing `xai`.
 
 ---
 
-# Step 2 — Decide authentication type
+# 2. Register the provider in `auth.py`
 
-I recommend supporting three auth classes in your customized Hermes.
-
-### Type A — API key
-
-Simplest:
-
-```text
-.env
- │
- └── XAI_API_KEY
-       │
-       ▼
-auth.py
-       │
-       ▼
-runtime credentials
-```
-
-Provider:
-
-```python
-ProviderConfig(
-    id="xai",
-    name="xAI",
-    auth_type="api_key",
-    inference_base_url="https://api.x.ai/v1",
-    api_key_env_vars=("XAI_API_KEY",),
-)
-```
-
-No separate authentication module should be necessary.
-
-Commit:
-
-```bash
-git commit -m "feat(auth): support Example AI API key"
-```
-
-### Type B — OAuth
-
-This is the pattern we're implementing now:
-
-```text
-auth.py
-   │
-   └── xai-oauth
-          │
-          ▼
-    auth_xai.py
-          │
-          ├── login
-          ├── refresh
-          ├── persistence
-          └── runtime resolution
-```
-
-Keep OAuth complexity outside `auth.py`.
-
-I recommend naming these consistently:
-
-```text
-auth_xai.py
-auth_anthropic.py
-auth_codex.py
-auth_google.py
-```
-
-Each module should expose approximately:
-
-```python
-login_<provider>()
-refresh_<provider>()
-get_<provider>_auth_status()
-resolve_<provider>_runtime_credentials()
-```
-
-For xAI:
-
-```python
-_login_xai_oauth()
-
-refresh_xai_oauth_pure()
-
-get_xai_oauth_auth_status()
-
-resolve_xai_oauth_runtime_credentials()
-```
-
-Commit:
-
-```bash
-git commit -m "feat(auth): add Example AI OAuth authentication"
-```
-
-### Type C — external CLI/session authentication
-
-Some providers may be better implemented through an existing CLI/session rather than handling consumer OAuth yourself.
+Add the provider to `PROVIDER_REGISTRY`.
 
 Conceptually:
 
-```text
-Hermes
-   │
-   ▼
-Provider adapter
-   │
-   ▼
-External CLI
-   │
-   ├── owns authentication
-   └── owns refresh
+```python
+"xai-oauth": ProviderConfig(
+    id="xai-oauth",
+    name="xAI Grok OAuth",
+    auth_type="oauth_external",
+    inference_base_url="https://api.x.ai/v1",
+),
 ```
 
-Keep that separate from API-key/OAuth provider logic.
+If aliases are required, make them explicit:
+
+```python
+"xai-oauth": "xai-oauth",
+"grok-oauth": "xai-oauth",
+```
+
+Avoid changing an existing alias unexpectedly.
+
+For example, if Hermes already has:
+
+```python
+"grok": "xai"
+```
+
+keep it that way.
+
+Otherwise an existing command using API-key authentication could silently switch to OAuth.
 
 ---
 
-# Step 3 — Standardize runtime credentials
+# 3. Isolate complex authentication
 
-This is the interface I would make universal in your fork.
+Simple API-key providers can often remain inside `auth.py`.
 
-Every authentication mechanism eventually returns:
-
-```python
-{
-    "provider": "xai-oauth",
-    "api_key": "...",
-    "base_url": "https://api.x.ai/v1",
-    "source": "hermes-auth-store",
-}
-```
-
-Potentially add:
-
-```python
-{
-    "api_mode": "responses"
-}
-```
-
-Then your agent loop doesn't care whether the token originated from:
-
-```text
-.env
-API key
-OAuth
-device code
-credential store
-external CLI
-```
-
-It simply does:
-
-```python
-credentials = resolve_runtime_credentials(provider)
-```
-
-followed by:
-
-```python
-client = create_client(credentials)
-```
-
-This is the most important architectural boundary to preserve.
-
-Commit:
-
-```bash
-git commit -m "feat(provider): resolve Example AI runtime credentials"
-```
-
----
-
-# Step 4 — Map provider to transport
-
-Do not create a new HTTP implementation for every provider.
-
-Create a small number of transports.
-
-I would aim for:
-
-```text
-agent/providers/
-
-├── openai_chat.py
-├── responses.py
-├── anthropic_messages.py
-└── ...
-```
-
-Then map:
-
-```python
-PROVIDER_TRANSPORTS = {
-    "openai": "responses",
-    "openai-codex": "responses",
-
-    "xai": "openai_chat",
-    "xai-oauth": "responses",
-
-    "anthropic": "anthropic_messages",
-
-    "openrouter": "openai_chat",
-}
-```
-
-This means adding:
-
-```text
-Provider #20
-```
-
-doesn't necessarily mean writing:
-
-```text
-Transport #20
-```
-
-That is a major maintainability improvement.
-
----
-
-# Step 5 — Keep models separate from providers
-
-Avoid:
-
-```python
-if model == "grok-4.6":
-    provider = "xai-oauth"
-```
-
-because Grok might be available through multiple routes.
-
-Instead:
-
-```yaml
-model:
-  provider: xai-oauth
-  default: grok-4.6
-```
-
-or:
-
-```yaml
-model:
-  provider: xai
-  default: grok-4.6
-```
-
-Same model:
-
-```text
-                 grok-4.6
-                    │
-          ┌─────────┴─────────┐
-          ▼                   ▼
-         xai              xai-oauth
-          │                   │
-       API key              OAuth
-```
-
-Likewise:
-
-```text
-                 Claude
-                    │
-         ┌──────────┴─────────┐
-         ▼                    ▼
-     Anthropic            another router
-```
-
-This prevents your model catalog from becoming coupled to authentication.
-
----
-
-# Step 6 — Add aliases carefully
-
-Aliases should improve UX without silently changing authentication.
-
-Good:
-
-```python
-PROVIDER_ALIASES = {
-    "x-ai": "xai",
-    "x.ai": "xai",
-    "grok": "xai",
-
-    "grok-oauth": "xai-oauth",
-}
-```
-
-Bad:
-
-```python
-"grok": "xai-oauth"
-```
-
-if `grok` previously meant API-key xAI.
-
-That would break existing configurations.
-
-Commit:
-
-```bash
-git commit -m "feat(provider): add Example AI provider aliases"
-```
-
----
-
-# Step 7 — Tests every provider must pass
-
-I would create a standard provider contract.
-
-Every new provider needs:
-
-```text
-Registration
-✓ provider exists
-✓ aliases resolve
-✓ provider name correct
-
-Authentication
-✓ missing credentials fail cleanly
-✓ valid credentials resolve
-✓ secrets never appear in status output
-
-Runtime
-✓ correct base URL
-✓ correct authorization
-✓ correct transport
-✓ model preserved
-
-OAuth providers
-✓ login
-✓ token persistence
-✓ expiry detection
-✓ refresh
-✓ refresh-token rotation
-✓ invalid refresh handling
-
-Transport
-✓ request serialization
-✓ response parsing
-✓ tool calls
-✓ errors
-
-Regression
-✓ existing providers unchanged
-```
-
-Then your provider-specific test file becomes:
-
-```text
-tests/
-├── test_provider_contract.py
-├── test_xai_oauth.py
-├── test_anthropic.py
-├── test_openai_codex.py
-└── test_openrouter.py
-```
-
----
-
-# Step 8 — Use a consistent Git workflow
-
-For each future provider:
-
-```bash
-git checkout -b feature/provider-<name>
-```
-
-Then:
-
-```text
-Commit 1
-feat(provider): register <provider>
-
-Commit 2
-feat(auth): add <provider> authentication
-
-Commit 3
-feat(provider): add <provider> runtime credential resolution
-
-Commit 4
-feat(inference): route <provider> through <transport>
-
-Commit 5
-feat(model): add <provider> model catalog
-
-Commit 6
-test(provider): add <provider> integration coverage
-
-Commit 7
-docs(provider): document <provider> setup
-```
-
-This makes cherry-picking and reverting much safer.
-
-## Recommended target for your fork
-
-Given the work you've already done, I would gradually move toward:
+OAuth providers should normally receive their own module:
 
 ```text
 hermes_cli/
 ├── auth.py
-│    └── common auth/router
-│
-├── auth_xai.py
-│    └── xAI OAuth
-│
-├── auth_anthropic.py
-│    └── Anthropic OAuth
-│
 ├── auth_codex.py
-│    └── OpenAI Codex OAuth
-│
-└── providers.py
-     └── provider registry
-
-agent/
-├── providers/
-│   ├── openai_chat.py
-│   ├── responses.py
-│   └── anthropic.py
-│
-└── model_catalog.py
-
-tests/
-├── test_auth_xai.py
-├── test_auth_anthropic.py
-├── test_auth_codex.py
-├── test_provider_registry.py
-└── test_provider_transports.py
+├── auth_xai.py
+└── ...
 ```
 
-The rule I would follow is:
+The provider-specific authentication module should own things such as:
 
-> **Provider → Authentication → Runtime Credentials → Transport → Model**
+```text
+OAuth discovery
+device authorization
+browser/device login
+polling
+access tokens
+refresh tokens
+token expiration
+token rotation
+provider-specific OAuth errors
+```
 
-rather than:
+For xAI:
 
-> **Model → custom implementation**
+```text
+auth_xai.py
+│
+├── discovery
+├── device code request
+├── device authorization polling
+├── token persistence
+├── JWT expiration checking
+├── refresh
+└── runtime credential resolution
+```
 
-That gives you a reusable provider architecture where adding Grok, Claude, OpenAI/Codex, Gemini, OpenRouter, or another provider becomes a small integration rather than another modification to the core agent.
+The rest of Hermes should not need to understand those details.
 
-For the current xAI work, your next commits should therefore be `feat(auth): register xAI OAuth provider` → `feat(auth): add xAI device-code OAuth authentication` → `feat(provider): resolve xAI OAuth runtime credentials` → `test(auth): add xAI OAuth authentication coverage`.
+---
+
+# 4. Standardize runtime credentials
+
+This is one of the most important boundaries.
+
+Every authentication mechanism should eventually produce something resembling:
+
+```python
+{
+    "provider": "xai-oauth",
+    "base_url": "https://api.x.ai/v1",
+    "api_key": access_token,
+    "source": "hermes-auth-store",
+    "auth_mode": "oauth_device_code",
+}
+```
+
+The name `api_key` can represent the runtime bearer credential even when it originated from OAuth.
+
+That allows inference code to remain relatively authentication-agnostic:
+
+```text
+OAuth
+  │
+  └──────┐
+         │
+API key ─┼──► Runtime Credentials ───► Inference
+         │
+CLI auth ┘
+```
+
+The runtime resolver should also handle refresh when necessary:
+
+```python
+creds = resolve_xai_oauth_runtime_credentials()
+```
+
+Conceptually:
+
+```text
+load token
+    │
+    ▼
+token valid?
+ │       │
+yes      no
+ │       │
+ │       ▼
+ │    refresh
+ │       │
+ └───┬───┘
+     ▼
+runtime credentials
+```
+
+---
+
+# 5. Keep status separate from credentials
+
+Do not use a status function as your main credential API.
+
+Prefer:
+
+```python
+status = get_xai_oauth_auth_status()
+
+if status["logged_in"]:
+    ...
+```
+
+for UI/status purposes.
+
+Then:
+
+```python
+creds = resolve_xai_oauth_runtime_credentials()
+```
+
+for inference.
+
+This keeps bearer tokens out of status output.
+
+The separation should be:
+
+```text
+get_*_auth_status()
+│
+├── logged_in
+├── provider
+├── account information
+└── safe metadata
 
 
-include in main.py 
+resolve_*_runtime_credentials()
+│
+├── api_key / bearer
+├── base_url
+├── provider
+├── auth mode
+└── refresh handling
+```
 
+---
 
-    extended_providers = [ ]
+# 6. Create a provider-specific model module
+
+Providers with dynamic model catalogs should have a dedicated model module.
+
+For example:
+
+```text
+hermes_cli/
+├── codex_models.py
+├── xai_models.py
+└── ...
+```
+
+Expose a small public interface:
+
+```python
+get_xai_model_ids(
+    access_token=None,
+    base_url=None,
+)
+```
+
+The caller should not need to understand how model discovery works.
+
+---
+
+# 7. Use live model discovery where supported
+
+For xAI:
+
+```text
+OAuth credential
+      │
+      ▼
+GET /v1/models
+      │
+      ▼
+parse data[]
+      │
+      ▼
+filter models
+      │
+      ▼
+model picker
+```
+
+Conceptually:
+
+```python
+models = get_xai_model_ids(
+    access_token=creds["api_key"],
+    base_url=creds["base_url"],
+)
+```
+
+The discovery module should handle failures gracefully.
+
+A useful resolution order is:
+
+```text
+live provider API
+       │
+       ▼
+successful?
+ │          │
+yes         no
+ │          │
+ ▼          ▼
+models    curated defaults
+```
+
+This mirrors the general approach used by `codex_models.py`, although provider-specific fallback mechanisms can differ. Your Codex implementation, for example, also uses local configuration/cache and synthetic forward-compatible models. Pasted markdown
+
+---
+
+# 8. Maintain conservative fallback models
+
+Do not make Hermes unusable merely because `/models` is temporarily unavailable.
+
+Provide a small fallback:
+
+```python
+DEFAULT_XAI_MODELS = [
+    "grok-4.6",
+]
+```
+
+Then:
+
+```python
+if live_models:
+    return live_models
+
+return DEFAULT_XAI_MODELS
+```
+
+The fallback catalog should be conservative rather than trying to maintain every model ever released.
+
+Live discovery should remain authoritative whenever possible.
+
+---
+
+# 9. Handle provider-specific model lifecycle rules
+
+Different providers may require special model handling.
+
+For xAI we incorporated retirement detection directly into `xai_models.py`:
+
+```text
+model returned
+    │
+    ▼
+valid Grok model?
+    │
+    ▼
+retired?
+ │       │
+yes      no
+ │       │
+skip     keep
+```
+
+It can also detect an old model already present in Hermes configuration:
+
+```python
+info = get_retirement_info(current_model)
+```
+
+and recommend:
+
+```text
+old model
+    │
+    ▼
+replacement model
+    +
+optional configuration changes
+```
+
+Keep this provider-specific logic out of generic Hermes code.
+
+---
+
+# 10. Add the model flow to `main.py`
+
+`main.py` should orchestrate the pieces rather than implement them.
+
+For example:
+
+```python
+def _model_flow_xai_oauth(config, current_model=""):
+    ...
+```
+
+Its responsibilities should remain roughly:
+
+```text
+1. Check configured model
+2. Check authentication
+3. Login if required
+4. Resolve runtime credentials
+5. Discover models
+6. Ask user to select model
+7. Save selection
+8. Update provider configuration
+```
+
+It should call provider modules rather than implementing OAuth or API parsing itself.
+
+The resulting xAI flow is:
+
+```text
+_model_flow_xai_oauth()
+        │
+        ├── get_xai_oauth_auth_status()
+        │
+        ├── _login_xai_oauth()
+        │
+        ├── resolve_xai_oauth_runtime_credentials()
+        │
+        ├── get_xai_model_ids()
+        │
+        ├── _prompt_model_selection()
+        │
+        ├── _save_model_choice()
+        │
+        └── _update_config_for_provider()
+```
+
+---
+
+# 11. Keep inference transport separate
+
+Authentication alone does not make a provider compatible with Hermes.
+
+You also need to know the API protocol used for inference.
+
+Examples might include:
+
+```text
+Provider       Authentication     Transport
+--------------------------------------------------
+OpenAI API     API key            Responses / Chat
+Codex          OAuth              Responses
+xAI API        API key            OpenAI-compatible
+xAI OAuth      OAuth              Responses-compatible
+Anthropic      API key/OAuth      Messages
+```
+
+This distinction prevents provider-specific conditionals from spreading throughout the agent.
+
+A longer-term structure could be:
+
+```text
+agent/providers/
+├── openai_chat.py
+├── responses.py
+└── anthropic_messages.py
+```
+
+with provider configuration deciding which transport to use.
+
+---
+
+# 12. Test each layer independently
+
+A provider integration should have at least three categories of tests.
+
+### Authentication tests
+
+For xAI:
+
+```text
+tests/test_xai_oauth.py
+```
+
+Test:
+
+```text
+device authorization
+polling
+token storage
+token refresh
+refresh-token rotation
+expiration handling
+status secret omission
+runtime credential resolution
+```
+
+### Model tests
+
+```text
+tests/test_xai_models.py
+```
+
+Test:
+
+```text
+normalization
+model filtering
+deduplication
+live discovery
+Authorization header
+API failure
+fallback models
+retirement detection
+replacement recommendation
+```
+
+### Model-flow integration
+
+Also verify:
+
+```text
+runtime credential
+      │
+      ▼
+get_xai_model_ids()
+      │
+      ▼
+_prompt_model_selection()
+```
+
+Your existing Codex test follows this pattern by checking that the runtime access token reaches `get_codex_model_ids()`. Pasted markdown
+
+---
+
+# 13. Recommended provider contract
+
+For future providers, aim for a predictable interface.
+
+Authentication:
+
+```python
+get_<provider>_auth_status()
+
+_login_<provider>()
+
+resolve_<provider>_runtime_credentials()
+```
+
+Models:
+
+```python
+get_<provider>_model_ids()
+```
+
+Main flow:
+
+```python
+_model_flow_<provider>()
+```
+
+For example:
+
+```text
+xAI
+────────────────────────────────────────────
+
+get_xai_oauth_auth_status()
+
+_login_xai_oauth()
+
+resolve_xai_oauth_runtime_credentials()
+
+get_xai_model_ids()
+
+_model_flow_xai_oauth()
+```
+
+This makes additional integrations much easier to reason about.
+
+---
+
+# 14. Recommended directory structure
+
+For your customized Hermes version, a practical structure is:
+
+```text
+hermes-agent/
+│
+├── hermes_cli/
+│   │
+│   ├── main.py
+│   ├── auth.py
+│   │
+│   ├── auth_codex.py
+│   ├── codex_models.py
+│   │
+│   ├── auth_xai.py
+│   ├── xai_models.py
+│   │
+│   └── ...
+│
+├── tests/
+│   │
+│   ├── test_codex_models.py
+│   │
+│   ├── test_xai_oauth.py
+│   ├── test_xai_models.py
+│   │
+│   └── ...
+│
+└── config.yaml
+```
+
+The dependency direction should stay simple:
+
+```text
+main.py
+   │
+   ├──────► auth.py
+   │
+   │          │
+   │          └────► auth_xai.py
+   │
+   └──────► xai_models.py
+```
+
+Avoid making:
+
+```text
+auth_xai.py → main.py
+xai_models.py → main.py
+```
+
+That reduces circular-import problems.
+
+---
+
+# 15. Git workflow for adding a provider
+
+Implement providers capability-by-capability instead of as one large commit.
+
+```bash
+git checkout -b feature/<provider>
+```
+
+Recommended sequence:
+
+```text
+feat(provider): register <provider>
+
+feat(auth): add <provider> authentication
+
+feat(auth): add <provider> runtime credential resolution
+
+feat(model): add <provider> model discovery
+
+feat(inference): add <provider> inference transport
+
+test(auth): add <provider> authentication coverage
+
+test(model): add <provider> model discovery coverage
+
+docs(provider): document <provider> setup
+```
+
+For the xAI work specifically:
+
+```text
+feat(auth): register xAI OAuth provider
+
+feat(auth): add xAI device-code OAuth authentication
+
+feat(auth): add xAI OAuth runtime credential resolution
+
+feat(xai): add Grok model discovery and retirement handling
+
+feat(model): add xAI OAuth model selection flow
+
+test(auth): add xAI OAuth authentication coverage
+
+test(xai): add Grok model discovery and retirement coverage
+```
+
+## Final design rule
+
+When adding another provider, avoid asking:
+
+> "Where do I add support for this model?"
+
+Instead break the integration into five questions:
+
+```text
+1. PROVIDER
+   How does Hermes identify it?
+
+2. AUTHENTICATION
+   How does the user authenticate?
+
+3. RUNTIME CREDENTIALS
+   What does inference receive?
+
+4. MODELS
+   How does Hermes discover and validate models?
+
+5. TRANSPORT
+   How are requests actually sent?
+```
+
+If those five layers remain separate, adding another provider becomes a relatively repeatable integration rather than another set of provider-specific exceptions scattered throughout Hermes.

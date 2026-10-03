@@ -29,15 +29,32 @@ from agent.auxiliary_client import (
 def _clean_env(monkeypatch):
     """Strip provider env vars so each test starts clean."""
     for key in (
-        "OPENROUTER_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_KEY",
-        "OPENAI_MODEL", "LLM_MODEL", "NOUS_INFERENCE_BASE_URL",
-        "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
-        # Per-task provider/model/direct-endpoint overrides
-        "AUXILIARY_VISION_PROVIDER", "AUXILIARY_VISION_MODEL",
-        "AUXILIARY_VISION_BASE_URL", "AUXILIARY_VISION_API_KEY",
-        "AUXILIARY_WEB_EXTRACT_PROVIDER", "AUXILIARY_WEB_EXTRACT_MODEL",
-        "AUXILIARY_WEB_EXTRACT_BASE_URL", "AUXILIARY_WEB_EXTRACT_API_KEY",
-        "CONTEXT_COMPRESSION_PROVIDER", "CONTEXT_COMPRESSION_MODEL",
+        "OPENROUTER_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "OPENAI_MODEL",
+        "LLM_MODEL",
+        "NOUS_INFERENCE_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+
+        # xAI
+        "XAI_API_KEY",
+        "XAI_BASE_URL",
+        "HERMES_XAI_BASE_URL",
+
+        # Per-task overrides
+        "AUXILIARY_VISION_PROVIDER",
+        "AUXILIARY_VISION_MODEL",
+        "AUXILIARY_VISION_BASE_URL",
+        "AUXILIARY_VISION_API_KEY",
+        "AUXILIARY_WEB_EXTRACT_PROVIDER",
+        "AUXILIARY_WEB_EXTRACT_MODEL",
+        "AUXILIARY_WEB_EXTRACT_BASE_URL",
+        "AUXILIARY_WEB_EXTRACT_API_KEY",
+        "CONTEXT_COMPRESSION_PROVIDER",
+        "CONTEXT_COMPRESSION_MODEL",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -727,6 +744,7 @@ class TestAuxiliaryPoolAwareness:
         call_kwargs = mock_openai.call_args.kwargs
         assert call_kwargs["api_key"] == "pooled-agent-key"
         assert call_kwargs["base_url"] == "https://inference.pool.example/v1"
+        
 
     def test_resolve_provider_client_copilot_uses_runtime_credentials(self, monkeypatch):
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -1032,13 +1050,36 @@ class TestResolveForcedProvider:
         # Should use custom endpoint, not OpenRouter
         assert model == "my-local-model"
 
-    def test_forced_main_falls_to_codex(self, codex_auth_dir, monkeypatch):
-        with patch("agent.auxiliary_client._read_nous_auth", return_value=None), \
-             patch("agent.auxiliary_client.OpenAI"):
-            client, model = _resolve_forced_provider("main")
-        from agent.auxiliary_client import CodexAuxiliaryClient
-        assert isinstance(client, CodexAuxiliaryClient)
-        assert model == "gpt-5.2-codex"
+    def test_forced_main_falls_to_codex(
+            self,
+            codex_auth_dir,
+            monkeypatch,
+        ):
+            """Forced main falls back to Codex when no earlier provider is available."""
+
+            with (
+                patch(
+                    "agent.auxiliary_client._read_nous_auth",
+                    return_value=None,
+                ),
+                patch(
+                    "agent.auxiliary_client._resolve_custom_runtime",
+                    return_value=(None, None),
+                ),
+                patch(
+                    "agent.auxiliary_client._resolve_api_key_provider",
+                    return_value=(None, None),
+                ),
+                patch(
+                    "agent.auxiliary_client.OpenAI",
+                ),
+            ):
+                client, model = _resolve_forced_provider("main")
+
+            from agent.auxiliary_client import CodexAuxiliaryClient
+
+            assert isinstance(client, CodexAuxiliaryClient)
+            assert model == "gpt-5.2-codex"
 
     def test_forced_codex(self, codex_auth_dir, monkeypatch):
         with patch("agent.auxiliary_client._read_nous_auth", return_value=None), \
@@ -1497,3 +1538,272 @@ class TestCodexAdapterReasoningTranslation:
             extra_body={"reasoning": "medium"},  # wrong shape — must not crash
         )
         assert "reasoning" not in captured
+        
+class TestXaiOAuthProvider:
+    """Tests for xAI OAuth runtime provider resolution."""
+
+    def test_explicit_xai_oauth_uses_runtime_credentials(self):
+        """xai-oauth should resolve OAuth token and xAI base URL."""
+
+        with (
+            patch(
+                "hermes_cli.auth.resolve_xai_oauth_runtime_credentials",
+                return_value={
+                    "provider": "xai-oauth",
+                    "api_key": "xai-oauth-test-token",
+                    "base_url": "https://api.x.ai/v1",
+                    "source": "hermes-auth-store",
+                    "auth_mode": "oauth_device_code",
+                },
+            ) as mock_resolve,
+            patch(
+                "agent.auxiliary_client.OpenAI"
+            ) as mock_openai,
+        ):
+            mock_openai.return_value = MagicMock()
+
+            client, model = resolve_provider_client(
+                "xai-oauth",
+                model="grok-4.3",
+            )
+
+        assert client is not None
+        assert model == "grok-4.3"
+
+        mock_resolve.assert_called_once()
+
+        mock_openai.assert_called_once_with(
+            api_key="xai-oauth-test-token",
+            base_url="https://api.x.ai/v1",
+        )
+
+
+    def test_xai_oauth_does_not_use_openrouter(self):
+        """Explicit xai-oauth must never route through OpenRouter."""
+
+        with (
+            patch(
+                "hermes_cli.auth.resolve_xai_oauth_runtime_credentials",
+                return_value={
+                    "provider": "xai-oauth",
+                    "api_key": "xai-oauth-test-token",
+                    "base_url": "https://api.x.ai/v1",
+                },
+            ),
+            patch(
+                "agent.auxiliary_client._try_openrouter"
+            ) as mock_openrouter,
+            patch(
+                "agent.auxiliary_client.OpenAI"
+            ) as mock_openai,
+        ):
+            mock_openai.return_value = MagicMock()
+
+            client, model = resolve_provider_client(
+                "xai-oauth",
+                model="grok-4.3",
+            )
+
+        assert client is not None
+        assert model == "grok-4.3"
+
+        mock_openrouter.assert_not_called()
+
+        assert (
+            mock_openai.call_args.kwargs["base_url"]
+            == "https://api.x.ai/v1"
+        )
+
+
+    def test_xai_oauth_uses_requested_model(self):
+        """Explicit model override should be preserved."""
+
+        with (
+            patch(
+                "hermes_cli.auth.resolve_xai_oauth_runtime_credentials",
+                return_value={
+                    "provider": "xai-oauth",
+                    "api_key": "xai-oauth-test-token",
+                    "base_url": "https://api.x.ai/v1",
+                },
+            ),
+            patch(
+                "agent.auxiliary_client.OpenAI"
+            ) as mock_openai,
+        ):
+            mock_openai.return_value = MagicMock()
+
+            client, model = resolve_provider_client(
+                "xai-oauth",
+                model="grok-4.6",
+            )
+
+        assert client is not None
+        assert model == "grok-4.6"
+
+
+    def test_xai_oauth_uses_main_model_when_model_missing(
+        self,
+    ):
+        """When model=None, xAI should use the configured main model."""
+
+        with (
+            patch(
+                "hermes_cli.auth.resolve_xai_oauth_runtime_credentials",
+                return_value={
+                    "provider": "xai-oauth",
+                    "api_key": "xai-oauth-test-token",
+                    "base_url": "https://api.x.ai/v1",
+                },
+            ),
+            patch(
+                "agent.auxiliary_client._read_main_model",
+                return_value="grok-4.3",
+            ),
+            patch(
+                "agent.auxiliary_client.OpenAI"
+            ) as mock_openai,
+        ):
+            mock_openai.return_value = MagicMock()
+
+            client, model = resolve_provider_client(
+                "xai-oauth"
+            )
+
+        assert client is not None
+        assert model == "grok-4.3"
+
+
+    def test_xai_oauth_missing_credentials_returns_none(
+        self,
+    ):
+        """Missing xAI OAuth credentials should fail cleanly."""
+
+        with patch(
+            "hermes_cli.auth.resolve_xai_oauth_runtime_credentials",
+            side_effect=RuntimeError(
+                "xAI OAuth credentials unavailable"
+            ),
+        ):
+            client, model = resolve_provider_client(
+                "xai-oauth",
+                model="grok-4.3",
+            )
+
+        assert client is None
+        assert model is None
+
+
+    def test_xai_oauth_missing_access_token_returns_none(
+        self,
+    ):
+        """Empty OAuth access token should not construct a client."""
+
+        with (
+            patch(
+                "hermes_cli.auth.resolve_xai_oauth_runtime_credentials",
+                return_value={
+                    "provider": "xai-oauth",
+                    "api_key": "",
+                    "base_url": "https://api.x.ai/v1",
+                },
+            ),
+            patch(
+                "agent.auxiliary_client.OpenAI"
+            ) as mock_openai,
+        ):
+            client, model = resolve_provider_client(
+                "xai-oauth",
+                model="grok-4.3",
+            )
+
+        assert client is None
+        assert model is None
+
+        mock_openai.assert_not_called()
+
+
+    def test_xai_oauth_falls_back_to_default_base_url(
+        self,
+    ):
+        """Missing runtime base URL should use the xAI default."""
+
+        with (
+            patch(
+                "hermes_cli.auth.resolve_xai_oauth_runtime_credentials",
+                return_value={
+                    "provider": "xai-oauth",
+                    "api_key": "xai-oauth-test-token",
+                    "base_url": "",
+                },
+            ),
+            patch(
+                "agent.auxiliary_client.OpenAI"
+            ) as mock_openai,
+        ):
+            mock_openai.return_value = MagicMock()
+
+            client, model = resolve_provider_client(
+                "xai-oauth",
+                model="grok-4.3",
+            )
+
+        assert client is not None
+        assert model == "grok-4.3"
+
+        assert (
+            mock_openai.call_args.kwargs["base_url"]
+            == "https://api.x.ai/v1"
+        )
+
+
+    def test_xai_oauth_does_not_use_openrouter_even_if_key_exists(
+        self,
+        monkeypatch,
+    ):
+        """OpenRouter credentials must not override explicit xai-oauth."""
+
+        monkeypatch.setenv(
+            "OPENROUTER_API_KEY",
+            "openrouter-test-key",
+        )
+
+        with (
+            patch(
+                "hermes_cli.auth.resolve_xai_oauth_runtime_credentials",
+                return_value={
+                    "provider": "xai-oauth",
+                    "api_key": "xai-oauth-test-token",
+                    "base_url": "https://api.x.ai/v1",
+                },
+            ),
+            patch(
+                "agent.auxiliary_client._try_openrouter"
+            ) as mock_openrouter,
+            patch(
+                "agent.auxiliary_client.OpenAI"
+            ) as mock_openai,
+        ):
+            mock_openai.return_value = MagicMock()
+
+            client, model = resolve_provider_client(
+                "xai-oauth",
+                model="grok-4.3",
+            )
+
+        assert client is not None
+        assert model == "grok-4.3"
+
+        mock_openrouter.assert_not_called()
+
+        call_kwargs = mock_openai.call_args.kwargs
+
+        assert (
+            call_kwargs["api_key"]
+            == "xai-oauth-test-token"
+        )
+
+        assert (
+            call_kwargs["base_url"]
+            == "https://api.x.ai/v1"
+        )

@@ -1431,6 +1431,64 @@ def resolve_provider_client(
         final_model = model or default
         return (_to_async_client(client, final_model) if async_mode
                 else (client, final_model))
+        
+    
+    # ── xAI Grok OAuth ───────────────────────────────────────────────
+    if provider == "xai-oauth":
+        try:
+            from hermes_cli.auth import resolve_xai_oauth_runtime_credentials
+
+            creds = resolve_xai_oauth_runtime_credentials()
+
+        except Exception as exc:
+            logger.warning(
+                "resolve_provider_client: xai-oauth requested "
+                "but OAuth credentials could not be resolved: %s",
+                exc,
+            )
+            return None, None
+
+        api_key = str(
+            creds.get("api_key", "")
+        ).strip()
+
+        base_url = str(
+            creds.get("base_url", "")
+        ).strip().rstrip("/")
+
+        if not api_key:
+            logger.warning(
+                "resolve_provider_client: xai-oauth requested "
+                "but no OAuth access token was found "
+                "(run: hermes model)"
+            )
+            return None, None
+
+        if not base_url:
+            base_url = "https://api.x.ai/v1"
+
+        final_model = (
+            model
+            or _read_main_model()
+            or "grok-4.3"
+        )
+
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+        )
+
+        logger.debug(
+            "resolve_provider_client: xai-oauth (%s) via %s",
+            final_model,
+            base_url,
+        )
+
+        return (
+            _to_async_client(client, final_model)
+            if async_mode
+            else (client, final_model)
+        )
 
     # ── Custom endpoint (OPENAI_BASE_URL + OPENAI_API_KEY) ───────────
     if provider == "custom":
