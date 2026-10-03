@@ -536,3 +536,9 @@ rather than:
 That gives you a reusable provider architecture where adding Grok, Claude, OpenAI/Codex, Gemini, OpenRouter, or another provider becomes a small integration rather than another modification to the core agent.
 
 For the current xAI work, your next commits should therefore be `feat(auth): register xAI OAuth provider` → `feat(auth): add xAI device-code OAuth authentication` → `feat(provider): resolve xAI OAuth runtime credentials` → `test(auth): add xAI OAuth authentication coverage`.
+
+
+include in main.py 
+
+
+    extended_providers = [ ]
