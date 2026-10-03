@@ -76,11 +76,16 @@ hermes_cli/runtime_provider.py
 hermes_cli/models.py
     Curated model lists, provider detection, model validation.
 
+hermes_cli/providers.py
+    Provider overlays, aliases, display labels, transport defaults, and
+    provider metadata used by `/model <name> --provider <provider>`.
+
 hermes_cli/model_normalize.py
     Provider-specific model ID normalization.
 
 hermes_cli/model_switch.py
-    Shared `/model` switching pipeline for CLI and gateway.
+    Shared `/model` switching pipeline for CLI and gateway, including the
+    authenticated-provider list used by Telegram and Discord pickers.
 
 hermes_cli/main.py
     Interactive `hermes model` provider/model picker flows.
@@ -147,6 +152,39 @@ variables:
     api_key_env_vars=("EXAMPLE_API_KEY",),
     base_url_env_var="EXAMPLE_BASE_URL",
 )
+```
+
+Also add a provider overlay in `hermes_cli/providers.py` when the provider is
+not fully described by models.dev or needs Hermes-specific behavior. The
+overlay controls transport, OAuth-vs-API-key auth type, base URL overrides,
+aggregator behavior, and extra environment variables.
+
+```python
+"xai-oauth": HermesOverlay(
+    transport="codex_responses",
+    auth_type="oauth_external",
+    base_url_override="https://api.x.ai/v1",
+    base_url_env_var="XAI_BASE_URL",
+)
+```
+
+Add aliases only when they are intentionally unambiguous:
+
+```python
+"grok-oauth": "xai-oauth",
+```
+
+Keep broad aliases stable. For example, `grok` should continue resolving to
+the canonical xAI API-key provider unless you intentionally want to change that
+behavior for existing users.
+
+Add a display label when the provider is not in models.dev, or when the
+models.dev label is not what users should see:
+
+```python
+_LABEL_OVERRIDES = {
+    "xai-oauth": "xAI Grok OAuth",
+}
 ```
 
 ## 2. Add Authentication
@@ -262,7 +300,37 @@ DEFAULT_XAI_MODELS = [
 The provider-specific model module is also the right place for lifecycle rules,
 such as filtering retired models or normalizing provider-prefixed IDs.
 
-## 6. Wire The Model Picker
+## 6. Add Curated Models
+
+Add curated model IDs to `_PROVIDER_MODELS` in `hermes_cli/models.py`.
+These lists are intentionally smaller than the full upstream catalog: they are
+the models Hermes should show in quick pickers and prefer for agent use.
+
+```python
+_PROVIDER_MODELS = {
+    "xai-oauth": [
+        "grok-4.20",
+        "grok-4.20-reasoning",
+        "grok-4.20-non-reasoning",
+        "grok-4.20-multi-agent",
+        "grok-build-0.1",
+        "grok-4.5",
+        "grok-4",
+        "grok-3",
+        "grok-3-mini",
+    ],
+}
+```
+
+Use provider-native model IDs. Aggregators such as OpenRouter normally use
+vendor-prefixed IDs like `x-ai/grok-4.5`; direct providers such as xAI usually
+use bare IDs like `grok-4.5`.
+
+If adding a model to an existing provider, this may be the only required code
+change. If adding a new provider slug, the provider must also be registered in
+`auth.py` and `providers.py`, otherwise the model list may be unreachable.
+
+## 7. Wire The Model Picker
 
 `hermes model` should orchestrate provider-specific helpers rather than
 implementing auth or model parsing inline.
@@ -303,7 +371,59 @@ model:
   base_url: https://api.x.ai/v1
 ```
 
-## 7. Keep Model Switching And Runtime In Sync
+## 8. Make Gateway Pickers See It
+
+Telegram and Discord do not build their provider buttons directly from
+`_PROVIDER_MODELS`. They call:
+
+```text
+gateway/run.py
+    _handle_model_command()
+        |
+        +-- list_authenticated_providers()
+        |
+        +-- adapter.send_model_picker()
+```
+
+`list_authenticated_providers()` in `hermes_cli/model_switch.py` only returns
+providers that are both known and authenticated. That means a curated model
+list is not enough by itself.
+
+A provider appears in gateway pickers when:
+
+```text
+1. The provider slug is discoverable:
+   - mapped through PROVIDER_TO_MODELS_DEV in agent/models_dev.py, or
+   - present in HERMES_OVERLAYS in hermes_cli/providers.py, or
+   - defined by the user under providers: in config.yaml.
+
+2. Credentials are detectable:
+   - API-key providers have one of their env vars set, or
+   - OAuth/external providers have an auth-store or credential-pool entry.
+
+3. The provider has at least one curated model:
+   - _PROVIDER_MODELS[provider_slug] is non-empty, or
+   - the provider returns models through the relevant fallback path.
+```
+
+Telegram additionally filters out providers whose `total_models <= 0` before
+rendering buttons. If a provider is configured as current but does not appear
+in Telegram, check these in order:
+
+```text
+[ ] Is the provider in HERMES_OVERLAYS or PROVIDER_TO_MODELS_DEV?
+[ ] Does list_authenticated_providers() return it?
+[ ] Does _PROVIDER_MODELS contain the exact provider slug?
+[ ] Is total_models greater than 0?
+[ ] Is the running gateway restarted after code/config changes?
+```
+
+For example, adding `_PROVIDER_MODELS["xai-oauth"]` is not enough unless
+`xai-oauth` is also registered in `HERMES_OVERLAYS` with
+`auth_type="oauth_external"`. Otherwise the picker never asks for that model
+list.
+
+## 9. Keep Model Switching And Runtime In Sync
 
 `hermes model` saving a provider is not enough. The next chat turn calls
 `resolve_runtime_provider()` before the agent is initialized. That resolver must
@@ -332,7 +452,7 @@ The missing OpenRouter key was only a symptom. The real bug was that
 `xai-oauth` had no runtime branch, so it fell through to OpenRouter instead of
 loading the xAI OAuth token.
 
-## 8. Test Each Layer
+## 10. Test Each Layer
 
 Provider integrations should include focused tests for each layer.
 
@@ -367,6 +487,16 @@ api_key/token comes from the correct auth source
 api_mode is correct
 OpenRouter fallback is not used accidentally
 explicit api_key/base_url overrides work
+```
+
+Picker/provider-list tests:
+
+```text
+registered provider appears when credentials exist
+OAuth auth-store entries are treated as credentials
+providers with zero curated models are hidden
+current provider is marked current
+picker callback passes the selected provider slug to switch_model()
 ```
 
 For the `xai-oauth` fix, the critical regression assertions are:
@@ -404,10 +534,14 @@ Use this checklist for new providers:
 [ ] Aliases are explicit and backwards-compatible
 [ ] Auth status and runtime credentials are separate
 [ ] OAuth or complex auth lives in a provider-specific module
+[ ] Provider overlay exists in hermes_cli/providers.py when needed
+[ ] Display label and aliases are explicit
+[ ] Curated models are listed under the exact provider slug in models.py
 [ ] runtime_provider.py returns provider/base_url/api_key/api_mode
 [ ] Model IDs are normalized for the target provider
 [ ] Live model discovery has conservative fallback behavior
 [ ] `hermes model` saves model.default, model.provider, and base_url
+[ ] Telegram/Discord picker provider list can discover the provider
 [ ] Tests cover auth, model discovery, runtime resolution, and picker flow
 [ ] No provider silently falls through to OpenRouter unless intended
 ```
@@ -425,5 +559,3 @@ questions instead:
 
 If those boundaries stay clean, adding providers remains repeatable instead of
 turning into a trail of special cases.
-
-include them in models.py
