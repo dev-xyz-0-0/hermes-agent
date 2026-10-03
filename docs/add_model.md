@@ -1,284 +1,427 @@
-# General Guide: How Hermes Maps Providers to Models
+# Adding Model Providers to Hermes
 
 Hermes does not treat a model name as globally valid across every provider.
-
-The effective runtime configuration is determined by the combination of:
+The effective runtime route is the combination of:
 
 ```text
 model
-+
-provider
-+
-provider authentication
-+
-provider API mode
-+
-provider base URL
-        ↓
-actual inference backend
++ provider
++ authentication
++ base URL
++ API mode
+= actual inference backend
 ```
 
-For example, these are fundamentally different runtime configurations:
-
-```text
-provider: openrouter
-model: grok-4.5
-```
-
-```text
-provider: xai
-model: grok-4.5
-```
-
-```text
-provider: xai-oauth
-model: grok-4.5
-```
-
-Even though the model name may look identical, Hermes can use a different endpoint, authentication mechanism, request protocol, and runtime adapter depending on the provider.
-
----
-
-# 1. Hermes Provider Resolution Flow
-
-At a high level, Hermes resolves models approximately like this:
-
-```text
-hermes model
-     │
-     │ saves
-     ▼
-provider + model
-     │
-     ▼
-config / profile
-     │
-     ▼
-runtime_provider.py
-     │
-     ├── provider-specific authentication
-     ├── base_url
-     ├── api_mode
-     ├── API key / OAuth token
-     └── runtime provider name
-     │
-     ▼
-agent runtime
-     │
-     ├── chat_completions
-     ├── codex_responses
-     ├── anthropic_messages
-     └── other provider modes
-     │
-     ▼
-Provider API
-```
-
-This distinction is important:
-
-```text
-Model selection
-!=
-Runtime provider resolution
-```
-
-`hermes model` may correctly save and display a provider, but the runtime still needs an explicit implementation for that provider.
-
-If `runtime_provider.py` does not know how to resolve the selected provider, the configuration displayed by Hermes can differ from the provider actually used at inference time.
-
----
-
-# 2. Provider Selection vs Runtime Resolution
-
-Consider:
+For example, these are different runtime configurations even though the model
+name looks the same:
 
 ```yaml
-provider: xai-oauth
-model: grok-4.5
+model:
+  provider: openrouter
+  default: grok-4.5
 ```
 
-There are two separate stages.
+```yaml
+model:
+  provider: xai
+  default: grok-4.5
+```
 
-## Stage 1 — Configuration
+```yaml
+model:
+  provider: xai-oauth
+  default: grok-4.5
+```
 
-Hermes records:
+Each provider can use a different endpoint, credential type, request protocol,
+model normalization rule, and runtime adapter.
+
+## The Provider Pipeline
+
+Provider support should be split into distinct layers:
 
 ```text
-provider = xai-oauth
-model    = grok-4.5
+provider registration
+        |
+        v
+authentication
+        |
+        v
+runtime credential resolution
+        |
+        v
+model discovery / validation
+        |
+        v
+model selection and config persistence
+        |
+        v
+inference transport
 ```
 
-Commands such as:
+Keeping those layers separate prevents provider-specific conditionals from
+leaking through the CLI, gateway, and agent runtime.
 
-```bash
-hermes model
-```
+## Files Usually Involved
 
-may therefore correctly show:
+Most provider additions touch a subset of these files:
 
 ```text
-xai-oauth
-grok-4.5
+hermes_cli/auth.py
+    Provider registry, auth status, provider aliases, shared auth-store helpers.
+
+hermes_cli/runtime_provider.py
+    Runtime route resolution: provider, base_url, api_key/token, api_mode.
+
+hermes_cli/models.py
+    Curated model lists, provider detection, model validation.
+
+hermes_cli/model_normalize.py
+    Provider-specific model ID normalization.
+
+hermes_cli/model_switch.py
+    Shared `/model` switching pipeline for CLI and gateway.
+
+hermes_cli/main.py
+    Interactive `hermes model` provider/model picker flows.
+
+hermes_cli/<provider>_models.py
+    Optional provider-specific live model discovery.
+
+hermes_cli/auth_<provider>.py
+    Optional provider-specific OAuth or complex auth logic.
 ```
 
-That only proves the configuration layer understands `xai-oauth`.
+API-key providers may only need registry/runtime/model-list changes. OAuth or
+external-process providers usually need their own auth module and tests.
 
-It does not prove that the runtime resolver supports it.
+## Provider Is Not Model
 
-## Stage 2 — Runtime resolution
-
-Before making an inference request, Hermes needs to turn:
+A provider describes how Hermes connects. A model describes what Hermes asks
+for after that connection is resolved.
 
 ```text
-xai-oauth
+Provider        Authentication        Example model
+---------------------------------------------------
+openrouter      API key               x-ai/grok-4.5
+xai             API key               grok-4.5
+xai-oauth       OAuth bearer token     grok-4.5
+openai-codex    OAuth bearer token     gpt-5.4
+anthropic       API key / token        claude-sonnet-4.6
 ```
 
-into something approximately equivalent to:
+If a vendor supports multiple authentication modes, keep them distinct. For
+xAI, `xai` means API-key authentication and `xai-oauth` means OAuth
+authentication. Do not silently repoint existing aliases such as `grok` unless
+you intentionally want to change user behavior.
+
+## 1. Register The Provider
+
+Add the provider to `PROVIDER_REGISTRY` in `hermes_cli/auth.py`.
 
 ```python
-RuntimeProvider(
-    provider="xai-oauth",
-    model="grok-4.5",
-    base_url="https://api.x.ai/v1",
-    api_key="<OAuth bearer token>",
-    api_mode="codex_responses",
+"xai-oauth": ProviderConfig(
+    id="xai-oauth",
+    name="xAI Grok OAuth (SuperGrok / Premium+)",
+    auth_type="oauth_external",
+    inference_base_url="https://api.x.ai/v1",
 )
 ```
 
-If that runtime branch does not exist, the provider can fall through to another resolver.
+Then make aliases explicit in `resolve_provider()` if needed:
 
-That was the root cause of the `xai-oauth` issue.
-
----
-
-# 3. Root Cause: `xai-oauth` Fell Through to OpenRouter
-
-The configuration layer correctly understood:
-
-```text
-provider: xai-oauth
+```python
+"xai-oauth": "xai-oauth",
+"grok-oauth": "xai-oauth",
 ```
 
-and `hermes model` correctly saved and displayed it.
+For API-key providers, include the default base URL and accepted environment
+variables:
 
-However, `runtime_provider.py` had no explicit runtime-resolution branch for:
-
-```text
-xai-oauth
+```python
+"example": ProviderConfig(
+    id="example",
+    name="Example AI",
+    auth_type="api_key",
+    inference_base_url="https://api.example.com/v1",
+    api_key_env_vars=("EXAMPLE_API_KEY",),
+    base_url_env_var="EXAMPLE_BASE_URL",
+)
 ```
 
-This was especially important because `xai-oauth` is an:
+## 2. Add Authentication
+
+Simple API-key providers can use `resolve_api_key_provider_credentials()` once
+registered. More complex providers should isolate their logic in a dedicated
+module such as `auth_xai.py` or `auth_codex.py`.
+
+Provider-specific auth modules should own:
 
 ```text
-oauth_external
+OAuth discovery
+device-code or browser login
+token storage
+token refresh
+expiration checks
+provider-specific auth errors
+runtime credential construction
 ```
 
-provider rather than a normal API-key provider.
+Expose two separate concepts:
 
-As a result, runtime resolution did not obtain the xAI OAuth credentials.
-
-Instead, the provider fell through to the existing OpenRouter resolution path.
-
-The effective runtime configuration therefore became something like:
-
-```text
-Requested:
-
-provider: xai-oauth
-model: grok-4.5
-
-
-Actually executed:
-
-provider: openrouter
-model: grok-4.5
-endpoint: https://openrouter.ai/api/v1
+```python
+get_<provider>_auth_status()
+resolve_<provider>_runtime_credentials()
 ```
 
-This explains the observed log:
+Status functions are for UI and should avoid returning secrets. Runtime
+credential functions are for inference and should return the bearer credential
+or API key.
 
-```text
-Provider: openrouter
-Model: grok-4.5
-Endpoint: https://openrouter.ai/api/v1
+## 3. Resolve Runtime Credentials
 
-HTTP 401:
-Missing Authentication header
+Every provider must eventually produce a runtime dictionary:
+
+```python
+{
+    "provider": "xai-oauth",
+    "api_mode": "codex_responses",
+    "base_url": "https://api.x.ai/v1",
+    "api_key": "<runtime bearer token>",
+    "source": "hermes-auth-store",
+    "requested_provider": "xai-oauth",
+}
 ```
 
-The missing OpenRouter authentication was therefore a secondary symptom.
+The `api_key` field is the runtime authorization secret. It may contain an API
+key, an OAuth access token, or a short-lived provider token.
 
-The real problem was not:
+Add explicit handling in `hermes_cli/runtime_provider.py` for any provider that
+cannot be resolved by the generic API-key path. OAuth providers need a runtime
+branch; otherwise they can fall through to the wrong provider.
 
-```text
-OPENROUTER_API_KEY is missing
-```
-
-The real problem was:
-
-```text
-xai-oauth was never resolved at runtime.
-```
-
-Because Hermes incorrectly routed the request through OpenRouter, it then looked for OpenRouter credentials that were never supposed to be required.
-
-The failure chain was:
-
-```text
-hermes model
-     │
-     └── xai-oauth / grok-4.5
-              │
-              ▼
-runtime_provider.py
-              │
-              ├── no xai-oauth branch
-              │
-              ▼
-       provider fallthrough
-              │
-              ▼
-          OpenRouter
-              │
-              ├── no OPENROUTER_API_KEY
-              │
-              ▼
-        HTTP 401
-Missing Authentication header
-```
-
----
-
-# 4. Runtime Fix for `xai-oauth`
-
-The fix was to add dedicated runtime credential resolution for the provider.
-
-A new resolver was added:
+For `xai-oauth`, runtime resolution must call:
 
 ```python
 resolve_xai_oauth_runtime_credentials()
 ```
 
-Its responsibility is to retrieve the xAI OAuth credentials from the Hermes authentication store and construct the correct runtime provider configuration.
-
-The expected runtime mapping is now:
-
-```text
-provider:
-    xai-oauth
-
-base_url:
-    https://api.x.ai/v1
-
-authentication:
-    OAuth bearer token from Hermes auth store
-
-api_mode:
-    codex_responses
-```
-
-Conceptually:
+and return:
 
 ```python
-if provider == "xai-oauth":
-    credentials
+{
+    "provider": "xai-oauth",
+    "api_mode": "codex_responses",
+    "base_url": "https://api.x.ai/v1",
+    "api_key": "<xAI OAuth access token>",
+}
+```
+
+## 4. Decide The API Mode
+
+Authentication and transport are separate decisions. A provider can authenticate
+with OAuth but still use an OpenAI-compatible endpoint, a Responses-compatible
+endpoint, or Anthropic Messages.
+
+Common Hermes API modes:
+
+```text
+chat_completions
+codex_responses
+anthropic_messages
+```
+
+Set `api_mode` in `runtime_provider.py`, and only honor a persisted
+`model.api_mode` when it belongs to the same configured provider. This prevents
+stale transport settings from leaking across provider switches.
+
+## 5. Add Model Discovery
+
+Providers with a live `/models` endpoint should get a small model module:
+
+```text
+hermes_cli/xai_models.py
+hermes_cli/codex_models.py
+```
+
+Expose a simple public function:
+
+```python
+get_xai_model_ids(access_token=None, base_url=None)
+```
+
+Use live discovery when possible and keep a conservative fallback list for
+temporary API failures:
+
+```python
+DEFAULT_XAI_MODELS = [
+    "grok-4.6",
+]
+```
+
+The provider-specific model module is also the right place for lifecycle rules,
+such as filtering retired models or normalizing provider-prefixed IDs.
+
+## 6. Wire The Model Picker
+
+`hermes model` should orchestrate provider-specific helpers rather than
+implementing auth or model parsing inline.
+
+A provider flow in `hermes_cli/main.py` usually does this:
+
+```text
+1. Check current config
+2. Check auth status
+3. Login if needed
+4. Resolve runtime credentials
+5. Fetch model IDs
+6. Prompt for model selection
+7. Save model.default
+8. Save model.provider and model.base_url
+```
+
+For xAI OAuth, the flow is:
+
+```text
+_model_flow_xai_oauth()
+        |
+        +-- get_xai_oauth_auth_status()
+        +-- _login_xai_oauth()
+        +-- resolve_xai_oauth_runtime_credentials()
+        +-- get_xai_model_ids()
+        +-- _prompt_model_selection()
+        +-- _save_model_choice()
+        +-- _update_config_for_provider()
+```
+
+The saved config should identify both the model and provider:
+
+```yaml
+model:
+  provider: xai-oauth
+  default: grok-4.5
+  base_url: https://api.x.ai/v1
+```
+
+## 7. Keep Model Switching And Runtime In Sync
+
+`hermes model` saving a provider is not enough. The next chat turn calls
+`resolve_runtime_provider()` before the agent is initialized. That resolver must
+return the same provider the picker saved.
+
+If those layers disagree, the UI can show one provider while inference uses
+another.
+
+The `xai-oauth` regression looked like this:
+
+```text
+Configured:
+  provider: xai-oauth
+  model: grok-4.5
+
+Runtime before the fix:
+  provider: openrouter
+  model: grok-4.5
+  endpoint: https://openrouter.ai/api/v1
+
+Observed error:
+  HTTP 401: Missing Authentication header
+```
+
+The missing OpenRouter key was only a symptom. The real bug was that
+`xai-oauth` had no runtime branch, so it fell through to OpenRouter instead of
+loading the xAI OAuth token.
+
+## 8. Test Each Layer
+
+Provider integrations should include focused tests for each layer.
+
+Authentication tests:
+
+```text
+login flow
+token storage
+token refresh
+expiration handling
+safe status output
+runtime credential resolution
+```
+
+Model tests:
+
+```text
+normalization
+live model discovery
+authorization headers
+API failure fallback
+model filtering
+retirement handling
+```
+
+Runtime provider tests:
+
+```text
+explicit provider resolves to itself
+base_url is provider-specific
+api_key/token comes from the correct auth source
+api_mode is correct
+OpenRouter fallback is not used accidentally
+explicit api_key/base_url overrides work
+```
+
+For the `xai-oauth` fix, the critical regression assertions are:
+
+```python
+resolved = resolve_runtime_provider(requested="xai-oauth")
+
+assert resolved["provider"] == "xai-oauth"
+assert resolved["api_mode"] == "codex_responses"
+assert resolved["base_url"] == "https://api.x.ai/v1"
+assert resolved["api_key"]
+```
+
+Run focused tests while developing:
+
+```bash
+source venv/bin/activate
+python -m pytest tests/hermes_cli/test_runtime_provider_resolution.py -q
+python -m pytest tests/hermes_cli/test_xai_oauth.py tests/hermes_cli/test_xai_models.py -q
+```
+
+Before pushing, run the full suite:
+
+```bash
+source venv/bin/activate
+python -m pytest tests/ -q
+```
+
+## Provider Integration Checklist
+
+Use this checklist for new providers:
+
+```text
+[ ] Provider registered in PROVIDER_REGISTRY
+[ ] Aliases are explicit and backwards-compatible
+[ ] Auth status and runtime credentials are separate
+[ ] OAuth or complex auth lives in a provider-specific module
+[ ] runtime_provider.py returns provider/base_url/api_key/api_mode
+[ ] Model IDs are normalized for the target provider
+[ ] Live model discovery has conservative fallback behavior
+[ ] `hermes model` saves model.default, model.provider, and base_url
+[ ] Tests cover auth, model discovery, runtime resolution, and picker flow
+[ ] No provider silently falls through to OpenRouter unless intended
+```
+
+The design question is not “where do I add this model?” Break it into five
+questions instead:
+
+```text
+1. Provider: how does Hermes identify it?
+2. Authentication: how does the user authenticate?
+3. Runtime credentials: what does inference receive?
+4. Models: how does Hermes discover and normalize model IDs?
+5. Transport: which API mode sends the request?
+```
+
+If those boundaries stay clean, adding providers remains repeatable instead of
+turning into a trail of special cases.
