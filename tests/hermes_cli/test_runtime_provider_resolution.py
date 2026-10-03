@@ -143,6 +143,58 @@ def test_resolve_runtime_provider_codex(monkeypatch):
     assert resolved["requested_provider"] == "openai-codex"
 
 
+def test_resolve_runtime_provider_xai_oauth(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "xai-oauth")
+    monkeypatch.setattr(
+        rp,
+        "resolve_xai_oauth_runtime_credentials",
+        lambda: {
+            "provider": "xai-oauth",
+            "base_url": "https://api.x.ai/v1",
+            "api_key": "xai-oauth-token",
+            "source": "hermes-auth-store",
+            "last_refresh": "2026-10-03T00:00:00Z",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="xai-oauth")
+
+    assert resolved["provider"] == "xai-oauth"
+    assert resolved["api_mode"] == "codex_responses"
+    assert resolved["base_url"] == "https://api.x.ai/v1"
+    assert resolved["api_key"] == "xai-oauth-token"
+    assert resolved["source"] == "hermes-auth-store"
+    assert resolved["requested_provider"] == "xai-oauth"
+
+
+def test_resolve_runtime_provider_xai_oauth_explicit_override(monkeypatch):
+    def _unexpected_xai_credentials():
+        raise AssertionError("resolve_xai_oauth_runtime_credentials should not be called")
+
+    def _unexpected_pool(provider):
+        raise AssertionError(f"load_pool should not be called for {provider}")
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "xai-oauth")
+    monkeypatch.setattr(
+        rp,
+        "resolve_xai_oauth_runtime_credentials",
+        _unexpected_xai_credentials,
+    )
+    monkeypatch.setattr(rp, "load_pool", _unexpected_pool)
+
+    resolved = rp.resolve_runtime_provider(
+        requested="xai-oauth",
+        explicit_api_key="explicit-xai-token",
+        explicit_base_url="https://xai-proxy.example.com/v1/",
+    )
+
+    assert resolved["provider"] == "xai-oauth"
+    assert resolved["api_mode"] == "codex_responses"
+    assert resolved["base_url"] == "https://xai-proxy.example.com/v1"
+    assert resolved["api_key"] == "explicit-xai-token"
+    assert resolved["requested_provider"] == "xai-oauth"
+
+
 def test_resolve_runtime_provider_ai_gateway(monkeypatch):
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "ai-gateway")
     monkeypatch.setattr(rp, "_get_model_config", lambda: {})

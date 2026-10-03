@@ -290,7 +290,7 @@ uv run pytest tests/cron/test_cron_script.py -q
 uv run pytest tests/gateway/test_telegram_approval_buttons.py -q      
 tests/gateway/test_unknown_command.py
  
-uv run pytest tests/agent/test_auxiliary_client.py -q
+uv run pytest tests/hermes_cli/test_runtime_provider_resolution.py -q
 
 
 generate summary on this commit :

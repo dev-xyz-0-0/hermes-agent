@@ -19,6 +19,7 @@ from hermes_cli.auth import (
     resolve_provider,
     resolve_nous_runtime_credentials,
     resolve_codex_runtime_credentials,
+    resolve_xai_oauth_runtime_credentials,
     resolve_api_key_provider_credentials,
     resolve_external_process_provider_credentials,
     has_usable_secret,
@@ -150,6 +151,9 @@ def _resolve_runtime_from_pool_entry(
     if provider == "openai-codex":
         api_mode = "codex_responses"
         base_url = base_url or DEFAULT_CODEX_BASE_URL
+    elif provider == "xai-oauth":
+        api_mode = "codex_responses"
+        base_url = base_url or PROVIDER_REGISTRY["xai-oauth"].inference_base_url
     elif provider == "anthropic":
         api_mode = "anthropic_messages"
         cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
@@ -503,6 +507,26 @@ def _resolve_explicit_runtime(
             "requested_provider": requested_provider,
         }
 
+    if provider == "xai-oauth":
+        base_url = explicit_base_url or PROVIDER_REGISTRY["xai-oauth"].inference_base_url
+        api_key = explicit_api_key
+        last_refresh = None
+        if not api_key:
+            creds = resolve_xai_oauth_runtime_credentials()
+            api_key = creds.get("api_key", "")
+            last_refresh = creds.get("last_refresh")
+            if not explicit_base_url:
+                base_url = creds.get("base_url", "").rstrip("/") or base_url
+        return {
+            "provider": "xai-oauth",
+            "api_mode": "codex_responses",
+            "base_url": base_url.rstrip("/"),
+            "api_key": api_key,
+            "source": "explicit",
+            "last_refresh": last_refresh,
+            "requested_provider": requested_provider,
+        }
+
     if provider == "nous":
         state = auth_mod.get_provider_auth_state("nous") or {}
         base_url = (
@@ -695,6 +719,24 @@ def resolve_runtime_provider(
             # Auto-detected Codex but credentials are stale/revoked —
             # fall through to env-var providers (e.g. OpenRouter).
             logger.info("Auto-detected Codex provider but credentials failed; "
+                        "falling through to next provider.")
+
+    if provider == "xai-oauth":
+        try:
+            creds = resolve_xai_oauth_runtime_credentials()
+            return {
+                "provider": "xai-oauth",
+                "api_mode": "codex_responses",
+                "base_url": creds.get("base_url", "").rstrip("/"),
+                "api_key": creds.get("api_key", ""),
+                "source": creds.get("source", "hermes-auth-store"),
+                "last_refresh": creds.get("last_refresh"),
+                "requested_provider": requested_provider,
+            }
+        except AuthError:
+            if requested_provider != "auto":
+                raise
+            logger.info("Auto-detected xAI OAuth provider but credentials failed; "
                         "falling through to next provider.")
 
     if provider == "copilot-acp":
