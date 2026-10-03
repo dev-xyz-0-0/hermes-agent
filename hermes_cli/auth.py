@@ -197,6 +197,12 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("DEEPSEEK_API_KEY",),
         base_url_env_var="DEEPSEEK_BASE_URL",
     ),
+    "xai-oauth": ProviderConfig(
+        id="xai-oauth",
+        name="xAI Grok OAuth (SuperGrok / Premium+)",
+        auth_type="oauth_external",
+        inference_base_url="https://api.x.ai/v1",
+    ),
     "xai": ProviderConfig(
         id="xai",
         name="xAI",
@@ -826,6 +832,7 @@ def resolve_provider(
         "glm": "zai", "z-ai": "zai", "z.ai": "zai", "zhipu": "zai",
         "google": "gemini", "google-gemini": "gemini", "google-ai-studio": "gemini",
         "x-ai": "xai", "x.ai": "xai", "grok": "xai",
+        "xai-oauth": "xai-oauth", "grok-oauth": "xai-oauth",
         "kimi": "kimi-coding", "moonshot": "kimi-coding",
         "minimax-china": "minimax-cn", "minimax_cn": "minimax-cn",
         "claude": "anthropic", "claude-code": "anthropic",
@@ -2131,6 +2138,8 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
         return get_nous_auth_status()
     if target == "openai-codex":
         return get_codex_auth_status()
+    if target == "xai-oauth":
+        return get_xai_oauth_auth_status()
     if target == "copilot-acp":
         return get_external_process_provider_status(target)
     # API-key providers
@@ -3002,3 +3011,22 @@ def _is_terminal_codex_oauth_refresh_error(exc: Exception) -> bool:
         }
         and bool(exc.relogin_required)
     )
+
+# =============================================================================
+# xAI Grok OAuth backport
+# =============================================================================
+# Imported at the end intentionally. auth_xai lazily imports this module's auth-store
+# primitives, avoiding a circular import while keeping the public surface compatible.
+from hermes_cli.auth_xai import (  # noqa: E402,F401
+    _login_xai_oauth,
+    _read_xai_oauth_tokens,
+    _save_xai_oauth_tokens,
+    _xai_access_token_is_expiring,
+    _xai_oauth_device_code_login,
+    _xai_oauth_discovery,
+    _xai_oauth_poll_device_token,
+    _xai_oauth_request_device_code,
+    get_xai_oauth_auth_status,
+    refresh_xai_oauth_pure,
+    resolve_xai_oauth_runtime_credentials,
+)
