@@ -283,7 +283,7 @@ uv run pytest tests/tools/test_skills_sync.py -q                 # Tool-level
 
 uv run pytest tests/run_agent/test_run_agent.py -q      
 
-uv run pytest tests/agent/test_memory_provider.py -q      
+uv run pytest tests/plugins/memory/test_numpy_warning.py -q      
 
  
 
@@ -330,3 +330,20 @@ Item	Purpose	For your fork
 #8669	HOME override breaking path resolution	Required design input
 #10376	Clone/cross-profile isolation problems	Useful hardening
 #38008	Agent isn't told it is profile-scoped	Later improvement
+
+
+
+#!/bin/bash
+set -euo pipefail
+
+BACKUP="/backup/hermes/$(date +%Y%m%d-%H%M%S)"
+
+mkdir -p "$BACKUP"
+
+cp ~/.hermes/memories/MEMORY.md "$BACKUP/" || true
+cp ~/.hermes/memories/USER.md "$BACKUP/" || true
+
+sqlite3 ~/.hermes/memory_store.db \
+  ".backup '$BACKUP/memory_store.db'"
+
+tar -czf "$BACKUP.tar.gz" -C "$BACKUP" .

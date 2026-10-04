@@ -65,3 +65,5 @@ dist
 .codegraph/
 .ruff_cache/
 .pyright/
+
+private_notes.md
