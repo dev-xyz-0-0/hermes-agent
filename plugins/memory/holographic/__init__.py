@@ -26,9 +26,15 @@ from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 from .store import MemoryStore
 from .retrieval import FactRetriever
+from . import holographic as hrr
 
 logger = logging.getLogger(__name__)
-
+_NUMPY_DEGRADED_MESSAGE = (
+    "Holographic memory is running in degraded mode because numpy is not installed; "
+    "HRR semantic retrieval, related/reason/contradict operations, and contradiction "
+    "detection are disabled or fall back to FTS5 keyword search. Install numpy in the "
+    "Hermes environment to enable full holographic memory."
+)
 
 # ---------------------------------------------------------------------------
 # Tool schemas (unchanged from original PR)
@@ -119,6 +125,7 @@ class HolographicMemoryProvider(MemoryProvider):
         self._store = None
         self._retriever = None
         self._min_trust = float(self._config.get("min_trust_threshold", 0.3))
+        self._warned_numpy_degraded = False
 
     @property
     def name(self) -> str:
@@ -169,6 +176,9 @@ class HolographicMemoryProvider(MemoryProvider):
         hrr_dim = int(self._config.get("hrr_dim", 1024))
         hrr_weight = float(self._config.get("hrr_weight", 0.3))
         temporal_decay = int(self._config.get("temporal_decay_half_life", 0))
+        if not hrr._HAS_NUMPY and not self._warned_numpy_degraded:
+            logger.warning(_NUMPY_DEGRADED_MESSAGE)
+            self._warned_numpy_degraded = True
 
         self._store = MemoryStore(db_path=db_path, default_trust=default_trust, hrr_dim=hrr_dim)
         self._retriever = FactRetriever(

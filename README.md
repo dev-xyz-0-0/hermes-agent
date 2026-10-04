@@ -283,7 +283,7 @@ uv run pytest tests/tools/test_skills_sync.py -q                 # Tool-level
 
 uv run pytest tests/run_agent/test_run_agent.py -q      
 
-uv run pytest tests/cron/test_cron_script.py -q      
+uv run pytest tests/agent/test_memory_provider.py -q      
 
  
 
@@ -314,3 +314,19 @@ test
 ```
 
 https://github.com/NousResearch/hermes-agent/releases/tag/v2026.4.13
+
+
+to do  : https://github.com/NousResearch/hermes-agent/pull/26534/changes#diff-4115cf9cf090264f6aa081cbf99d8d067cc5ce99b85dd58da3c1ed3af0ac6a66
+
+https://github.com/NousResearch/hermes-agent/pull/108294
+
+
+Item	Purpose	For your fork
+#18746	Detect dangerous HERMES_HOME fallback	Backport concept
+#18600	Proposed strict failure instead of fallback	Study, don't copy
+#19810	Propagate HERMES_HOME into cron subprocesses	Backport concept
+#18594	Root-cause report for cross-profile corruption	Required reading
+#5947	Multiple profile-isolation leaks	Required audit list
+#8669	HOME override breaking path resolution	Required design input
+#10376	Clone/cross-profile isolation problems	Useful hardening
+#38008	Agent isn't told it is profile-scoped	Later improvement
