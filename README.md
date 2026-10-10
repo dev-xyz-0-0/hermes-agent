@@ -290,7 +290,7 @@ uv run pytest tests/plugins/memory/test_numpy_warning.py -q
 uv run pytest tests/plugins/memory/test_holographic_memory_write.py -q      
 tests/gateway/test_unknown_command.py
  
-uv run pytest tests/hermes_cli/test_runtime_provider_resolution.py -q
+uv run pytest tests/gateway/test_telegram_approval_buttons.py -q
 
 
 generate summary on this commit :

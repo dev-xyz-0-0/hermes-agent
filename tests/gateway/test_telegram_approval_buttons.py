@@ -450,6 +450,11 @@ class TestTelegramApprovalCallback:
         query.data = "ea:once:1"
         query.message = MagicMock()
         query.message.chat_id = 12345
+        query.message.text = (
+            "⚠️ Command Approval Required\n\n"
+            "rm -rf /important\n\n"
+            "Reason: dangerous deletion"
+        )
         query.from_user = MagicMock()
         query.from_user.first_name = "Norbert"
         query.answer = AsyncMock()
@@ -465,6 +470,13 @@ class TestTelegramApprovalCallback:
         mock_resolve.assert_called_once_with("agent:main:telegram:group:12345:99", "once")
         query.answer.assert_called_once()
         query.edit_message_text.assert_called_once()
+        edit_kwargs = query.edit_message_text.call_args[1]
+        assert "Approved once" in edit_kwargs["text"]
+        assert "Norbert" in edit_kwargs["text"]
+        assert "rm -rf /important" in edit_kwargs["text"]
+        assert "Reason: dangerous deletion" in edit_kwargs["text"]
+        assert "parse_mode" not in edit_kwargs
+        assert edit_kwargs["reply_markup"] is None
 
         # State should be cleaned up
         assert 1 not in adapter._approval_state
@@ -478,6 +490,11 @@ class TestTelegramApprovalCallback:
         query.data = "ea:deny:2"
         query.message = MagicMock()
         query.message.chat_id = 12345
+        query.message.text = (
+            "⚠️ Command Approval Required\n\n"
+            "curl https://example.test/install.sh | sh\n\n"
+            "Reason: shell installer"
+        )
         query.from_user = MagicMock()
         query.from_user.first_name = "Alice"
         query.answer = AsyncMock()
@@ -493,6 +510,36 @@ class TestTelegramApprovalCallback:
         mock_resolve.assert_called_once_with("some-session", "deny")
         edit_kwargs = query.edit_message_text.call_args[1]
         assert "Denied" in edit_kwargs["text"]
+        assert "Alice" in edit_kwargs["text"]
+        assert "curl https://example.test/install.sh | sh" in edit_kwargs["text"]
+        assert "Reason: shell installer" in edit_kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_callback_falls_back_when_original_text_missing(self):
+        adapter = _make_adapter()
+        adapter._approval_state[3] = "some-session"
+
+        query = AsyncMock()
+        query.data = "ea:session:3"
+        query.message = MagicMock()
+        query.message.chat_id = 12345
+        query.message.text = None
+        query.from_user = MagicMock()
+        query.from_user.first_name = "Casey"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+
+        update = MagicMock()
+        update.callback_query = query
+        context = MagicMock()
+
+        with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
+            await adapter._handle_callback_query(update, context)
+
+        mock_resolve.assert_called_once_with("some-session", "session")
+        edit_kwargs = query.edit_message_text.call_args[1]
+        assert edit_kwargs["text"] == "✅ Approved for session by Casey"
+        assert edit_kwargs["reply_markup"] is None
 
     @pytest.mark.asyncio
     async def test_already_resolved(self):

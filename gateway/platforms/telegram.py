@@ -1557,11 +1557,15 @@ class TelegramAdapter(BasePlatformAdapter):
 
                 await query.answer(text=label)
 
-                # Edit message to show decision, remove buttons
+                # Edit message to show decision, remove buttons, and preserve
+                # the original command prompt for chat history/auditability.
+                resolved_text = f"{label} by {user_display}"
+                original_text = getattr(getattr(query, "message", None), "text", None)
+                if isinstance(original_text, str) and original_text.strip():
+                    resolved_text = f"{resolved_text}\n\n{original_text}"
                 try:
                     await query.edit_message_text(
-                        text=f"{label} by {user_display}",
-                        parse_mode=ParseMode.MARKDOWN,
+                        text=resolved_text,
                         reply_markup=None,
                     )
                 except Exception:
