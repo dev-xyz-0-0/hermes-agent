@@ -292,6 +292,8 @@ tests/gateway/test_unknown_command.py
  
 uv run pytest tests/gateway/test_telegram_approval_buttons.py -q
 
+uv run pytest tests/plugins/memory/test_holographic_foundation.py -q
+ 
 
 generate summary on this commit :
 

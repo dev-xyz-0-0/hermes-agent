@@ -41,9 +41,22 @@ CREATE TABLE IF NOT EXISTS fact_entities (
     PRIMARY KEY (fact_id, entity_id)
 );
 
+CREATE TABLE IF NOT EXISTS fact_sources (
+    source_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    fact_id    INTEGER NOT NULL REFERENCES facts(fact_id) ON DELETE CASCADE,
+    via        TEXT DEFAULT '',
+    platform   TEXT DEFAULT '',
+    chat_id    TEXT DEFAULT '',
+    thread_id  TEXT DEFAULT '',
+    session_id TEXT DEFAULT '',
+    author     TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_facts_trust    ON facts(trust_score DESC);
 CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
 CREATE INDEX IF NOT EXISTS idx_entities_name  ON entities(name);
+CREATE INDEX IF NOT EXISTS idx_fact_sources_fact_id ON fact_sources(fact_id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts
     USING fts5(content, tags, content=facts, content_rowid=fact_id);
@@ -126,8 +139,13 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def _init_db(self) -> None:
-        """Create tables, indexes, and triggers if they do not exist. Enable WAL mode."""
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        """Create tables, indexes, and triggers if they do not exist."""
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.DatabaseError:
+            pass
         self._conn.executescript(_SCHEMA)
         # Migrate: add hrr_vector column if missing (safe for existing databases)
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(facts)").fetchall()}
@@ -234,6 +252,60 @@ class MemoryStore:
                 self._conn.commit()
 
             return results
+
+    def read(self, sql: str, params: tuple | list = ()) -> list[sqlite3.Row]:
+        """Run a read-only query and return rows."""
+        with self._lock:
+            return self._conn.execute(sql, params).fetchall()
+
+    def count_facts(self) -> int:
+        """Return the number of facts currently stored."""
+        with self._lock:
+            return int(self._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0])
+
+    def record_source(
+        self,
+        fact_id: int,
+        *,
+        via: str = "",
+        platform: str = "",
+        chat_id: str = "",
+        thread_id: str = "",
+        session_id: str = "",
+        author: str = "",
+    ) -> None:
+        """Record where a fact write came from."""
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO fact_sources (fact_id, via, platform, chat_id, thread_id, session_id, author)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (fact_id, via, platform, chat_id, thread_id, session_id, author),
+            )
+            self._conn.commit()
+
+    def stats(self, min_trust: float = 0.3) -> dict:
+        """Return operational counts for the store."""
+        with self._lock:
+            by_category = {
+                row["category"] or "general": row["count"]
+                for row in self._conn.execute(
+                    "SELECT category, COUNT(*) AS count FROM facts GROUP BY category"
+                ).fetchall()
+            }
+            return {
+                "facts": int(self._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]),
+                "entities": int(self._conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]),
+                "by_category": by_category,
+                "recalled_at_least_once": int(
+                    self._conn.execute("SELECT COUNT(*) FROM facts WHERE retrieval_count > 0").fetchone()[0]
+                ),
+                "low_trust": int(
+                    self._conn.execute("SELECT COUNT(*) FROM facts WHERE trust_score < ?", (min_trust,)).fetchone()[0]
+                ),
+                "database": str(self.db_path),
+            }
 
     def update_fact(
         self,
