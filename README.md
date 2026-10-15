@@ -288,11 +288,10 @@ uv run pytest tests/plugins/memory/test_numpy_warning.py -q
  
 
 uv run pytest tests/plugins/memory/test_holographic_memory_write.py -q      
-tests/gateway/test_unknown_command.py
  
 uv run pytest tests/gateway/test_telegram_approval_buttons.py -q
 
-uv run pytest tests/plugins/memory/test_holographic_foundation.py -q
+uv run pytest tests/plugins/memory/test_holographic_auto_recall.py -q
  
 
 generate summary on this commit :
