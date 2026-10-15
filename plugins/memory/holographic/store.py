@@ -147,10 +147,22 @@ class MemoryStore:
         except sqlite3.DatabaseError:
             pass
         self._conn.executescript(_SCHEMA)
-        # Migrate: add hrr_vector column if missing (safe for existing databases)
+        # Migrate: add columns if missing (safe, idempotent, for existing databases).
+        # SQLite backfills a DEFAULT value into pre-existing rows on ADD COLUMN,
+        # so legacy facts become status='active' automatically — no data rewrite.
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(facts)").fetchall()}
         if "hrr_vector" not in columns:
             self._conn.execute("ALTER TABLE facts ADD COLUMN hrr_vector BLOB")
+        if "status" not in columns:
+            self._conn.execute("ALTER TABLE facts ADD COLUMN status TEXT DEFAULT 'active'")
+        if "superseded_by" not in columns:
+            self._conn.execute("ALTER TABLE facts ADD COLUMN superseded_by INTEGER")
+        if "source_type" not in columns:
+            self._conn.execute("ALTER TABLE facts ADD COLUMN source_type TEXT DEFAULT ''")
+        if "extraction_method" not in columns:
+            self._conn.execute("ALTER TABLE facts ADD COLUMN extraction_method TEXT DEFAULT ''")
+        if "confidence" not in columns:
+            self._conn.execute("ALTER TABLE facts ADD COLUMN confidence REAL DEFAULT 1.0")
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -162,6 +174,9 @@ class MemoryStore:
         content: str,
         category: str = "general",
         tags: str = "",
+        source_type: str = "",
+        extraction_method: str = "",
+        confidence: float = 1.0,
     ) -> int:
         """Insert a fact and return its fact_id.
 
@@ -177,10 +192,12 @@ class MemoryStore:
             try:
                 cur = self._conn.execute(
                     """
-                    INSERT INTO facts (content, category, tags, trust_score)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO facts (content, category, tags, trust_score,
+                                        source_type, extraction_method, confidence)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (content, category, tags, self.default_trust),
+                    (content, category, tags, self.default_trust,
+                     source_type, extraction_method, confidence),
                 )
                 self._conn.commit()
                 fact_id: int = cur.lastrowid  # type: ignore[assignment]
@@ -208,11 +225,13 @@ class MemoryStore:
         category: str | None = None,
         min_trust: float = 0.3,
         limit: int = 10,
+        include_superseded: bool = False,
     ) -> list[dict]:
         """Full-text search over facts using FTS5.
 
         Returns a list of fact dicts ordered by FTS5 rank, then trust_score
         descending. Also increments retrieval_count for matched facts.
+        Superseded facts are excluded unless include_superseded=True (history).
         """
         with self._lock:
             query = query.strip()
@@ -224,17 +243,19 @@ class MemoryStore:
             if category is not None:
                 category_clause = "AND f.category = ?"
                 params.append(category)
+            status_clause = "" if include_superseded else "AND f.status != 'superseded'"
             params.append(limit)
 
             sql = f"""
                 SELECT f.fact_id, f.content, f.category, f.tags,
                        f.trust_score, f.retrieval_count, f.helpful_count,
-                       f.created_at, f.updated_at
+                       f.created_at, f.updated_at, f.status, f.superseded_by
                 FROM facts f
                 JOIN facts_fts fts ON fts.rowid = f.fact_id
                 WHERE facts_fts MATCH ?
                   AND f.trust_score >= ?
                   {category_clause}
+                  {status_clause}
                 ORDER BY fts.rank, f.trust_score DESC
                 LIMIT ?
             """
@@ -371,6 +392,120 @@ class MemoryStore:
 
             return True
 
+    def supersede_fact(
+        self,
+        old_fact_id: int,
+        new_content: str,
+        category: str | None = None,
+        tags: str = "",
+        source_type: str = "",
+        extraction_method: str = "",
+        confidence: float = 1.0,
+    ) -> int:
+        """Atomically replace an active fact with a new one (a correction).
+
+        Inserts new_content as a fresh fact and marks old_fact_id as
+        status='superseded' pointing to it. The old row is never deleted —
+        it stays queryable via include_superseded=True (history) — and
+        normal recall/search/list no longer return it.
+
+        If the insert fails for any reason other than a content collision,
+        the original fact is left completely untouched (no partial
+        supersession). Returns the new (or matched existing) fact_id.
+        Raises KeyError if old_fact_id does not exist.
+        """
+        with self._lock:
+            old_row = self._conn.execute(
+                "SELECT fact_id, category FROM facts WHERE fact_id = ?", (old_fact_id,)
+            ).fetchone()
+            if old_row is None:
+                raise KeyError(f"fact_id {old_fact_id} not found")
+
+            new_content = new_content.strip()
+            if not new_content:
+                raise ValueError("new_content must not be empty")
+            resolved_category = category or old_row["category"]
+
+            try:
+                cur = self._conn.execute(
+                    """
+                    INSERT INTO facts (content, category, tags, trust_score,
+                                        source_type, extraction_method, confidence)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (new_content, resolved_category, tags, self.default_trust,
+                     source_type, extraction_method, confidence),
+                )
+                new_fact_id: int = cur.lastrowid  # type: ignore[assignment]
+                if new_fact_id != old_fact_id:
+                    self._conn.execute(
+                        "UPDATE facts SET status = 'superseded', superseded_by = ?, "
+                        "updated_at = CURRENT_TIMESTAMP WHERE fact_id = ?",
+                        (new_fact_id, old_fact_id),
+                    )
+                self._conn.commit()
+            except sqlite3.IntegrityError:
+                # new_content collides with an existing fact's UNIQUE content —
+                # that fact becomes the replacement instead of inserting a duplicate.
+                self._conn.rollback()
+                existing = self._conn.execute(
+                    "SELECT fact_id FROM facts WHERE content = ?", (new_content,)
+                ).fetchone()
+                if existing is None:
+                    raise
+                new_fact_id = int(existing["fact_id"])
+                if new_fact_id != old_fact_id:
+                    self._conn.execute(
+                        "UPDATE facts SET status = 'superseded', superseded_by = ?, "
+                        "updated_at = CURRENT_TIMESTAMP WHERE fact_id = ?",
+                        (new_fact_id, old_fact_id),
+                    )
+                    self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+            if new_fact_id != old_fact_id:
+                for name in self._extract_entities(new_content):
+                    entity_id = self._resolve_entity(name)
+                    self._link_fact_entity(new_fact_id, entity_id)
+                self._compute_hrr_vector(new_fact_id, new_content)
+                self._rebuild_bank(resolved_category)
+                if old_row["category"] != resolved_category:
+                    self._rebuild_bank(old_row["category"])
+
+            return new_fact_id
+
+    def get_history(
+        self,
+        category: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Return superseded facts (and what replaced them) for audit/history queries.
+
+        This is the only path that surfaces superseded content — normal
+        search/list/prefetch never do.
+        """
+        with self._lock:
+            params: list = []
+            category_clause = ""
+            if category is not None:
+                category_clause = "AND category = ?"
+                params.append(category)
+            params.append(limit)
+
+            sql = f"""
+                SELECT fact_id, content, category, tags, trust_score,
+                       created_at, updated_at, status, superseded_by
+                FROM facts
+                WHERE status = 'superseded'
+                  {category_clause}
+                ORDER BY updated_at DESC
+                LIMIT ?
+            """
+            rows = self._conn.execute(sql, params).fetchall()
+            return [self._row_to_dict(r) for r in rows]
+
     def remove_fact(self, fact_id: int) -> bool:
         """Delete a fact and its entity links. Returns True if the row existed."""
         with self._lock:
@@ -393,10 +528,12 @@ class MemoryStore:
         category: str | None = None,
         min_trust: float = 0.0,
         limit: int = 50,
+        include_superseded: bool = False,
     ) -> list[dict]:
         """Browse facts ordered by trust_score descending.
 
-        Optionally filter by category and minimum trust score.
+        Optionally filter by category and minimum trust score. Superseded
+        facts are excluded unless include_superseded=True (history queries).
         """
         with self._lock:
             params: list = [min_trust]
@@ -404,14 +541,17 @@ class MemoryStore:
             if category is not None:
                 category_clause = "AND category = ?"
                 params.append(category)
+            status_clause = "" if include_superseded else "AND status != 'superseded'"
             params.append(limit)
 
             sql = f"""
                 SELECT fact_id, content, category, tags, trust_score,
-                       retrieval_count, helpful_count, created_at, updated_at
+                       retrieval_count, helpful_count, created_at, updated_at,
+                       status, superseded_by
                 FROM facts
                 WHERE trust_score >= ?
                   {category_clause}
+                  {status_clause}
                 ORDER BY trust_score DESC
                 LIMIT ?
             """

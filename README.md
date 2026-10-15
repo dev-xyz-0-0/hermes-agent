@@ -291,7 +291,7 @@ uv run pytest tests/plugins/memory/test_holographic_memory_write.py -q
  
 uv run pytest tests/gateway/test_telegram_approval_buttons.py -q
 
-uv run pytest tests/plugins/memory/test_holographic_auto_recall.py -q
+uv run pytest tests/plugins/memory/test_holographic_capture_eval.py -q
  
 
 generate summary on this commit :

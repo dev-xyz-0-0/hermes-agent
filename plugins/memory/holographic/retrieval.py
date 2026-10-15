@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from .store import MemoryStore
 
+# Superseded facts (replaced by a correction) are excluded from every normal
+# retrieval path. They remain in the table for history queries only.
+_ACTIVE_CLAUSE = "status != 'superseded'"
+
 try:
     from . import holographic as hrr
 except ImportError:
@@ -170,7 +174,7 @@ class FactRetriever:
                 )
 
         # Score against individual fact vectors directly
-        where = "WHERE hrr_vector IS NOT NULL"
+        where = "WHERE hrr_vector IS NOT NULL AND " + _ACTIVE_CLAUSE
         params: list = []
         if category:
             where += " AND category = ?"
@@ -230,7 +234,7 @@ class FactRetriever:
         entity_vec = hrr.encode_atom(entity.lower(), self.hrr_dim)
 
         # Get all facts with vectors
-        where = "WHERE hrr_vector IS NOT NULL"
+        where = "WHERE hrr_vector IS NOT NULL AND " + _ACTIVE_CLAUSE
         params: list = []
         if category:
             where += " AND category = ?"
@@ -309,7 +313,7 @@ class FactRetriever:
             entity_residuals.append(probe_key)
 
         # Get all facts with vectors
-        where = "WHERE hrr_vector IS NOT NULL"
+        where = "WHERE hrr_vector IS NOT NULL AND " + _ACTIVE_CLAUSE
         params: list = []
         if category:
             where += " AND category = ?"
@@ -374,7 +378,7 @@ class FactRetriever:
         conn = self.store._conn
 
         # Get all facts with vectors and their linked entities
-        where = "WHERE f.hrr_vector IS NOT NULL"
+        where = "WHERE f.hrr_vector IS NOT NULL AND f." + _ACTIVE_CLAUSE
         params: list = []
         if category:
             where += " AND f.category = ?"
@@ -468,7 +472,7 @@ class FactRetriever:
         """Score facts by similarity to a target vector."""
         conn = self.store._conn
 
-        where = "WHERE hrr_vector IS NOT NULL"
+        where = "WHERE hrr_vector IS NOT NULL AND " + _ACTIVE_CLAUSE
         params: list = []
         if category:
             where += " AND category = ?"
@@ -527,6 +531,7 @@ class FactRetriever:
 
         where_clauses.append("f.trust_score >= ?")
         params.append(min_trust)
+        where_clauses.append(f"f.{_ACTIVE_CLAUSE}")
 
         where_sql = " AND ".join(where_clauses)
 

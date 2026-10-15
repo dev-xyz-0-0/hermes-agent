@@ -21,6 +21,7 @@ from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 from utils import is_truthy_value
 
+from . import capture, consolidation
 from . import holographic as hrr
 from .retrieval import FactRetriever
 from .store import MemoryStore
@@ -40,6 +41,8 @@ _PREFETCH_LIMIT = 5
 _PREFETCH_CANDIDATES = 15
 _MAX_TRACKED_SESSIONS = 16
 _MAX_TRACKED_FACTS = 512
+_MAX_TRACKED_TURN_SESSIONS = 16
+_MAX_TRACKED_TURNS_PER_SESSION = 64
 
 _DEFAULT_RECALL_MAX_TOKENS = 700
 _DEFAULT_RECALL_TIMEOUT_MS = 300
@@ -101,8 +104,9 @@ FACT_STORE_SCHEMA = {
         "recalled automatically each turn (see 'Holographic Memory' context) - you do not need "
         "to call this just to look up something that might already be in context. Use it to "
         "add new facts, or for explicit search/probe/related/reason/contradict operations beyond "
-        "what was auto-recalled.\n\n"
-        "Actions: add, search, probe, related, reason, contradict, update, remove, list, stats."
+        "what was auto-recalled. If automatic capture is enabled, facts stated in conversation "
+        "are also captured and consolidated automatically — 'history' shows what that superseded.\n\n"
+        "Actions: add, search, probe, related, reason, contradict, update, remove, list, stats, history."
     ),
     "parameters": {
         "type": "object",
@@ -120,6 +124,7 @@ FACT_STORE_SCHEMA = {
                     "remove",
                     "list",
                     "stats",
+                    "history",
                 ],
             },
             "content": {"type": "string", "description": "Fact content (required for 'add')."},
@@ -283,6 +288,20 @@ class HolographicMemoryProvider(MemoryProvider):
         self._recall_max_tokens = max(50, min(4000, int(self._config.get("recall_max_tokens", _DEFAULT_RECALL_MAX_TOKENS))))
         self._recall_timeout_ms = max(10, min(5000, int(self._config.get("recall_timeout_ms", _DEFAULT_RECALL_TIMEOUT_MS))))
         self._recall_debug = is_truthy_value(self._config.get("recall_debug"), default=False)
+
+        # PR 2 — automatic capture, consolidation, forgetting (all opt-in; off
+        # by default so upgrading never silently starts writing facts for
+        # existing installs — see docs/plans/2026-10-15-holographic-pr2-*.md).
+        self._auto_capture = is_truthy_value(self._config.get("auto_capture"), default=False)
+        self._consolidation_enabled = is_truthy_value(self._config.get("consolidation_enabled"), default=True)
+        self._max_facts_per_turn = max(1, min(10, int(self._config.get("max_facts_per_turn", 5))))
+        self._capture_timeout_ms = max(10, min(5000, int(self._config.get("capture_timeout_ms", 500))))
+        self._capture_debug = is_truthy_value(self._config.get("capture_debug"), default=False)
+        self._extraction_mode = str(self._config.get("extraction_mode", "rules")).strip().lower()
+        self._warned_llm_extraction_unsupported = False
+        self._write_enabled = True
+        self._processed_turns: OrderedDict[str, OrderedDict[str, None]] = OrderedDict()
+
         self._warned_numpy_degraded = False
         self._hrr_available = hrr._HAS_NUMPY
         self._session_id = ""
@@ -370,6 +389,40 @@ class HolographicMemoryProvider(MemoryProvider):
                 "default": str(self._config.get("recall_debug", "false")).lower(),
                 "choices": ["true", "false"],
             },
+            {
+                "key": "auto_capture",
+                "description": "Automatically extract, consolidate, and store durable facts stated in conversation",
+                "default": str(self._config.get("auto_capture", "false")).lower(),
+                "choices": ["true", "false"],
+            },
+            {
+                "key": "extraction_mode",
+                "description": "How candidate facts are extracted ('llm' is not yet implemented and falls back to 'rules')",
+                "default": str(self._config.get("extraction_mode", "rules")),
+                "choices": ["rules", "llm"],
+            },
+            {
+                "key": "max_facts_per_turn",
+                "description": "Max candidate facts extracted from a single user turn (1-10)",
+                "default": str(self._config.get("max_facts_per_turn", 5)),
+            },
+            {
+                "key": "consolidation_enabled",
+                "description": "Deduplicate/supersede/forget via consolidation; if false, auto-captured facts are inserted as-is (forgetting is skipped)",
+                "default": str(self._config.get("consolidation_enabled", "true")).lower(),
+                "choices": ["true", "false"],
+            },
+            {
+                "key": "capture_timeout_ms",
+                "description": "Soft deadline for processing one turn's capture candidates",
+                "default": str(self._config.get("capture_timeout_ms", 500)),
+            },
+            {
+                "key": "capture_debug",
+                "description": "Log sanitized capture diagnostics (operation, action, fact IDs — never fact content)",
+                "default": str(self._config.get("capture_debug", "false")).lower(),
+                "choices": ["true", "false"],
+            },
         ]
 
     def initialize(self, session_id: str, **kwargs) -> None:
@@ -416,6 +469,21 @@ class HolographicMemoryProvider(MemoryProvider):
             "user_name": str(kwargs.get("user_name") or ""),
         }
         self._hrr_available = hrr._HAS_NUMPY
+
+        agent_context = str(kwargs.get("agent_context") or "")
+        self._write_enabled = agent_context not in ("cron", "flush", "subagent")
+
+        if self._extraction_mode not in ("rules", "llm") and not self._warned_llm_extraction_unsupported:
+            logger.warning("holographic: unknown extraction_mode=%r, falling back to 'rules'", self._extraction_mode)
+            self._extraction_mode = "rules"
+        elif self._extraction_mode == "llm" and not self._warned_llm_extraction_unsupported:
+            logger.warning(
+                "holographic: extraction_mode='llm' is not implemented in this build "
+                "(no model-routing handle is available to a MemoryProvider plugin); "
+                "falling back to rules-based extraction. See docs/plans/"
+                "2026-10-15-holographic-pr2-capture-consolidation.md for rationale."
+            )
+            self._warned_llm_extraction_unsupported = True
 
     def system_prompt_block(self) -> str:
         if not self._store:
@@ -557,7 +625,100 @@ class HolographicMemoryProvider(MemoryProvider):
             self._turns.pop(dropped, None)
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        pass
+        """PR 2 — automatic capture, called once per completed turn.
+
+        Deterministic and bounded (capture_timeout_ms soft deadline, no LLM
+        calls): this runs synchronously on the critical path between the
+        response being generated and returned to the caller (see
+        run_agent.py's sync_all() call site), so it must stay fast. Disabled
+        unless auto_capture=true; a disabled provider never writes here.
+        """
+        if not self._auto_capture or not self._write_enabled:
+            return
+        if not self._store or not self._retriever:
+            return
+        if not user_content or not user_content.strip():
+            return
+
+        key = session_id or self._session_id or ""
+        turn_hash = hashlib.sha1(f"{key}||{user_content.strip()}".encode("utf-8")).hexdigest()
+        seen = self._processed_turns.get(key)
+        if seen is not None and turn_hash in seen:
+            # Idempotency guard: the same (session, user_content) pair was
+            # already captured — this is the deterministic fallback noted in
+            # the PR 2 spec for runtimes without a stable per-message ID
+            # (e.g. a replayed Telegram delivery). Limitation: a genuinely
+            # repeated IDENTICAL message within the tracked window is also
+            # suppressed, not just true transport replays.
+            return
+        self._remember_turn(key, turn_hash)
+
+        deadline = time.monotonic() + (self._capture_timeout_ms / 1000)
+        try:
+            candidates = capture.extract_candidates(user_content, max_candidates=self._max_facts_per_turn)
+        except Exception as exc:
+            logger.debug("Holographic capture extraction failed: %s", exc)
+            return
+
+        applied = 0
+        for candidate in candidates:
+            if time.monotonic() >= deadline:
+                if self._capture_debug:
+                    logger.info("holographic.capture: turn deadline exceeded, stopping early")
+                break
+
+            content = candidate.content.strip()
+            if not content:
+                continue
+            problem = _fact_problem(content)
+            if problem:
+                if self._capture_debug:
+                    logger.info("holographic.capture: candidate rejected by firewall (%s)", problem)
+                continue
+
+            category = "project" if candidate.scope else "user_pref"
+            try:
+                if self._consolidation_enabled:
+                    result = consolidation.classify_and_apply(
+                        self._store, self._retriever, candidate,
+                        category=category,
+                        source_type="auto_capture", extraction_method="rules",
+                        confidence=candidate.confidence,
+                    )
+                elif candidate.operation == "forget":
+                    continue  # forgetting requires consolidation to find its target safely
+                else:
+                    fact_id = self._store.add_fact(
+                        content, category=category,
+                        source_type="auto_capture", extraction_method="rules",
+                        confidence=candidate.confidence,
+                    )
+                    result = consolidation.ConsolidationResult(action="inserted", fact_id=fact_id, reason="consolidation disabled")
+            except Exception as exc:
+                logger.debug("Holographic capture apply failed: %s", exc)
+                continue
+
+            applied += 1
+            if result.fact_id:
+                self._record_source(result.fact_id, "auto_capture")
+            if self._capture_debug:
+                logger.info(
+                    "holographic.capture: op=%s action=%s fact_id=%s related_id=%s reason=%s",
+                    candidate.operation, result.action, result.fact_id, result.related_id, result.reason,
+                )
+
+        if self._capture_debug:
+            logger.info("holographic.capture: turn candidates=%d applied=%d", len(candidates), applied)
+
+    def _remember_turn(self, session: str, turn_hash: str) -> None:
+        turns = self._processed_turns.setdefault(session, OrderedDict())
+        self._processed_turns.move_to_end(session)
+        turns[turn_hash] = None
+        turns.move_to_end(turn_hash)
+        while len(turns) > _MAX_TRACKED_TURNS_PER_SESSION:
+            turns.popitem(last=False)
+        while len(self._processed_turns) > _MAX_TRACKED_TURN_SESSIONS:
+            self._processed_turns.popitem(last=False)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [FACT_STORE_SCHEMA, FACT_FEEDBACK_SCHEMA]
@@ -729,6 +890,10 @@ class HolographicMemoryProvider(MemoryProvider):
 
             if action == "stats":
                 return json.dumps(store.stats(min_trust=self._min_trust))
+
+            if action == "history":
+                facts = store.get_history(category=args.get("category"), limit=_limit(args))
+                return json.dumps({"facts": facts, "count": len(facts)})
 
             return tool_error(f"Unknown action: {action}")
         except KeyError as exc:

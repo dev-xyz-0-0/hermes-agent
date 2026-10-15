@@ -35,6 +35,68 @@ Config in `config.yaml` under `plugins.hermes-memory-store`:
 | `recall_max_tokens` | `700` | Approximate token budget for the auto-injected memory block per turn (clamped 50-4000) |
 | `recall_timeout_ms` | `300` | Soft deadline for scanning recall candidates; returns what was found so far instead of blocking (clamped 10-5000) |
 | `recall_debug` | `false` | Log sanitized recall diagnostics (candidate/fact counts, timing) — never fact content |
+| `auto_capture` | `false` | Automatically extract, consolidate, and store durable facts stated in conversation |
+| `extraction_mode` | `rules` | How candidates are extracted. `llm` is accepted but not yet implemented — falls back to `rules` with a one-time warning |
+| `max_facts_per_turn` | `5` | Max candidate facts extracted from one user turn (clamped 1-10) |
+| `consolidation_enabled` | `true` | Dedupe/supersede/forget via consolidation; if `false`, captured facts are inserted as-is and forget requests are skipped (never guessed at) |
+| `capture_timeout_ms` | `500` | Soft deadline for processing one turn's capture candidates (clamped 10-5000) |
+| `capture_debug` | `false` | Log sanitized capture diagnostics (operation, action, fact IDs) — never fact content |
+
+### Automatic capture, consolidation, and forgetting
+
+When `auto_capture: true`, `sync_turn()` — the same once-per-turn post-response
+hook used by both CLI and gateway runtimes — runs a conservative, local,
+rule-based pipeline (`capture.py` + `consolidation.py`, no LLM calls, no new
+vector database):
+
+1. **Extract**: deterministic patterns recognize explicit first-person
+   statements, decisions, corrections ("switched X to Y", "no longer use
+   X"), and forget requests ("forget...", "don't remember..."). Questions,
+   hypotheticals ("we're evaluating...", "for example..."), and quoted/
+   reported speech are rejected outright — nothing is captured from them.
+2. **Firewall**: every candidate goes through the same write firewall used
+   by the explicit `fact_store add` tool — credentials, prompt-injection
+   phrasing, and encoded blobs are never stored, regardless of how they were
+   phrased.
+3. **Consolidate**: the candidate is matched against existing *active*
+   facts via FTS5 search + stopword-stripped token overlap (no embeddings).
+   - Exact or near-duplicate wording → ignored (not re-inserted).
+   - An explicit correction with a confident match → the old fact is marked
+     `status='superseded'` (not deleted) and the new one becomes active.
+   - Same scope, different value, but *no* correction verb → both are kept
+     active side by side. This is a deliberate conservative tradeoff: a
+     plain restated fact never silently overwrites a prior one — only an
+     explicit correction does.
+   - A forget request with a confident match → the fact is hard-deleted.
+     Forgetting is never represented as a soft/supersede state — a deleted
+     fact cannot be recovered by compaction, replay, or a later search.
+
+Superseded (but not forgotten) facts stay in the database for history and
+are visible only via `fact_store {"action": "history"}` — normal
+`search`/`list`/`probe`/`related`/`reason`/`contradict`/automatic recall
+never return them.
+
+Processing one turn is idempotent per `(session_id, user_content)` pair
+(bounded in-memory tracking, not a durable message-ID — see the module
+docstring in `__init__.py::sync_turn` for the documented limitation), so a
+transport replaying the same message (e.g. Telegram redelivery) does not
+create duplicate facts.
+
+**Known limitation**: token-overlap matching is approximate. Genuinely
+different phrasings that share little vocabulary with an existing fact
+(especially a *forget* request that names only the abstract category, e.g.
+"forget my programming language preference", rather than the stored value)
+may not be matched with high confidence — the pipeline prefers a safe no-op
+over a wrong deletion or a wrong merge in that case.
+
+**`extraction_mode: llm`** is accepted in config but not implemented in this
+build — a `MemoryProvider` plugin has no handle to the agent's model/routing
+layer, and adding one would be a core change outside this PR's scope. Setting
+it logs a one-time warning and falls back to `rules`.
+
+**To disable automatic capture** (rollback) without losing recall or
+explicit tools, set `auto_capture: false`. Already-captured facts are
+unaffected — rolling back only stops new automatic writes.
 
 ### Automatic recall
 
