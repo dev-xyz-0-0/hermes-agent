@@ -41,6 +41,97 @@ Config in `config.yaml` under `plugins.hermes-memory-store`:
 | `consolidation_enabled` | `true` | Dedupe/supersede/forget via consolidation; if `false`, captured facts are inserted as-is and forget requests are skipped (never guessed at) |
 | `capture_timeout_ms` | `500` | Soft deadline for processing one turn's capture candidates (clamped 10-5000) |
 | `capture_debug` | `false` | Log sanitized capture diagnostics (operation, action, fact IDs) — never fact content |
+| `profile_isolation` | `true` | Scope facts by chat/profile identity (see below). Default **true** — unlike the flags above, "off" here means a real cross-chat data leak, not a conservative default |
+| `diagnostics_enabled` | `true` | Track operational counters for `fact_store {"action": "diagnostics"}` — counts only, never fact content |
+| `diagnostics_include_content` | `false` | Include a category breakdown in diagnostics output (still never raw fact text) |
+| `shared_memory_enabled` | `false` | Allow read-only recall from an explicit shared namespace, for allowlisted categories only |
+| `shared_memory_categories` | *(empty)* | Comma-separated category allowlist for shared memory (both reading it and the `share` action writing to it) |
+| `backup_enabled` | `false` | Reserved for future automated backup scheduling — the manual `fact_store {"action": "backup"}` action works regardless |
+| `backup_retention` | `14` | Keep the N most recent backups per namespace after each manual backup (`0` = keep all) |
+
+### Profile / chat isolation
+
+**The problem this fixes**: Hermes's own "profile" concept (`hermes -p <name>`,
+a separate `$HERMES_HOME` per CLI invocation) was already fully isolated —
+different processes, different `memory_store.db` files. The real gap was
+inside a single long-running **gateway** process (Telegram, Discord, Slack,
+WhatsApp, Signal, Home Assistant): every chat/user it served got its own
+`HolographicMemoryProvider` instance, but every one of those instances
+resolved to the *same* `$HERMES_HOME`, and therefore the *same* SQLite file
+— with no query-level scoping. `chat_id`/`user_id` were captured only as
+provenance metadata, never used to filter recall or capture. Five Telegram
+chats talking to one gateway process shared one `facts` table.
+
+**The fix**: every fact row now has a `namespace` column. For known
+multi-tenant platforms (`telegram`, `discord`, `slack`, `whatsapp`, `signal`,
+`homeassistant`) with a resolvable `chat_id`, the namespace is
+`"{platform}:{chat_id}[:{thread_id}]"`; every read/write (recall, capture,
+consolidation, `fact_store`, `on_memory_write` mirroring) is scoped to it.
+CLI and other single-tenant-per-process contexts (cron, subagents) keep the
+original unscoped (`''`) namespace — **zero behavior change for them**.
+
+**Fail closed, never fall back**: if a multi-tenant platform session has no
+resolvable `chat_id` (a runtime bug or an unusual integration), the provider
+sets `_isolation_blocked = True` and every memory operation — `prefetch`,
+`sync_turn`, every `fact_store`/`fact_feedback` call — becomes a safe no-op
+(or returns an error for tool calls) rather than falling back to the shared/
+unscoped bucket. A sanitized warning is logged once.
+
+**To opt back into the old (shared) behavior** — not recommended for
+multi-tenant deployments — set `profile_isolation: false`.
+
+### Shared memory (explicit, read-only, allowlisted)
+
+Disabled by default. When `shared_memory_enabled: true` and
+`shared_memory_categories` lists one or more categories, every session with
+sharing enabled can additionally **read** (never automatically write) facts
+from a fixed shared namespace, filtered to those categories. Shared facts
+are tagged `[shared:<trust>]` in the injected recall context for provenance.
+
+The *only* way a fact reaches the shared namespace is the explicit
+`fact_store {"action": "share", "fact_id": <id>}` tool action, which copies
+one of the caller's own active facts into shared memory — and only if its
+category is allowlisted and it passes the write firewall (credentials are
+rejected just like any other write). There is no implicit write-through:
+an ordinary `add`/capture never lands in shared memory. Disabling
+`shared_memory_enabled` on a session immediately stops it from reading
+shared facts (already-shared facts aren't deleted, but nothing reads them
+without the flag).
+
+### Diagnostics
+
+`fact_store {"action": "diagnostics"}` returns a sanitized operational
+snapshot — recall/capture/consolidation/error counters, active/superseded
+fact counts, the resolved namespace, and which features are enabled. It
+never includes raw fact content, and works even against a down/erroring
+store (so the error counters themselves stay reachable). Set
+`diagnostics_enabled: false` to get a minimal `{"diagnostics_enabled": false}`
+stub instead (counters still aren't collected in that case).
+
+### Backup and restore
+
+`fact_store {"action": "backup"}` snapshots the live database using SQLite's
+online backup API (safe against a concurrently open WAL connection — no file
+copy, no pausing writers) to
+`$HERMES_HOME/backups/holographic/<namespace>/memory-<timestamp>.db`, with a
+SHA-256 checksum sidecar and `0600` permissions. `backup_retention` prunes
+older backups automatically after each manual backup.
+
+**Restore is deliberately NOT a `fact_store` tool action** — it's exposed
+only as `HolographicMemoryProvider.restore_from_backup(path)`, a method for
+an operator (or a future `hermes memory restore` CLI command) to call
+directly, never from chat. A prompt-injected or confused model triggering a
+restore could silently reactivate facts the user explicitly forgot; that
+decision belongs to a human. Restore is **deletion-aware**: it reads every
+`forgotten_facts` tombstone (recorded whenever a fact is explicitly removed,
+across all namespaces) *before* touching the live file, and re-deletes any
+matching row the backup would otherwise reintroduce — so restoring a backup
+taken before an explicit forget can't bring that fact back. It also: verifies
+the backup's checksum and runs `PRAGMA integrity_check` twice (on the backup
+itself, then again on the staged copy) before touching anything live; keeps
+a timestamped safety copy of the pre-restore database indefinitely; and
+requires the caller to close the live store first (restore does a file-level
+swap, which an open WAL connection could otherwise corrupt).
 
 ### Automatic capture, consolidation, and forgetting
 

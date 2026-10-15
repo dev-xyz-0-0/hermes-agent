@@ -64,13 +64,18 @@ def _overlap(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b)
 
 
-def _best_match(retriever, query_text: str, compare_text: str, limit: int = 8) -> tuple[dict | None, float]:
+def _best_match(
+    retriever, query_text: str, compare_text: str, limit: int = 8, namespace: str = "",
+) -> tuple[dict | None, float]:
     """The active fact whose content best overlaps `compare_text`.
 
     `query_text` is what's sent to FTS5 to cast a net (may be just a scope
     hint, for recall) — `compare_text` is what overlap is scored against
     (the actual candidate content/forget target, so thresholds mean what
     the module docstring says they mean regardless of how the net was cast).
+    `namespace` scopes the search to one chat/profile's own facts (PR 3) —
+    consolidation must never match against, supersede, or forget another
+    namespace's fact.
 
     Uses FactRetriever.search (not MemoryStore.search_facts directly) because
     it already sanitizes the query for FTS5 — including an OR fallback when
@@ -78,12 +83,12 @@ def _best_match(retriever, query_text: str, compare_text: str, limit: int = 8) -
     sentence text frequently does.
     """
     try:
-        candidates = retriever.search(query_text, min_trust=0.0, limit=limit)
+        candidates = retriever.search(query_text, min_trust=0.0, limit=limit, namespace=namespace)
     except Exception:
         candidates = []
     if not candidates and query_text != compare_text:
         try:
-            candidates = retriever.search(compare_text, min_trust=0.0, limit=limit)
+            candidates = retriever.search(compare_text, min_trust=0.0, limit=limit, namespace=namespace)
         except Exception:
             candidates = []
     if not candidates:
@@ -104,32 +109,35 @@ def classify_and_apply(
     candidate: FactCandidate,
     *,
     category: str = "general",
+    namespace: str = "",
     **fact_kwargs,
 ) -> ConsolidationResult:
     """Apply one candidate fact to the store, picking new/duplicate/correction/forget.
 
-    `fact_kwargs` (source_type, extraction_method, confidence) are forwarded
-    to add_fact/supersede_fact for provenance.
+    `namespace` (PR 3) scopes every match/write to one chat/profile's own
+    facts — consolidation never reads, supersedes, or deletes across
+    namespaces. `fact_kwargs` (source_type, extraction_method, confidence)
+    are forwarded to add_fact/supersede_fact for provenance.
     """
     content = (candidate.content or "").strip()
     if not content:
         return ConsolidationResult(action="noop", reason="empty content")
 
     if candidate.operation == "forget":
-        return _apply_forget(store, retriever, candidate)
+        return _apply_forget(store, retriever, candidate, namespace=namespace)
 
     query_text = candidate.scope or candidate.old_text or content
-    best, best_score = _best_match(retriever, query_text, content)
+    best, best_score = _best_match(retriever, query_text, content, namespace=namespace)
 
     if candidate.operation == "correction":
         if best is not None and best_score >= _CORRECTION_OVERLAP and best["content"].strip() != content:
-            new_id = store.supersede_fact(best["fact_id"], content, category=category, **fact_kwargs)
+            new_id = store.supersede_fact(best["fact_id"], content, category=category, namespace=namespace, **fact_kwargs)
             return ConsolidationResult(
                 action="superseded", fact_id=new_id, related_id=best["fact_id"],
                 reason=f"overlap={best_score:.2f}",
             )
         # No confident correction target — insert standalone rather than guess.
-        new_id = store.add_fact(content, category=category, **fact_kwargs)
+        new_id = store.add_fact(content, category=category, namespace=namespace, **fact_kwargs)
         return ConsolidationResult(action="inserted", fact_id=new_id, reason="no confident correction target")
 
     # operation == "statement"
@@ -139,21 +147,21 @@ def classify_and_apply(
         if best_score >= _DUPLICATE_OVERLAP:
             return ConsolidationResult(action="ignored", fact_id=best["fact_id"], reason=f"paraphrase overlap={best_score:.2f}")
 
-    new_id = store.add_fact(content, category=category, **fact_kwargs)
+    new_id = store.add_fact(content, category=category, namespace=namespace, **fact_kwargs)
     return ConsolidationResult(action="inserted", fact_id=new_id, reason="new fact")
 
 
-def _apply_forget(store, retriever, candidate: FactCandidate) -> ConsolidationResult:
+def _apply_forget(store, retriever, candidate: FactCandidate, *, namespace: str = "") -> ConsolidationResult:
     target = (candidate.content or "").strip()
     if not target:
         return ConsolidationResult(action="noop", reason="empty forget target")
 
-    best, best_score = _best_match(retriever, target, target)
+    best, best_score = _best_match(retriever, target, target, namespace=namespace)
     if best is None:
         return ConsolidationResult(action="noop", reason="no matching fact to forget")
     if best_score < _FORGET_OVERLAP:
         # Ambiguous target — a wrong deletion is worse than a missed one.
         return ConsolidationResult(action="noop", fact_id=best["fact_id"], reason=f"ambiguous target (overlap={best_score:.2f})")
 
-    store.remove_fact(best["fact_id"])
+    store.remove_fact(best["fact_id"], namespace=namespace, tombstone=True)
     return ConsolidationResult(action="forgotten", related_id=best["fact_id"], reason=f"overlap={best_score:.2f}")

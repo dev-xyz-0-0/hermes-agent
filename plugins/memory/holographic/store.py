@@ -3,6 +3,7 @@ SQLite-backed fact store with entity resolution and trust scoring.
 Single-user Hermes memory store plugin.
 """
 
+import hashlib
 import re
 import sqlite3
 import threading
@@ -16,7 +17,7 @@ except ImportError:
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS facts (
     fact_id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    content         TEXT NOT NULL UNIQUE,
+    content         TEXT NOT NULL,
     category        TEXT DEFAULT 'general',
     tags            TEXT DEFAULT '',
     trust_score     REAL DEFAULT 0.5,
@@ -24,7 +25,29 @@ CREATE TABLE IF NOT EXISTS facts (
     helpful_count   INTEGER DEFAULT 0,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    hrr_vector      BLOB
+    hrr_vector      BLOB,
+    status          TEXT DEFAULT 'active',
+    superseded_by   INTEGER,
+    source_type     TEXT DEFAULT '',
+    extraction_method TEXT DEFAULT '',
+    confidence      REAL DEFAULT 1.0,
+    namespace       TEXT DEFAULT ''
+);
+
+-- Content-uniqueness index intentionally NOT created here (see _init_db —
+-- it must run after namespace is guaranteed to exist on BOTH fresh and
+-- pre-existing-table databases, which an unconditional top-of-script
+-- CREATE INDEX can't guarantee for the latter).
+
+-- Tombstones for explicitly forgotten facts (PR 3 deletion-aware restore):
+-- restoring an older backup must not silently reactivate a fact the user
+-- deleted after that backup was taken. Keyed by content hash, not fact_id,
+-- since a restored row gets a different fact_id.
+CREATE TABLE IF NOT EXISTS forgotten_facts (
+    content_hash TEXT NOT NULL,
+    namespace    TEXT NOT NULL DEFAULT '',
+    forgotten_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (content_hash, namespace)
 );
 
 CREATE TABLE IF NOT EXISTS entities (
@@ -108,6 +131,17 @@ def _clamp_trust(value: float) -> float:
     return max(_TRUST_MIN, min(_TRUST_MAX, value))
 
 
+def content_hash(content: str) -> str:
+    """Stable identity for a fact's text, used for forget tombstones.
+
+    Tombstones key on this (not fact_id) because a fact restored from an
+    older backup gets a NEW fact_id — the content is the only thing that
+    survives across a delete/backup/restore cycle to recognize "this is the
+    thing the user asked to forget."
+    """
+    return hashlib.sha256((content or "").strip().encode("utf-8")).hexdigest()
+
+
 class MemoryStore:
     """SQLite-backed fact store with entity resolution and trust scoring."""
 
@@ -163,7 +197,94 @@ class MemoryStore:
             self._conn.execute("ALTER TABLE facts ADD COLUMN extraction_method TEXT DEFAULT ''")
         if "confidence" not in columns:
             self._conn.execute("ALTER TABLE facts ADD COLUMN confidence REAL DEFAULT 1.0")
+        if "namespace" not in columns:
+            # PR 3: isolates facts by chat/profile identity. Default '' means
+            # "unscoped" — every pre-existing fact (and every single-tenant
+            # CLI user, who never computes a non-empty namespace) keeps
+            # working exactly as before. Only multi-tenant gateway sessions
+            # (which DO compute a non-empty namespace) stop seeing each
+            # other's facts — see HolographicMemoryProvider._namespace.
+            self._conn.execute("ALTER TABLE facts ADD COLUMN namespace TEXT DEFAULT ''")
         self._conn.commit()
+        # Now that `namespace` is guaranteed to exist (fresh table had it
+        # inline; pre-existing table just got it ALTERed in), it's safe to
+        # index it. The composite unique index is also (re)created inside
+        # _migrate_drop_global_content_unique()'s rebuild when that runs —
+        # these are idempotent no-ops in that case.
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_namespace ON facts(namespace)")
+        self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_content_namespace ON facts(content, namespace)")
+        self._conn.commit()
+        self._migrate_drop_global_content_unique()
+
+    def _migrate_drop_global_content_unique(self) -> None:
+        """One-time rebuild: content must be unique per-namespace, not globally.
+
+        A pre-PR-3 database has an implicit UNIQUE index on facts.content
+        alone (from the old inline ``content TEXT NOT NULL UNIQUE`` column
+        constraint). That must go — otherwise two different namespaces each
+        stating the same fact text would collide on insert. SQLite can't
+        alter a column constraint in place, so this rebuilds `facts` (and,
+        because SQLite rewrites foreign-key clauses to point at a RENAMEd
+        table rather than leaving them pointed at the new one, also rebuilds
+        `fact_entities` and `fact_sources` so their FKs end up clean — this
+        was verified empirically; rebuilding `facts` alone leaves dangling
+        FK references that fail on the next insert). Idempotent: a no-op
+        once the content-only unique index is gone.
+        """
+        unique_on_content_alone = False
+        for idx in self._conn.execute("PRAGMA index_list(facts)").fetchall():
+            if not idx["unique"]:
+                continue
+            cols = [r["name"] for r in self._conn.execute(f"PRAGMA index_info({idx['name']})").fetchall()]
+            if cols == ["content"]:
+                unique_on_content_alone = True
+                break
+        if not unique_on_content_alone:
+            return
+
+        fk_was_on = bool(self._conn.execute("PRAGMA foreign_keys").fetchone()[0])
+        self._conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self._conn.execute("ALTER TABLE facts RENAME TO facts_pre_ns_unique")
+            self._conn.execute("ALTER TABLE fact_entities RENAME TO fact_entities_pre_ns_unique")
+            self._conn.execute("ALTER TABLE fact_sources RENAME TO fact_sources_pre_ns_unique")
+            # RENAME rewrites trigger/FK bodies to point at the renamed table
+            # (verified empirically) — same as the FK issue above. Drop the
+            # triggers explicitly so _SCHEMA's CREATE TRIGGER IF NOT EXISTS
+            # below actually (re)creates them bound to the NEW `facts`,
+            # instead of silently no-op'ing against the misbound old name.
+            self._conn.execute("DROP TRIGGER IF EXISTS facts_ai")
+            self._conn.execute("DROP TRIGGER IF EXISTS facts_ad")
+            self._conn.execute("DROP TRIGGER IF EXISTS facts_au")
+
+            self._conn.executescript(_SCHEMA)  # recreates facts/fact_entities/fact_sources/triggers fresh
+
+            self._conn.execute("""
+                INSERT INTO facts (fact_id, content, category, tags, trust_score,
+                                    retrieval_count, helpful_count, created_at, updated_at,
+                                    hrr_vector, status, superseded_by, source_type,
+                                    extraction_method, confidence, namespace)
+                SELECT fact_id, content, category, tags, trust_score,
+                       retrieval_count, helpful_count, created_at, updated_at,
+                       hrr_vector, status, superseded_by, source_type,
+                       extraction_method, confidence, namespace
+                FROM facts_pre_ns_unique
+            """)
+            self._conn.execute("INSERT INTO fact_entities SELECT * FROM fact_entities_pre_ns_unique")
+            self._conn.execute("INSERT INTO fact_sources SELECT * FROM fact_sources_pre_ns_unique")
+
+            self._conn.execute("DROP TABLE facts_pre_ns_unique")
+            self._conn.execute("DROP TABLE fact_entities_pre_ns_unique")
+            self._conn.execute("DROP TABLE fact_sources_pre_ns_unique")
+            # facts_fts is an external-content FTS5 index over `facts` — the
+            # table it pointed at is gone, so resync it from the new one.
+            self._conn.execute("INSERT INTO facts_fts(facts_fts) VALUES('rebuild')")
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        finally:
+            self._conn.execute(f"PRAGMA foreign_keys={'ON' if fk_was_on else 'OFF'}")
 
     # ------------------------------------------------------------------
     # Public API
@@ -177,12 +298,15 @@ class MemoryStore:
         source_type: str = "",
         extraction_method: str = "",
         confidence: float = 1.0,
+        namespace: str = "",
     ) -> int:
         """Insert a fact and return its fact_id.
 
-        Deduplicates by content (UNIQUE constraint). On duplicate, returns
-        the existing fact_id without modifying the row. Extracts entities from
-        the content and links them to the fact.
+        Deduplicates by (content, namespace) (UNIQUE constraint) — the same
+        text in two different namespaces is two different rows, by design
+        (PR 3 isolation). On duplicate within the same namespace, returns
+        the existing fact_id without modifying the row. Extracts entities
+        from the content and links them to the fact.
         """
         with self._lock:
             content = content.strip()
@@ -193,18 +317,18 @@ class MemoryStore:
                 cur = self._conn.execute(
                     """
                     INSERT INTO facts (content, category, tags, trust_score,
-                                        source_type, extraction_method, confidence)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                        source_type, extraction_method, confidence, namespace)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (content, category, tags, self.default_trust,
-                     source_type, extraction_method, confidence),
+                     source_type, extraction_method, confidence, namespace),
                 )
                 self._conn.commit()
                 fact_id: int = cur.lastrowid  # type: ignore[assignment]
             except sqlite3.IntegrityError:
-                # Duplicate content — return existing id
+                # Duplicate (content, namespace) — return existing id
                 row = self._conn.execute(
-                    "SELECT fact_id FROM facts WHERE content = ?", (content,)
+                    "SELECT fact_id FROM facts WHERE content = ? AND namespace = ?", (content, namespace)
                 ).fetchone()
                 return int(row["fact_id"])
 
@@ -226,12 +350,17 @@ class MemoryStore:
         min_trust: float = 0.3,
         limit: int = 10,
         include_superseded: bool = False,
+        namespace: str | None = None,
     ) -> list[dict]:
         """Full-text search over facts using FTS5.
 
         Returns a list of fact dicts ordered by FTS5 rank, then trust_score
         descending. Also increments retrieval_count for matched facts.
         Superseded facts are excluded unless include_superseded=True (history).
+
+        namespace=None means "no namespace filter" — MemoryStore is
+        namespace-AWARE but not namespace-ENFORCING; HolographicMemoryProvider
+        is the trust boundary and always passes its own namespace explicitly.
         """
         with self._lock:
             query = query.strip()
@@ -243,18 +372,23 @@ class MemoryStore:
             if category is not None:
                 category_clause = "AND f.category = ?"
                 params.append(category)
+            namespace_clause = ""
+            if namespace is not None:
+                namespace_clause = "AND f.namespace = ?"
+                params.append(namespace)
             status_clause = "" if include_superseded else "AND f.status != 'superseded'"
             params.append(limit)
 
             sql = f"""
                 SELECT f.fact_id, f.content, f.category, f.tags,
                        f.trust_score, f.retrieval_count, f.helpful_count,
-                       f.created_at, f.updated_at, f.status, f.superseded_by
+                       f.created_at, f.updated_at, f.status, f.superseded_by, f.namespace
                 FROM facts f
                 JOIN facts_fts fts ON fts.rowid = f.fact_id
                 WHERE facts_fts MATCH ?
                   AND f.trust_score >= ?
                   {category_clause}
+                  {namespace_clause}
                   {status_clause}
                 ORDER BY fts.rank, f.trust_score DESC
                 LIMIT ?
@@ -306,25 +440,47 @@ class MemoryStore:
             )
             self._conn.commit()
 
-    def stats(self, min_trust: float = 0.3) -> dict:
-        """Return operational counts for the store."""
+    def stats(self, min_trust: float = 0.3, namespace: str | None = None) -> dict:
+        """Return operational counts for the store.
+
+        namespace=None (default) reports across ALL namespaces, preserving
+        the original contract for existing callers/tests. Pass a namespace
+        to scope every count to it (used by the PR 3 diagnostics action).
+        """
         with self._lock:
+            ns_clause = " WHERE namespace = ?" if namespace is not None else ""
+            ns_params = [namespace] if namespace is not None else []
+            ns_and = " AND namespace = ?" if namespace is not None else ""
+
             by_category = {
                 row["category"] or "general": row["count"]
                 for row in self._conn.execute(
-                    "SELECT category, COUNT(*) AS count FROM facts GROUP BY category"
+                    f"SELECT category, COUNT(*) AS count FROM facts{ns_clause} GROUP BY category",
+                    ns_params,
                 ).fetchall()
             }
             return {
-                "facts": int(self._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]),
+                "facts": int(self._conn.execute(f"SELECT COUNT(*) FROM facts{ns_clause}", ns_params).fetchone()[0]),
+                "active": int(self._conn.execute(
+                    f"SELECT COUNT(*) FROM facts WHERE status != 'superseded'{ns_and}", ns_params
+                ).fetchone()[0]),
+                "superseded": int(self._conn.execute(
+                    f"SELECT COUNT(*) FROM facts WHERE status = 'superseded'{ns_and}", ns_params
+                ).fetchone()[0]),
                 "entities": int(self._conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]),
                 "by_category": by_category,
                 "recalled_at_least_once": int(
-                    self._conn.execute("SELECT COUNT(*) FROM facts WHERE retrieval_count > 0").fetchone()[0]
+                    self._conn.execute(
+                        f"SELECT COUNT(*) FROM facts WHERE retrieval_count > 0{ns_and}", ns_params
+                    ).fetchone()[0]
                 ),
                 "low_trust": int(
-                    self._conn.execute("SELECT COUNT(*) FROM facts WHERE trust_score < ?", (min_trust,)).fetchone()[0]
+                    self._conn.execute(
+                        f"SELECT COUNT(*) FROM facts WHERE trust_score < ?{ns_and}",
+                        [min_trust] + ns_params,
+                    ).fetchone()[0]
                 ),
+                "namespace": namespace if namespace is not None else "*",
                 "database": str(self.db_path),
             }
 
@@ -335,15 +491,24 @@ class MemoryStore:
         trust_delta: float | None = None,
         tags: str | None = None,
         category: str | None = None,
+        namespace: str | None = None,
     ) -> bool:
         """Partially update a fact. Trust is clamped to [0, 1].
 
-        Returns True if the row existed, False otherwise.
+        `namespace`, if given, scopes this to facts in that namespace only —
+        prevents one chat/profile from tampering with another's fact by
+        guessing a fact_id. Returns True if a matching row existed.
         """
         with self._lock:
-            row = self._conn.execute(
-                "SELECT fact_id, trust_score FROM facts WHERE fact_id = ?", (fact_id,)
-            ).fetchone()
+            if namespace is not None:
+                row = self._conn.execute(
+                    "SELECT fact_id, trust_score FROM facts WHERE fact_id = ? AND namespace = ?",
+                    (fact_id, namespace),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT fact_id, trust_score FROM facts WHERE fact_id = ?", (fact_id,)
+                ).fetchone()
             if row is None:
                 return False
 
@@ -401,10 +566,12 @@ class MemoryStore:
         source_type: str = "",
         extraction_method: str = "",
         confidence: float = 1.0,
+        namespace: str | None = None,
     ) -> int:
         """Atomically replace an active fact with a new one (a correction).
 
-        Inserts new_content as a fresh fact and marks old_fact_id as
+        Inserts new_content as a fresh fact (in `namespace`, if given, else
+        old_fact_id's own namespace) and marks old_fact_id as
         status='superseded' pointing to it. The old row is never deleted —
         it stays queryable via include_superseded=True (history) — and
         normal recall/search/list no longer return it.
@@ -412,12 +579,19 @@ class MemoryStore:
         If the insert fails for any reason other than a content collision,
         the original fact is left completely untouched (no partial
         supersession). Returns the new (or matched existing) fact_id.
-        Raises KeyError if old_fact_id does not exist.
+        Raises KeyError if old_fact_id does not exist (optionally scoped to
+        `namespace`, so one namespace can't supersede another's fact by id).
         """
         with self._lock:
-            old_row = self._conn.execute(
-                "SELECT fact_id, category FROM facts WHERE fact_id = ?", (old_fact_id,)
-            ).fetchone()
+            if namespace is not None:
+                old_row = self._conn.execute(
+                    "SELECT fact_id, category, namespace FROM facts WHERE fact_id = ? AND namespace = ?",
+                    (old_fact_id, namespace),
+                ).fetchone()
+            else:
+                old_row = self._conn.execute(
+                    "SELECT fact_id, category, namespace FROM facts WHERE fact_id = ?", (old_fact_id,)
+                ).fetchone()
             if old_row is None:
                 raise KeyError(f"fact_id {old_fact_id} not found")
 
@@ -425,16 +599,17 @@ class MemoryStore:
             if not new_content:
                 raise ValueError("new_content must not be empty")
             resolved_category = category or old_row["category"]
+            resolved_namespace = namespace if namespace is not None else old_row["namespace"]
 
             try:
                 cur = self._conn.execute(
                     """
                     INSERT INTO facts (content, category, tags, trust_score,
-                                        source_type, extraction_method, confidence)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                        source_type, extraction_method, confidence, namespace)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (new_content, resolved_category, tags, self.default_trust,
-                     source_type, extraction_method, confidence),
+                     source_type, extraction_method, confidence, resolved_namespace),
                 )
                 new_fact_id: int = cur.lastrowid  # type: ignore[assignment]
                 if new_fact_id != old_fact_id:
@@ -445,11 +620,13 @@ class MemoryStore:
                     )
                 self._conn.commit()
             except sqlite3.IntegrityError:
-                # new_content collides with an existing fact's UNIQUE content —
-                # that fact becomes the replacement instead of inserting a duplicate.
+                # new_content collides with an existing fact's UNIQUE
+                # (content, namespace) — that fact becomes the replacement
+                # instead of inserting a duplicate.
                 self._conn.rollback()
                 existing = self._conn.execute(
-                    "SELECT fact_id FROM facts WHERE content = ?", (new_content,)
+                    "SELECT fact_id FROM facts WHERE content = ? AND namespace = ?",
+                    (new_content, resolved_namespace),
                 ).fetchone()
                 if existing is None:
                     raise
@@ -480,6 +657,7 @@ class MemoryStore:
         self,
         category: str | None = None,
         limit: int = 50,
+        namespace: str | None = None,
     ) -> list[dict]:
         """Return superseded facts (and what replaced them) for audit/history queries.
 
@@ -492,26 +670,47 @@ class MemoryStore:
             if category is not None:
                 category_clause = "AND category = ?"
                 params.append(category)
+            namespace_clause = ""
+            if namespace is not None:
+                namespace_clause = "AND namespace = ?"
+                params.append(namespace)
             params.append(limit)
 
             sql = f"""
                 SELECT fact_id, content, category, tags, trust_score,
-                       created_at, updated_at, status, superseded_by
+                       created_at, updated_at, status, superseded_by, namespace
                 FROM facts
                 WHERE status = 'superseded'
                   {category_clause}
+                  {namespace_clause}
                 ORDER BY updated_at DESC
                 LIMIT ?
             """
             rows = self._conn.execute(sql, params).fetchall()
             return [self._row_to_dict(r) for r in rows]
 
-    def remove_fact(self, fact_id: int) -> bool:
-        """Delete a fact and its entity links. Returns True if the row existed."""
+    def remove_fact(self, fact_id: int, namespace: str | None = None, tombstone: bool = True) -> bool:
+        """Delete a fact and its entity links. Returns True if a matching row existed.
+
+        `namespace`, if given, scopes the delete (one namespace can't remove
+        another's fact by guessing a fact_id). `tombstone=True` (default)
+        records the content's hash in `forgotten_facts` so a later restore
+        from an older backup can't silently reactivate it — see
+        docs/plans/2026-10-15-holographic-pr3-*.md section on deletion-aware
+        restore. Pass tombstone=False for internal/non-forget deletes (e.g.
+        consolidation collision cleanup) where "the user asked to forget
+        this" would not be an accurate record.
+        """
         with self._lock:
-            row = self._conn.execute(
-                "SELECT fact_id, category FROM facts WHERE fact_id = ?", (fact_id,)
-            ).fetchone()
+            if namespace is not None:
+                row = self._conn.execute(
+                    "SELECT fact_id, category, content, namespace FROM facts WHERE fact_id = ? AND namespace = ?",
+                    (fact_id, namespace),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT fact_id, category, content, namespace FROM facts WHERE fact_id = ?", (fact_id,)
+                ).fetchone()
             if row is None:
                 return False
 
@@ -519,9 +718,26 @@ class MemoryStore:
                 "DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,)
             )
             self._conn.execute("DELETE FROM facts WHERE fact_id = ?", (fact_id,))
+            if tombstone:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO forgotten_facts (content_hash, namespace, forgotten_at) "
+                    "VALUES (?, ?, CURRENT_TIMESTAMP)",
+                    (content_hash(row["content"]), row["namespace"]),
+                )
             self._conn.commit()
             self._rebuild_bank(row["category"])
             return True
+
+    def get_tombstones(self, namespace: str | None = None) -> set[str]:
+        """Content hashes explicitly forgotten (optionally scoped to a namespace)."""
+        with self._lock:
+            if namespace is not None:
+                rows = self._conn.execute(
+                    "SELECT content_hash FROM forgotten_facts WHERE namespace = ?", (namespace,)
+                ).fetchall()
+            else:
+                rows = self._conn.execute("SELECT content_hash FROM forgotten_facts").fetchall()
+            return {r["content_hash"] for r in rows}
 
     def list_facts(
         self,
@@ -529,6 +745,7 @@ class MemoryStore:
         min_trust: float = 0.0,
         limit: int = 50,
         include_superseded: bool = False,
+        namespace: str | None = None,
     ) -> list[dict]:
         """Browse facts ordered by trust_score descending.
 
@@ -541,16 +758,21 @@ class MemoryStore:
             if category is not None:
                 category_clause = "AND category = ?"
                 params.append(category)
+            namespace_clause = ""
+            if namespace is not None:
+                namespace_clause = "AND namespace = ?"
+                params.append(namespace)
             status_clause = "" if include_superseded else "AND status != 'superseded'"
             params.append(limit)
 
             sql = f"""
                 SELECT fact_id, content, category, tags, trust_score,
                        retrieval_count, helpful_count, created_at, updated_at,
-                       status, superseded_by
+                       status, superseded_by, namespace
                 FROM facts
                 WHERE trust_score >= ?
                   {category_clause}
+                  {namespace_clause}
                   {status_clause}
                 ORDER BY trust_score DESC
                 LIMIT ?
@@ -558,20 +780,28 @@ class MemoryStore:
             rows = self._conn.execute(sql, params).fetchall()
             return [self._row_to_dict(r) for r in rows]
 
-    def record_feedback(self, fact_id: int, helpful: bool) -> dict:
+    def record_feedback(self, fact_id: int, helpful: bool, namespace: str | None = None) -> dict:
         """Record user feedback and adjust trust asymmetrically.
 
         helpful=True  -> trust += 0.05, helpful_count += 1
         helpful=False -> trust -= 0.10
 
-        Returns a dict with fact_id, old_trust, new_trust, helpful_count.
-        Raises KeyError if fact_id does not exist.
+        `namespace`, if given, scopes this to the matching namespace only —
+        prevents one chat/profile from nudging another's fact's trust score
+        by guessing a fact_id. Returns a dict with fact_id, old_trust,
+        new_trust, helpful_count. Raises KeyError if no matching fact exists.
         """
         with self._lock:
-            row = self._conn.execute(
-                "SELECT fact_id, trust_score, helpful_count FROM facts WHERE fact_id = ?",
-                (fact_id,),
-            ).fetchone()
+            if namespace is not None:
+                row = self._conn.execute(
+                    "SELECT fact_id, trust_score, helpful_count FROM facts WHERE fact_id = ? AND namespace = ?",
+                    (fact_id, namespace),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT fact_id, trust_score, helpful_count FROM facts WHERE fact_id = ?",
+                    (fact_id,),
+                ).fetchone()
             if row is None:
                 raise KeyError(f"fact_id {fact_id} not found")
 

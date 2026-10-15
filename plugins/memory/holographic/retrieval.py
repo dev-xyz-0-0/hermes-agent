@@ -59,6 +59,7 @@ class FactRetriever:
         category: str | None = None,
         min_trust: float = 0.3,
         limit: int = 10,
+        namespace: str | None = None,
     ) -> list[dict]:
         """Hybrid search: FTS5 candidates → Jaccard rerank → trust weighting.
 
@@ -68,10 +69,14 @@ class FactRetriever:
         3. Trust weighting: final_score = relevance * trust_score
         4. Temporal decay (optional): decay = 0.5^(age_days / half_life)
 
+        `namespace=None` means unfiltered (store-level default — see
+        MemoryStore's own namespace docstrings: the provider is the trust
+        boundary and always passes its own namespace explicitly).
+
         Returns list of dicts with fact data + 'score' field, sorted by score desc.
         """
         # Stage 1: Get FTS5 candidates (more than limit for reranking headroom)
-        candidates = self._fts_candidates(query, category, min_trust, limit * 3)
+        candidates = self._fts_candidates(query, category, min_trust, limit * 3, namespace)
 
         if not candidates:
             return []
@@ -115,16 +120,22 @@ class FactRetriever:
         scored.sort(key=lambda x: x["score"], reverse=True)
         results = scored[:limit]
 
-        # Increment retrieval_count for returned facts (fixes #17899)
+        # Increment retrieval_count for returned facts (fixes #17899).
+        # Must hold the store's lock — this mutates+commits the SAME
+        # connection concurrent callers (e.g. parallel capture threads also
+        # calling search() via consolidation's dedup lookup) may be using
+        # at the same moment; unguarded, this raced under PR 3's concurrency
+        # test ("cannot commit - no transaction is active").
         if results:
             try:
-                ids = [r["fact_id"] for r in results]
-                placeholders = ",".join("?" * len(ids))
-                self.store._conn.execute(
-                    f"UPDATE facts SET retrieval_count = retrieval_count + 1 WHERE fact_id IN ({placeholders})",
-                    ids,
-                )
-                self.store._conn.commit()
+                with self.store._lock:
+                    ids = [r["fact_id"] for r in results]
+                    placeholders = ",".join("?" * len(ids))
+                    self.store._conn.execute(
+                        f"UPDATE facts SET retrieval_count = retrieval_count + 1 WHERE fact_id IN ({placeholders})",
+                        ids,
+                    )
+                    self.store._conn.commit()
             except Exception:
                 logger.debug("Failed to increment retrieval_count", exc_info=True)
 
@@ -138,6 +149,7 @@ class FactRetriever:
         entity: str,
         category: str | None = None,
         limit: int = 10,
+        namespace: str | None = None,
     ) -> list[dict]:
         """Compositional entity query using HRR algebra.
 
@@ -149,7 +161,7 @@ class FactRetriever:
         """
         if not hrr._HAS_NUMPY:
             # Fallback to keyword search on entity name
-            return self.search(entity, category=category, limit=limit)
+            return self.search(entity, category=category, limit=limit, namespace=namespace)
 
         conn = self.store._conn
 
@@ -158,13 +170,17 @@ class FactRetriever:
         entity_vec = hrr.encode_atom(entity.lower(), self.hrr_dim)
         probe_key = hrr.bind(entity_vec, role_entity)
 
-        # Try category-specific bank first, then all facts
-        if category:
+        # Try category-specific bank first, then all facts — but the bank is
+        # bundled across ALL namespaces (see store.py's _rebuild_bank), so a
+        # namespace-scoped caller must skip it and go straight to per-fact
+        # scoring below, which IS namespace-filterable.
+        if category and namespace is None:
             bank_name = f"cat:{category}"
-            bank_row = conn.execute(
-                "SELECT vector FROM memory_banks WHERE bank_name = ?",
-                (bank_name,),
-            ).fetchone()
+            with self.store._lock:
+                bank_row = conn.execute(
+                    "SELECT vector FROM memory_banks WHERE bank_name = ?",
+                    (bank_name,),
+                ).fetchone()
             if bank_row:
                 bank_vec = hrr.bytes_to_phases(bank_row["vector"])
                 extracted = hrr.unbind(bank_vec, probe_key)
@@ -179,21 +195,25 @@ class FactRetriever:
         if category:
             where += " AND category = ?"
             params.append(category)
+        if namespace is not None:
+            where += " AND namespace = ?"
+            params.append(namespace)
 
-        rows = conn.execute(
-            f"""
-            SELECT fact_id, content, category, tags, trust_score,
-                   retrieval_count, helpful_count, created_at, updated_at,
-                   hrr_vector
-            FROM facts
-            {where}
-            """,
-            params,
-        ).fetchall()
+        with self.store._lock:
+            rows = conn.execute(
+                f"""
+                SELECT fact_id, content, category, tags, trust_score,
+                       retrieval_count, helpful_count, created_at, updated_at,
+                       hrr_vector
+                FROM facts
+                {where}
+                """,
+                params,
+            ).fetchall()
 
         if not rows:
             # Final fallback: keyword search
-            return self.search(entity, category=category, limit=limit)
+            return self.search(entity, category=category, limit=limit, namespace=namespace)
 
         scored = []
         for row in rows:
@@ -216,6 +236,7 @@ class FactRetriever:
         entity: str,
         category: str | None = None,
         limit: int = 10,
+        namespace: str | None = None,
     ) -> list[dict]:
         """Discover facts that share structural connections with an entity.
 
@@ -226,7 +247,7 @@ class FactRetriever:
         Falls back to FTS5 search if numpy unavailable.
         """
         if not hrr._HAS_NUMPY:
-            return self.search(entity, category=category, limit=limit)
+            return self.search(entity, category=category, limit=limit, namespace=namespace)
 
         conn = self.store._conn
 
@@ -239,20 +260,24 @@ class FactRetriever:
         if category:
             where += " AND category = ?"
             params.append(category)
+        if namespace is not None:
+            where += " AND namespace = ?"
+            params.append(namespace)
 
-        rows = conn.execute(
-            f"""
-            SELECT fact_id, content, category, tags, trust_score,
-                   retrieval_count, helpful_count, created_at, updated_at,
-                   hrr_vector
-            FROM facts
-            {where}
-            """,
-            params,
-        ).fetchall()
+        with self.store._lock:
+            rows = conn.execute(
+                f"""
+                SELECT fact_id, content, category, tags, trust_score,
+                       retrieval_count, helpful_count, created_at, updated_at,
+                       hrr_vector
+                FROM facts
+                {where}
+                """,
+                params,
+            ).fetchall()
 
         if not rows:
-            return self.search(entity, category=category, limit=limit)
+            return self.search(entity, category=category, limit=limit, namespace=namespace)
 
         # Score each fact by how much the entity's atom appears in its vector
         # This catches both role-bound entity matches AND content word matches
@@ -284,6 +309,7 @@ class FactRetriever:
         entities: list[str],
         category: str | None = None,
         limit: int = 10,
+        namespace: str | None = None,
     ) -> list[dict]:
         """Multi-entity compositional query — vector-space JOIN.
 
@@ -299,7 +325,7 @@ class FactRetriever:
         if not hrr._HAS_NUMPY or not entities:
             # Fallback: search with all entities as keywords
             query = " ".join(entities)
-            return self.search(query, category=category, limit=limit)
+            return self.search(query, category=category, limit=limit, namespace=namespace)
 
         conn = self.store._conn
         role_entity = hrr.encode_atom("__hrr_role_entity__", self.hrr_dim)
@@ -318,21 +344,25 @@ class FactRetriever:
         if category:
             where += " AND category = ?"
             params.append(category)
+        if namespace is not None:
+            where += " AND namespace = ?"
+            params.append(namespace)
 
-        rows = conn.execute(
-            f"""
-            SELECT fact_id, content, category, tags, trust_score,
-                   retrieval_count, helpful_count, created_at, updated_at,
-                   hrr_vector
-            FROM facts
-            {where}
-            """,
-            params,
-        ).fetchall()
+        with self.store._lock:
+            rows = conn.execute(
+                f"""
+                SELECT fact_id, content, category, tags, trust_score,
+                       retrieval_count, helpful_count, created_at, updated_at,
+                       hrr_vector
+                FROM facts
+                {where}
+                """,
+                params,
+            ).fetchall()
 
         if not rows:
             query = " ".join(entities)
-            return self.search(query, category=category, limit=limit)
+            return self.search(query, category=category, limit=limit, namespace=namespace)
 
         # Score each fact by how much EACH entity is structurally present.
         # A fact scores high only if ALL entities have structural presence
@@ -362,6 +392,7 @@ class FactRetriever:
         category: str | None = None,
         threshold: float = 0.3,
         limit: int = 10,
+        namespace: str | None = None,
     ) -> list[dict]:
         """Find potentially contradictory facts via entity overlap + content divergence.
 
@@ -383,16 +414,20 @@ class FactRetriever:
         if category:
             where += " AND f.category = ?"
             params.append(category)
+        if namespace is not None:
+            where += " AND f.namespace = ?"
+            params.append(namespace)
 
-        rows = conn.execute(
-            f"""
-            SELECT f.fact_id, f.content, f.category, f.tags, f.trust_score,
-                   f.created_at, f.updated_at, f.hrr_vector
-            FROM facts f
-            {where}
-            """,
-            params,
-        ).fetchall()
+        with self.store._lock:
+            rows = conn.execute(
+                f"""
+                SELECT f.fact_id, f.content, f.category, f.tags, f.trust_score,
+                       f.created_at, f.updated_at, f.hrr_vector
+                FROM facts f
+                {where}
+                """,
+                params,
+            ).fetchall()
 
         if len(rows) < 2:
             return []
@@ -409,14 +444,15 @@ class FactRetriever:
         fact_entities: dict[int, set[str]] = {}
         for row in rows:
             fid = row["fact_id"]
-            entity_rows = conn.execute(
-                """
-                SELECT e.name FROM entities e
-                JOIN fact_entities fe ON fe.entity_id = e.entity_id
-                WHERE fe.fact_id = ?
-                """,
-                (fid,),
-            ).fetchall()
+            with self.store._lock:
+                entity_rows = conn.execute(
+                    """
+                    SELECT e.name FROM entities e
+                    JOIN fact_entities fe ON fe.entity_id = e.entity_id
+                    WHERE fe.fact_id = ?
+                    """,
+                    (fid,),
+                ).fetchall()
             fact_entities[fid] = {r["name"].lower() for r in entity_rows}
 
         # Compare all pairs: high entity overlap + low content similarity = contradiction
@@ -478,16 +514,17 @@ class FactRetriever:
             where += " AND category = ?"
             params.append(category)
 
-        rows = conn.execute(
-            f"""
-            SELECT fact_id, content, category, tags, trust_score,
-                   retrieval_count, helpful_count, created_at, updated_at,
-                   hrr_vector
-            FROM facts
-            {where}
-            """,
-            params,
-        ).fetchall()
+        with self.store._lock:
+            rows = conn.execute(
+                f"""
+                SELECT fact_id, content, category, tags, trust_score,
+                       retrieval_count, helpful_count, created_at, updated_at,
+                       hrr_vector
+                FROM facts
+                {where}
+                """,
+                params,
+            ).fetchall()
 
         scored = []
         for row in rows:
@@ -506,6 +543,7 @@ class FactRetriever:
         category: str | None,
         min_trust: float,
         limit: int,
+        namespace: str | None = None,
     ) -> list[dict]:
         """Get raw FTS5 candidates from the store.
 
@@ -532,6 +570,9 @@ class FactRetriever:
         where_clauses.append("f.trust_score >= ?")
         params.append(min_trust)
         where_clauses.append(f"f.{_ACTIVE_CLAUSE}")
+        if namespace is not None:
+            where_clauses.append("f.namespace = ?")
+            params.append(namespace)
 
         where_sql = " AND ".join(where_clauses)
 
@@ -546,14 +587,19 @@ class FactRetriever:
         params.append(limit)
 
         rows = []
-        for attempt_query in (sanitized, self._sanitize_fts_query(query, mode="and"), self._sanitize_fts_query(query, mode="or")):
-            attempt_params = [attempt_query] + params[1:]
-            try:
-                rows = conn.execute(sql, attempt_params).fetchall()
-                if rows:
-                    break
-            except Exception:
-                continue
+        # Locked: this connection is shared across threads (check_same_thread
+        # =False) and Python's sqlite3 module does not itself serialize
+        # concurrent statement execution on one connection — callers must.
+        # See retrieval_count's write-path above for the race this guards.
+        with self.store._lock:
+            for attempt_query in (sanitized, self._sanitize_fts_query(query, mode="and"), self._sanitize_fts_query(query, mode="or")):
+                attempt_params = [attempt_query] + params[1:]
+                try:
+                    rows = conn.execute(sql, attempt_params).fetchall()
+                    if rows:
+                        break
+                except Exception:
+                    continue
 
         if not rows:
             return []
