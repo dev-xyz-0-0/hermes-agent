@@ -100,10 +100,70 @@ def test_ambiguous_correction_never_supersedes_unrelated_fact(tmp_path):
     store.close()
 
 
-def test_fictional_benchmark_correction_is_rejected():
-    assert capture.extract_candidates(
+def test_fictional_project_correction_is_extracted_with_target():
+    candidates = capture.extract_candidates(
         "I no longer use PostgreSQL for my fictional benchmark project."
-    ) == []
+    )
+    assert len(candidates) == 1
+    assert candidates[0].operation == "correction"
+    assert candidates[0].scope == "project:fictional benchmark project"
+    assert candidates[0].old_text == "PostgreSQL"
+
+
+@pytest.mark.parametrize("text", [
+    "In this fictional scenario, I use Redis.",
+    "For this fictional example, pretend I use MongoDB.",
+    "Imagine a fictional world where my agent runs on AWS.",
+])
+def test_contextual_fictional_hypotheticals_remain_rejected(text):
+    assert capture.extract_candidates(text) == []
+    assert not capture.eligible_for_hybrid(text)
+
+
+@pytest.mark.parametrize("text", [
+    "I might migrate my Solana analytics project to ClickHouse next year.",
+    "I may switch my Solana analytics project to ClickHouse.",
+    "I am considering moving my Solana analytics project to ClickHouse.",
+    "I am thinking about adopting ClickHouse for my Solana analytics project.",
+    "I am possibly replacing PostgreSQL with ClickHouse.",
+    "I am planning to evaluate ClickHouse next year.",
+])
+def test_tentative_changes_are_rejected_before_hybrid(text):
+    assert capture.extract_candidates(text) == []
+    assert not capture.eligible_for_hybrid(text)
+
+
+@pytest.mark.parametrize("text", [
+    "I might migrate my Solana analytics project to ClickHouse next year.",
+    "I may switch my Solana analytics project to ClickHouse.",
+    "I am considering moving my Solana analytics project to ClickHouse.",
+    "I am thinking about adopting ClickHouse for my Solana analytics project.",
+    "I am possibly replacing PostgreSQL with ClickHouse.",
+    "I am planning to evaluate ClickHouse next year.",
+])
+def test_tentative_changes_do_not_call_auxiliary(tmp_path, monkeypatch, text):
+    called = []
+    monkeypatch.setattr("agent.auxiliary_client.call_llm", lambda **kwargs: called.append(kwargs))
+    provider = _provider(tmp_path, extraction_mode="hybrid")
+    provider.sync_turn(text, "ok")
+    provider.shutdown()
+    assert called == []
+
+
+def test_confirmed_clause_survives_tentative_clause():
+    candidates = capture.extract_candidates(
+        "I use PostgreSQL for production, but I might migrate my analytics project to ClickHouse."
+    )
+    assert len(candidates) == 1
+    assert candidates[0].operation == "statement"
+    assert "PostgreSQL" in candidates[0].content
+    assert "ClickHouse" not in candidates[0].content
+
+
+def test_committed_migration_decision_is_captured():
+    candidates = capture.extract_candidates("I decided to migrate my test project to SQLite.")
+    assert len(candidates) == 1
+    assert candidates[0].operation == "statement"
 
 
 def test_explicit_forget_and_unambiguous_correction(tmp_path):

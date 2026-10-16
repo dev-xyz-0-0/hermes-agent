@@ -33,6 +33,11 @@ _RE_CORRECTION_MARKER = re.compile(
     r"\bno\s+longer\s+use\b|\breplace(?:d)?\s+the\s+old\b",
     re.IGNORECASE,
 )
+_RE_NO_LONGER_USE_PROJECT = re.compile(
+    r"\bi\s+no\s+longer\s+use\s+(?P<old>[\w.#+-]+(?:\s+[\w.#+-]+){0,3}?)\s+"
+    r"for\s+my\s+(?P<scope>[\w.#+-]+(?:\s+[\w.#+-]+){0,5}\s+projects?)\b",
+    re.IGNORECASE,
+)
 _RE_SWITCH_FROM_TO = re.compile(
     r"switch(?:ed|ing)?\s+(?:[\w .]+?\s+)?from\s+(?P<old>[\w .+-]+?)\s+to\s+(?P<new>[\w .+-]+?)[.,!?]?\s*$",
     re.IGNORECASE,
@@ -45,7 +50,7 @@ _RE_STATEMENT = re.compile(
     r"\b(?:i\s+use\b|i'?m\s+using\b|i\s+am\s+using\b|i\s+prefer\b|"
     r"my\s+(?:preferred\s+)?\w+(?:\s+\w+)*\s+(?:uses?|is|runs?)\b|"
     r"project\s+\w+\s+uses?\b|"
-    r"i'?ve\s+decided\b|from\s+now\s+on\b|we\s+(?:decided|chose)\b|"
+    r"i(?:'?ve|\s+have)?\s+decided\b|from\s+now\s+on\b|we\s+(?:decided|chose)\b|"
     r"i\s+no\s+longer\s+use\b|"
     r"i\s+(?:always|never|usually)\s+\w)",
     re.IGNORECASE,
@@ -56,9 +61,17 @@ _RE_QUESTION = re.compile(r"\?\s*$")
 _RE_HYPOTHETICAL = re.compile(
     r"\b(?:what\s+if|suppose|hypothetically|hypothetical\s+scenario|"
     r"imagine(?:\s+that|\s+if)?|assume(?:\s+that)?|pretend(?:\s+that)?|"
-    r"for\s+(?:this\s+)?example(?:\s+only)?|fictional|let'?s\s+say|"
-    r"evaluating|considering|might\s+(?:use|switch)|"
+    r"for\s+(?:this\s+)?example(?:\s+only)?|fictional\s+(?:scenario|example|world|case)|"
+    r"let'?s\s+say|evaluating|considering|might\s+(?:use|switch)|"
     r"we'?re\s+(?:evaluating|considering|looking\s+at|exploring))\b",
+    re.IGNORECASE,
+)
+_RE_TENTATIVE = re.compile(
+    r"\b(?:(?:might|may|could|possibly)\s+(?:migrat(?:e|ing)|switch(?:ing)?|mov(?:e|ing)|"
+    r"adopt(?:ing)?|replac(?:e|ing)|use|using)\b|"
+    r"considering\s+(?:moving|migrating|switching|adopting|replacing)\b|"
+    r"thinking\s+about\s+(?:moving|migrating|switching|adopting|replacing)\b|"
+    r"planning\s+to\s+(?:evaluate|consider|explore)\b)",
     re.IGNORECASE,
 )
 _RE_FULLY_QUOTED = re.compile(r'^\s*["“].*["”]\s*$')
@@ -108,6 +121,8 @@ def _looks_rejectable(sentence: str) -> bool:
         return True
     if _RE_HYPOTHETICAL.search(sentence):
         return True
+    if _RE_TENTATIVE.search(sentence):
+        return True
     if _RE_FULLY_QUOTED.match(sentence):
         return True
     if _RE_REPORTED_SPEECH.search(sentence):
@@ -130,6 +145,8 @@ def rejection_reason(text: str, *, for_hybrid: bool = False) -> str | None:
             return "question"
         if _RE_HYPOTHETICAL.search(sentence):
             return "hypothetical"
+        if _RE_TENTATIVE.search(sentence):
+            return "tentative"
         if _RE_FULLY_QUOTED.match(sentence) or _RE_REPORTED_SPEECH.search(sentence):
             return "reported_or_quoted"
         if _RE_PROMPT_INJECTION.search(sentence):
@@ -258,10 +275,24 @@ def extract_candidates(text: str, max_candidates: int = 5) -> list[FactCandidate
     text = _normalize(text)
     if not text or len(text) < 8:
         return []
-    if rejection_reason(text):
+    # Prompt injection taints the whole utterance. Other low-signal forms are
+    # evaluated per sentence/clause so an independent factual clause survives.
+    if _RE_PROMPT_INJECTION.search(text):
         return []
 
-    sentences = re.split(r"(?<=[.!?])\s+", text)
+    sentences: list[str] = []
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        sentence = sentence.strip()
+        if _RE_ATOMIC_CONTRAST.match(sentence):
+            sentences.append(sentence)
+        elif _RE_TENTATIVE.search(sentence) and re.search(r"\s+(?:but|however)\s+|;\s*", sentence, re.IGNORECASE):
+            sentences.extend(
+                part.strip(" ,") for part in
+                re.split(r"\s+(?:but|however)\s+|;\s*", sentence, flags=re.IGNORECASE)
+                if part.strip(" ,")
+            )
+        else:
+            sentences.append(sentence)
     candidates: list[FactCandidate] = []
 
     for sentence in sentences:
@@ -295,6 +326,17 @@ def extract_candidates(text: str, max_candidates: int = 5) -> list[FactCandidate
                     scope=_scope_hint(sentence),
                     confidence=0.8,
                 ))
+            continue
+
+        no_longer_project = _RE_NO_LONGER_USE_PROJECT.search(sentence)
+        if no_longer_project:
+            candidates.append(FactCandidate(
+                content=sentence[:_MAX_CONTENT_LEN],
+                operation="correction",
+                scope=normalize_scope(no_longer_project.group("scope")),
+                old_text=no_longer_project.group("old").strip(" .!?"),
+                confidence=0.85,
+            ))
             continue
 
         switch_ft = _RE_SWITCH_FROM_TO.search(sentence)
