@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 import json
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -42,7 +43,7 @@ _RE_SWITCH_TO = re.compile(
 )
 _RE_STATEMENT = re.compile(
     r"\b(?:i\s+use\b|i'?m\s+using\b|i\s+am\s+using\b|i\s+prefer\b|"
-    r"my\s+(?:preferred\s+)?\w+(?:\s+\w+)*\s+(?:uses?|is)\b|"
+    r"my\s+(?:preferred\s+)?\w+(?:\s+\w+)*\s+(?:uses?|is|runs?)\b|"
     r"project\s+\w+\s+uses?\b|"
     r"i'?ve\s+decided\b|from\s+now\s+on\b|we\s+(?:decided|chose)\b|"
     r"i\s+no\s+longer\s+use\b|"
@@ -53,16 +54,40 @@ _RE_STATEMENT = re.compile(
 # Reject: questions, hypotheticals, quoted/reported speech, evaluation-not-decision.
 _RE_QUESTION = re.compile(r"\?\s*$")
 _RE_HYPOTHETICAL = re.compile(
-    r"\b(?:what\s+if|suppose|hypothetically|imagine\s+if|for\s+example|"
-    r"let'?s\s+say|evaluating|considering|might\s+(?:use|switch)|"
+    r"\b(?:what\s+if|suppose|hypothetically|hypothetical\s+scenario|"
+    r"imagine(?:\s+that|\s+if)?|assume(?:\s+that)?|pretend(?:\s+that)?|"
+    r"for\s+(?:this\s+)?example(?:\s+only)?|fictional|let'?s\s+say|"
+    r"evaluating|considering|might\s+(?:use|switch)|"
     r"we'?re\s+(?:evaluating|considering|looking\s+at|exploring))\b",
     re.IGNORECASE,
 )
 _RE_FULLY_QUOTED = re.compile(r'^\s*["“].*["”]\s*$')
 _RE_REPORTED_SPEECH = re.compile(
-    r"\b(?:someone|he|she|they|the\s+article|the\s+docs?|the\s+author)\s+said\b",
+    r"\b(?:(?:someone|he|she|they|my\s+colleague|a\s+colleague|the\s+article|"
+    r"an?\s+article|the\s+docs?|the\s+author)\s+(?:said|says|claims?|prefers?|uses?)|"
+    r"according\s+to)\b",
     re.IGNORECASE,
 )
+_RE_EXPLANATION_REQUEST = re.compile(
+    r"^\s*(?:please\s+)?(?:explain|show|tell|describe|help|walk\s+me\s+through|"
+    r"how\s+(?:do|can|should|would)\b|configure\b)", re.IGNORECASE,
+)
+_RE_PROMPT_INJECTION = re.compile(
+    r"\b(?:ignore|disregard|override)\s+(?:all\s+|any\s+)?(?:previous|prior|system|"
+    r"original)\s+(?:instructions?|prompts?|rules?)\b|\breveal\s+(?:your\s+)?secrets?\b|"
+    r"\bsystem\s+prompt\b", re.IGNORECASE,
+)
+_RE_ATOMIC_CONTRAST = re.compile(
+    r"^\s*i\s+prefer\s+(?P<first>.+?)\s+for\s+my\s+(?P<first_scope>[\w.#+-]+(?:\s+[\w.#+-]+){0,3}\s+projects?),\s*"
+    r"but\s+(?P<second>.+?)\s+for\s+my\s+(?P<second_scope>[\w.#+-]+(?:\s+[\w.#+-]+){0,3}\s+projects?)[.!]?\s*$",
+    re.IGNORECASE,
+)
+
+_ALLOWED_OPERATIONS = frozenset({"statement", "correction", "forget"})
+_MODEL_FORBIDDEN_FIELDS = frozenset({
+    "namespace", "user_id", "owner", "category", "trust", "trust_score",
+    "source", "source_type", "extraction_method", "authorized",
+})
 
 
 @dataclass
@@ -87,7 +112,31 @@ def _looks_rejectable(sentence: str) -> bool:
         return True
     if _RE_REPORTED_SPEECH.search(sentence):
         return True
+    if _RE_PROMPT_INJECTION.search(sentence):
+        return True
     return False
+
+
+def rejection_reason(text: str, *, for_hybrid: bool = False) -> str | None:
+    """Return a stable reason why text is unsafe or too low-signal to capture."""
+    normalized = _normalize(text)
+    if len(normalized) < 8:
+        return "too_short"
+    if len(normalized) > 4000:
+        return "too_long"
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", normalized) if part.strip()]
+    for sentence in sentences:
+        if _RE_QUESTION.search(sentence):
+            return "question"
+        if _RE_HYPOTHETICAL.search(sentence):
+            return "hypothetical"
+        if _RE_FULLY_QUOTED.match(sentence) or _RE_REPORTED_SPEECH.search(sentence):
+            return "reported_or_quoted"
+        if _RE_PROMPT_INJECTION.search(sentence):
+            return "prompt_injection"
+        if for_hybrid and _RE_EXPLANATION_REQUEST.search(sentence):
+            return "explanatory_request"
+    return None
 
 
 def eligible_for_hybrid(text: str) -> bool:
@@ -98,13 +147,39 @@ def eligible_for_hybrid(text: str) -> bool:
     model to decide whether a question implies a fact.
     """
     text = _normalize(text)
-    if len(text) < 8 or len(text) > 4000:
+    if rejection_reason(text, for_hybrid=True):
         return False
-    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
-    return bool(sentences) and not any(_looks_rejectable(sentence) for sentence in sentences)
+    # Explicit memory control remains eligible even though it is imperative.
+    if _RE_FORGET.search(text) or _RE_CORRECTION_MARKER.search(text):
+        return True
+    # Avoid sending arbitrary commands to the auxiliary model. Declarative
+    # first-person/project language remains eligible for recall-friendly facts.
+    return bool(re.search(
+        r"\b(?:i|i'm|i've|my|we|our|project|the\s+.+?\s+(?:is|uses?|runs?|remains?))\b",
+        text, re.IGNORECASE,
+    ))
 
 
-def candidates_from_json(payload: Any, max_candidates: int = 5) -> list[FactCandidate]:
+def normalize_scope(scope: str, *, content: str = "") -> str:
+    """Canonicalize semantic scope without accepting an authorization namespace."""
+    value = _normalize(scope).lower().strip(" .:;/-")
+    if value in {"", "user", "global", "user-level", "user preference"}:
+        return "user"
+    if value == "project":
+        return "project"
+    if value.startswith("project:"):
+        value = value.split(":", 1)[1].strip()
+    value = re.sub(r"\s+(?:database|db|host|hosting|setup|preference|choice)$", "", value)
+    value = re.sub(r"[^a-z0-9_.+# -]", "", value)
+    value = _normalize(value)[:80]
+    if not value:
+        return "user"
+    return f"project:{value}"
+
+
+def candidates_from_json(
+    payload: Any, max_candidates: int = 5, *, source_text: str = "",
+) -> list[FactCandidate]:
     """Validate untrusted structured model output into bounded candidates."""
     if isinstance(payload, str):
         payload = payload.strip()
@@ -120,20 +195,30 @@ def candidates_from_json(payload: Any, max_candidates: int = 5) -> list[FactCand
     for raw in payload[:max_candidates]:
         if not isinstance(raw, dict):
             continue
-        content = _normalize(str(raw.get("content") or ""))[:_MAX_CONTENT_LEN]
+        if _MODEL_FORBIDDEN_FIELDS.intersection(raw):
+            continue
+        content = _normalize(str(raw.get("content") or ""))
         operation = str(raw.get("operation") or "statement").lower()
-        if not content or operation not in {"statement", "correction", "forget"}:
+        scope_raw = _normalize(str(raw.get("scope") or ""))
+        old_text = _normalize(str(raw.get("old_text") or ""))
+        if (not content or len(content) > _MAX_CONTENT_LEN or
+                len(scope_raw) > 100 or len(old_text) > _MAX_CONTENT_LEN or
+                operation not in _ALLOWED_OPERATIONS or _looks_rejectable(content)):
             continue
         try:
             confidence = float(raw.get("confidence", 0.6))
         except (TypeError, ValueError):
-            confidence = 0.6
+            continue
+        if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+            continue
+        if source_text and rejection_reason(source_text, for_hybrid=True):
+            continue
         candidates.append(FactCandidate(
             content=content,
             operation=operation,
-            scope=_normalize(str(raw.get("scope") or ""))[:100].lower(),
-            old_text=_normalize(str(raw.get("old_text") or ""))[:_MAX_CONTENT_LEN],
-            confidence=max(0.0, min(1.0, confidence)),
+            scope=normalize_scope(scope_raw, content=content),
+            old_text=old_text,
+            confidence=confidence,
         ))
     return candidates
 
@@ -146,11 +231,20 @@ def _scope_hint(sentence: str) -> str:
     """
     m = re.search(r"\bmy\s+([\w]+(?:\s+[\w]+){0,2})\s+(?:uses?|is|runs?)\b", sentence, re.IGNORECASE)
     if m:
-        return m.group(1).strip().lower()
+        return normalize_scope(m.group(1))
     m = re.search(r"\b(project\s+\w+)\b", sentence, re.IGNORECASE)
     if m:
-        return m.group(1).strip().lower()
-    return ""
+        return normalize_scope(m.group(1))
+    m = re.search(
+        r"\bswitch(?:ed|ing)?\s+my\s+([\w]+(?:\s+[\w]+){0,3}?)\s+(?:from|to)\b",
+        sentence, re.IGNORECASE,
+    )
+    if m:
+        return normalize_scope(m.group(1))
+    m = re.search(r"\bfor\s+my\s+([\w.#+-]+(?:\s+[\w.#+-]+){0,3}\s+projects?)\b", sentence, re.IGNORECASE)
+    if m:
+        return normalize_scope(m.group(1))
+    return "user"
 
 
 def extract_candidates(text: str, max_candidates: int = 5) -> list[FactCandidate]:
@@ -164,6 +258,8 @@ def extract_candidates(text: str, max_candidates: int = 5) -> list[FactCandidate
     text = _normalize(text)
     if not text or len(text) < 8:
         return []
+    if rejection_reason(text):
+        return []
 
     sentences = re.split(r"(?<=[.!?])\s+", text)
     candidates: list[FactCandidate] = []
@@ -173,6 +269,21 @@ def extract_candidates(text: str, max_candidates: int = 5) -> list[FactCandidate
         if not sentence or len(sentence) < 8:
             continue
         if _looks_rejectable(sentence):
+            continue
+
+        contrast = _RE_ATOMIC_CONTRAST.match(sentence)
+        if contrast:
+            for value_group, scope_group in (("first", "first_scope"), ("second", "second_scope")):
+                value = contrast.group(value_group).strip(" .!?")
+                scope_text = contrast.group(scope_group).strip(" .!?")
+                candidates.append(FactCandidate(
+                    content=f"User prefers {value} for {scope_text}.",
+                    operation="statement",
+                    scope=normalize_scope(scope_text),
+                    confidence=0.8,
+                ))
+            if len(candidates) >= max_candidates:
+                break
             continue
 
         if _RE_FORGET.search(sentence):
@@ -203,8 +314,8 @@ def extract_candidates(text: str, max_candidates: int = 5) -> list[FactCandidate
                 ))
             elif switch_to:
                 new = switch_to.group("new").strip(" .!?")
-                scope = switch_to.group("scope").strip().lower()
-                content = f"{scope} uses {new}".strip()
+                scope = normalize_scope(switch_to.group("scope"))
+                content = f"{scope.split(':', 1)[-1]} uses {new}".strip()
                 candidates.append(FactCandidate(
                     content=content[:_MAX_CONTENT_LEN],
                     operation="correction",

@@ -255,6 +255,99 @@ def _fact_problem(content: str) -> str | None:
     return None
 
 
+def preview_capture(
+    text: str,
+    *,
+    extraction_mode: str = "hybrid",
+    max_candidates: int = 5,
+    existing_facts: list[dict] | None = None,
+    auxiliary_runner=None,
+) -> dict:
+    """Preview capture decisions without constructing a store or performing writes.
+
+    ``existing_facts`` is explicit fixture/read-only data. ``auxiliary_runner`` is
+    optional and receives the original text; no credentials or model client are
+    loaded implicitly.
+    """
+    started = time.monotonic()
+    reason = capture.rejection_reason(text, for_hybrid=True)
+    rule_candidates = capture.extract_candidates(text, max_candidates=max_candidates)
+    eligible = not reason and capture.eligible_for_hybrid(text)
+    auxiliary = {
+        "eligible": eligible,
+        "called": False,
+        "reason": reason or ("rule_candidates_present" if rule_candidates else "eligible"),
+        "latency_ms": None,
+        "usage": None,
+    }
+    candidates = list(rule_candidates)
+    if not candidates and extraction_mode == "hybrid" and eligible and auxiliary_runner is not None:
+        aux_started = time.monotonic()
+        auxiliary["called"] = True
+        try:
+            response = auxiliary_runner(text)
+            payload = response
+            if hasattr(response, "choices"):
+                payload = response.choices[0].message.content
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    auxiliary["usage"] = {
+                        "prompt_tokens": getattr(usage, "prompt_tokens", getattr(usage, "input_tokens", None)),
+                        "completion_tokens": getattr(usage, "completion_tokens", getattr(usage, "output_tokens", None)),
+                        "total_tokens": getattr(usage, "total_tokens", None),
+                    }
+            candidates = capture.candidates_from_json(
+                payload, max_candidates=max_candidates, source_text=text,
+            )
+            auxiliary["reason"] = "completed"
+        except Exception as exc:
+            auxiliary["reason"] = "timeout" if "timeout" in type(exc).__name__.lower() else "invalid_response"
+        finally:
+            auxiliary["latency_ms"] = round((time.monotonic() - aux_started) * 1000, 2)
+    elif not candidates and extraction_mode == "hybrid" and eligible:
+        auxiliary["reason"] = "runner_not_supplied"
+
+    normalized = []
+    proposed = []
+    facts = list(existing_facts or [])
+    for candidate in candidates[:max_candidates]:
+        problem = _fact_problem(candidate.content)
+        item = {
+            "content": candidate.content,
+            "operation": candidate.operation,
+            "scope": candidate.scope,
+            "old_text": candidate.old_text,
+            "confidence": candidate.confidence,
+            "firewall": {"accepted": problem is None, "reason": problem},
+        }
+        normalized.append(item)
+        if problem:
+            proposed.append({"action": "noop", "reason": "firewall_rejected"})
+            continue
+        plan = consolidation.plan_candidate(candidate, facts)
+        proposed.append({
+            "action": plan.action,
+            "fact_id": plan.fact_id,
+            "related_id": plan.related_id,
+            "reason": plan.reason,
+        })
+
+    return {
+        "preview": True,
+        "writes_performed": False,
+        "eligibility": {"eligible": eligible, "reason": reason},
+        "rule_candidates": [
+            {"content": c.content, "operation": c.operation, "scope": c.scope,
+             "old_text": c.old_text, "confidence": c.confidence}
+            for c in rule_candidates
+        ],
+        "auxiliary": auxiliary,
+        "normalized_candidates": normalized,
+        "proposed_operations": proposed,
+        "latency_ms": round((time.monotonic() - started) * 1000, 2),
+    }
+
+
 def _recall_problem(content: str) -> str | None:
     """Why a stored fact must not be injected into prompt context."""
     text = (content or "").strip()
@@ -879,8 +972,11 @@ class HolographicMemoryProvider(MemoryProvider):
                             "Extract durable facts explicitly asserted by the user. Return JSON only as "
                             "{\"candidates\":[{\"content\":str,\"operation\":\"statement|correction|forget\","
                             "\"scope\":str,\"old_text\":str,\"confidence\":number}]}. "
+                            "Scope must be user, project, or project:<specific name>; emit one atomic fact per distinct "
+                            "project. Corrections must identify the previous value/property in old_text when possible. "
                             "Do not infer facts, answer questions, capture temporary state, quoted/reported speech, "
-                            "hypotheticals, credentials, or instructions. Use an empty candidates list when unsure."
+                            "hypotheticals, credentials, or instructions. Never emit namespace, source, category, trust, "
+                            "authorization, or policy fields. Use an empty candidates list when unsure."
                         ),
                     },
                     {"role": "user", "content": user_content},
@@ -890,7 +986,9 @@ class HolographicMemoryProvider(MemoryProvider):
                 timeout=self._hybrid_capture_timeout_ms / 1000,
             )
             content = response.choices[0].message.content
-            candidates = capture.candidates_from_json(content, max_candidates=self._max_facts_per_turn)
+            candidates = capture.candidates_from_json(
+                content, max_candidates=self._max_facts_per_turn, source_text=user_content,
+            )
         except RuntimeError as exc:
             self._metric("hybrid_unavailable")
             logger.debug("Holographic hybrid capture unavailable: %s", exc)
@@ -943,7 +1041,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     logger.info("holographic.capture: candidate rejected by firewall (%s)", problem)
                 continue
 
-            category = "project" if candidate.scope else "user_pref"
+            category = "project" if candidate.scope.startswith("project") else "user_pref"
             try:
                 if self._consolidation_enabled:
                     result = consolidation.classify_and_apply(
@@ -977,6 +1075,8 @@ class HolographicMemoryProvider(MemoryProvider):
                 self._metric("capture_accepted")
                 if extraction_method == "hybrid":
                     self._metric("hybrid_accepted")
+            elif result.action == "noop" and candidate.operation in {"correction", "forget"}:
+                self._metric(f"consolidation_skipped_{candidate.operation}")
             if result.fact_id:
                 self._record_source(result.fact_id, via)
             if self._capture_debug:

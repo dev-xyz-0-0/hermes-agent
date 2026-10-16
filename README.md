@@ -295,7 +295,7 @@ uv run pytest tests/gateway/test_telegram_approval_buttons.py -q
 
 uv run pytest tests/run_agent/test_run_agent.py -q
 
-uv run pytest test_provider_fallback.py -q
+uv run pytest tests/plugins/memory/test_holographic_capture.py -q
 uv run pytest test_retry_utils.py -q
 
 

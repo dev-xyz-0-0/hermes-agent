@@ -64,6 +64,35 @@ def _overlap(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b)
 
 
+def _scope_text(scope: str) -> str:
+    return scope.split(":", 1)[1] if scope.startswith("project:") else scope
+
+
+def _scope_compatible(scope: str, fact: dict) -> bool:
+    """Keep semantic project scope separate from the authorization namespace."""
+    if scope in {"", "user"}:
+        return True
+    if scope == "project":
+        return False  # unresolved project scope must never broaden globally
+    wanted = _content_tokens(_scope_text(scope))
+    present = _content_tokens(str(fact.get("content") or ""))
+    return bool(wanted) and wanted.issubset(present)
+
+
+def _rank_matches(rows: list[dict], compare_text: str, scope: str) -> tuple[dict | None, float, bool]:
+    compare_tokens = _content_tokens(compare_text)
+    ranked = sorted(
+        ((_overlap(compare_tokens, _content_tokens(row.get("content", ""))), row)
+         for row in rows if _scope_compatible(scope, row)),
+        key=lambda item: item[0], reverse=True,
+    )
+    if not ranked or ranked[0][0] <= 0:
+        return None, 0.0, False
+    best_score, best = ranked[0]
+    tied = len(ranked) > 1 and abs(ranked[1][0] - best_score) < 0.05
+    return best, best_score, tied
+
+
 def _best_match(
     retriever, query_text: str, compare_text: str, limit: int = 8, namespace: str = "",
 ) -> tuple[dict | None, float]:
@@ -94,13 +123,74 @@ def _best_match(
     if not candidates:
         return None, 0.0
 
-    compare_tokens = _content_tokens(compare_text)
-    best, best_score = None, 0.0
-    for row in candidates:
-        score = _overlap(compare_tokens, _content_tokens(row["content"]))
-        if score > best_score:
-            best, best_score = row, score
+    best, best_score, _ = _rank_matches(candidates, compare_text, "")
     return best, best_score
+
+
+def plan_candidate(candidate: FactCandidate, existing_facts: list[dict]) -> ConsolidationResult:
+    """Plan consolidation without opening a store or performing a write."""
+    content = (candidate.content or "").strip()
+    if not content:
+        return ConsolidationResult(action="noop", reason="empty_content")
+
+    scope = candidate.scope or "user"
+    if candidate.operation in {"correction", "forget"} and scope == "project":
+        return ConsolidationResult(action="noop", reason="unresolved_project_scope")
+
+    if candidate.operation == "correction":
+        # Prefer the named previous value. When it is omitted, a named project
+        # scope is the minimum safe target; a user/global correction is too broad.
+        if candidate.old_text:
+            compare = f"{_scope_text(scope)} {candidate.old_text}".strip()
+        elif scope.startswith("project:"):
+            compare = _scope_text(scope)
+        else:
+            return ConsolidationResult(action="noop", reason="missing_correction_target")
+        best, score, tied = _rank_matches(existing_facts, compare, scope)
+        if best is None and not existing_facts:
+            return ConsolidationResult(action="inserted", reason="standalone_complete_correction")
+        if best is None or score < _CORRECTION_OVERLAP:
+            return ConsolidationResult(action="noop", reason="no_confident_correction_target")
+        if tied:
+            return ConsolidationResult(action="noop", reason="ambiguous_correction_target")
+        if best["content"].strip() == content:
+            return ConsolidationResult(action="ignored", fact_id=best.get("fact_id"), reason="exact_duplicate")
+        return ConsolidationResult(
+            action="superseded", related_id=best.get("fact_id"), reason=f"overlap={score:.2f}",
+        )
+
+    if candidate.operation == "forget":
+        best, score, tied = _rank_matches(existing_facts, content, scope)
+        if best is None:
+            return ConsolidationResult(action="noop", reason="no_matching_fact_to_forget")
+        if tied or score < _FORGET_OVERLAP:
+            return ConsolidationResult(
+                action="noop", fact_id=best.get("fact_id"), reason="ambiguous_forget_target",
+            )
+        return ConsolidationResult(action="forgotten", related_id=best.get("fact_id"), reason=f"overlap={score:.2f}")
+
+    best, score, _ = _rank_matches(existing_facts, content, scope)
+    if best is not None:
+        if best["content"].strip() == content:
+            return ConsolidationResult(action="ignored", fact_id=best.get("fact_id"), reason="exact_duplicate")
+        if score >= _DUPLICATE_OVERLAP:
+            return ConsolidationResult(action="ignored", fact_id=best.get("fact_id"), reason=f"paraphrase_overlap={score:.2f}")
+    return ConsolidationResult(action="inserted", reason="new_fact")
+
+
+def _search_existing(retriever, candidate: FactCandidate, namespace: str) -> list[dict]:
+    scope_text = _scope_text(candidate.scope or "")
+    query = candidate.old_text or scope_text or candidate.content
+    try:
+        rows = retriever.search(query, min_trust=0.0, limit=8, namespace=namespace)
+    except Exception:
+        rows = []
+    if not rows and query != candidate.content:
+        try:
+            rows = retriever.search(candidate.content, min_trust=0.0, limit=8, namespace=namespace)
+        except Exception:
+            rows = []
+    return rows
 
 
 def classify_and_apply(
@@ -123,45 +213,17 @@ def classify_and_apply(
     if not content:
         return ConsolidationResult(action="noop", reason="empty content")
 
-    if candidate.operation == "forget":
-        return _apply_forget(store, retriever, candidate, namespace=namespace)
-
-    query_text = candidate.scope or candidate.old_text or content
-    best, best_score = _best_match(retriever, query_text, content, namespace=namespace)
-
-    if candidate.operation == "correction":
-        if best is not None and best_score >= _CORRECTION_OVERLAP and best["content"].strip() != content:
-            new_id = store.supersede_fact(best["fact_id"], content, category=category, namespace=namespace, **fact_kwargs)
-            return ConsolidationResult(
-                action="superseded", fact_id=new_id, related_id=best["fact_id"],
-                reason=f"overlap={best_score:.2f}",
-            )
-        # No confident correction target — insert standalone rather than guess.
-        new_id = store.add_fact(content, category=category, namespace=namespace, **fact_kwargs)
-        return ConsolidationResult(action="inserted", fact_id=new_id, reason="no confident correction target")
-
-    # operation == "statement"
-    if best is not None:
-        if best["content"].strip() == content:
-            return ConsolidationResult(action="ignored", fact_id=best["fact_id"], reason="exact duplicate")
-        if best_score >= _DUPLICATE_OVERLAP:
-            return ConsolidationResult(action="ignored", fact_id=best["fact_id"], reason=f"paraphrase overlap={best_score:.2f}")
-
-    new_id = store.add_fact(content, category=category, namespace=namespace, **fact_kwargs)
-    return ConsolidationResult(action="inserted", fact_id=new_id, reason="new fact")
+    plan = plan_candidate(candidate, _search_existing(retriever, candidate, namespace))
+    if plan.action == "superseded":
+        new_id = store.supersede_fact(plan.related_id, content, category=category, namespace=namespace, **fact_kwargs)
+        plan.fact_id = new_id
+    elif plan.action == "forgotten":
+        store.remove_fact(plan.related_id, namespace=namespace, tombstone=True)
+    elif plan.action == "inserted":
+        plan.fact_id = store.add_fact(content, category=category, namespace=namespace, **fact_kwargs)
+    return plan
 
 
 def _apply_forget(store, retriever, candidate: FactCandidate, *, namespace: str = "") -> ConsolidationResult:
-    target = (candidate.content or "").strip()
-    if not target:
-        return ConsolidationResult(action="noop", reason="empty forget target")
-
-    best, best_score = _best_match(retriever, target, target, namespace=namespace)
-    if best is None:
-        return ConsolidationResult(action="noop", reason="no matching fact to forget")
-    if best_score < _FORGET_OVERLAP:
-        # Ambiguous target — a wrong deletion is worse than a missed one.
-        return ConsolidationResult(action="noop", fact_id=best["fact_id"], reason=f"ambiguous target (overlap={best_score:.2f})")
-
-    store.remove_fact(best["fact_id"], namespace=namespace, tombstone=True)
-    return ConsolidationResult(action="forgotten", related_id=best["fact_id"], reason=f"overlap={best_score:.2f}")
+    # Backwards-compatible private entry point; all policy lives in plan_candidate.
+    return classify_and_apply(store, retriever, candidate, namespace=namespace)

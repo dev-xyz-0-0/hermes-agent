@@ -103,8 +103,7 @@ class TestExtraction:
         cands = capture.candidates_from_json(
             '{"candidates":[{"content":"User prefers uv", "operation":"statement", "confidence":2}]}'
         )
-        assert len(cands) == 1
-        assert cands[0].confidence == 1.0
+        assert cands == []
 
 
 # ---------------------------------------------------------------------------
