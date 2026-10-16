@@ -8623,13 +8623,43 @@ class AIAgent:
                                     _retry_after = min(int(_ra_raw), 120)  # Cap at 2 minutes
                                 except (TypeError, ValueError):
                                     pass
-                    wait_time = _retry_after if _retry_after else jittered_backoff(retry_count, base_delay=2.0, max_delay=60.0)
+                    wait_time = (
+                        _retry_after
+                        if _retry_after
+                        else jittered_backoff(
+                            retry_count,
+                            base_delay=5.0,
+                            max_delay=60.0,
+                        )
+                    )
+
+                    # Gateway channels only see status_callback output. Emit the
+                    # concrete failure cause before the retry countdown so Telegram
+                    # users are not left with an unexplained "Retrying in ...s".
+                    _status_code_str = (
+                        f" [HTTP {status_code}]" if status_code else ""
+                    )
+                    self._emit_status(
+                        f"⚠️ API call failed "
+                        f"(attempt {retry_count}/{max_retries}): "
+                        f"{error_type}{_status_code_str} | "
+                        f"{_provider}/{_model} — {_error_summary}"
+                    )
+
                     if is_rate_limited:
-                        self._emit_status(f"⏱️ Rate limit reached. Waiting {wait_time}s before retry (attempt {retry_count + 1}/{max_retries})...")
+                        self._emit_status(
+                            f"⏱️ Rate limit reached. "
+                            f"Waiting {wait_time:.2f}s before retry "
+                            f"(attempt {retry_count + 1}/{max_retries})..."
+                        )
                     else:
-                        self._emit_status(f"⏳ Retrying in {wait_time}s (attempt {retry_count}/{max_retries})...")
+                        self._emit_status(
+                            f"⏳ Retrying in {wait_time:.2f}s "
+                            f"(attempt {retry_count}/{max_retries})..."
+                        )
                     logger.warning(
-                        "Retrying API call in %ss (attempt %s/%s) %s error=%s",
+                        "Retrying API call in %.2fs "
+                        "(attempt %s/%s) %s error=%s",
                         wait_time,
                         retry_count,
                         max_retries,

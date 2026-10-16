@@ -1912,6 +1912,83 @@ class TestRetryExhaustion:
         assert "error" in result
         assert "rate limited" in result["error"]
 
+    def test_retry_status_includes_cause_and_formats_delay(self, agent):
+        """Gateway lifecycle status must show the failure cause before retrying.
+
+        Telegram/gateway users only see ``status_callback`` lifecycle messages.
+        A bare \"Retrying in ...s\" without the underlying provider error makes
+        overloaded/rate-limit failures look like silent hangs.
+        """
+        self._setup_agent(agent)
+        agent.provider = "openai-codex"
+        agent.model = "gpt-5.6-sol"
+        agent.base_url = "https://chatgpt.com/backend-api/codex"
+        statuses: list[str] = []
+        agent.status_callback = lambda kind, message: statuses.append(message)
+
+        class _OverloadError(Exception):
+            def __init__(self):
+                super().__init__(
+                    "Our servers are currently overloaded. Please try again later."
+                )
+                self.status_code = 503
+
+        agent.client.chat.completions.create.side_effect = _OverloadError()
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch("run_agent.time", self._make_fast_time_mock()),
+            patch("run_agent.jittered_backoff", return_value=2.8224913355214656),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result.get("failed") is True
+        joined = "\n".join(statuses)
+        assert "overloaded" in joined.lower(), (
+            f"Expected overload cause in lifecycle status, got: {statuses!r}"
+        )
+        retry_msgs = [m for m in statuses if "Retrying in" in m]
+        assert retry_msgs, f"Expected a retry lifecycle status, got: {statuses!r}"
+        assert any(re.search(r"Retrying in \d+\.\d{2}s", m) for m in retry_msgs), (
+            f"Retry delay must be formatted to two decimals: {retry_msgs!r}"
+        )
+        assert not any(re.search(r"Retrying in \d+\.\d{3,}", m) for m in retry_msgs), (
+            f"Retry delay must not include long float tails: {retry_msgs!r}"
+        )
+        first_retry_idx = next(i for i, m in enumerate(statuses) if "Retrying in" in m)
+        assert any("overloaded" in m.lower() for m in statuses[:first_retry_idx]), (
+            f"Cause must appear before the first retry status: {statuses!r}"
+        )
+
+    def test_auth_errors_are_not_retried(self, agent):
+        """Non-retryable auth failures must abort without Retrying lifecycle spam."""
+        self._setup_agent(agent)
+        statuses: list[str] = []
+        agent.status_callback = lambda kind, message: statuses.append(message)
+
+        class _AuthError(Exception):
+            def __init__(self):
+                super().__init__("invalid api key")
+                self.status_code = 401
+
+        agent.client.chat.completions.create.side_effect = _AuthError()
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch("run_agent.time", self._make_fast_time_mock()),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result.get("failed") is True
+        assert not any("Retrying in" in m for m in statuses), (
+            f"Auth failures must not emit retry waits: {statuses!r}"
+        )
+        assert any("Non-retryable" in m for m in statuses), (
+            f"Expected a non-retryable lifecycle status, got: {statuses!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Flush sentinel leak

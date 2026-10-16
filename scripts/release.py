@@ -11,7 +11,7 @@ Usage:
     uv run python  scripts/release.py --bump minor
     uv run python scripts/release.py --bump patch
     uv run python scripts/release.py --bump patch --publish --first-release
-    uv run python scripts/release.py --bump patch --publish --date 2026.10.1
+    uv run python scripts/release.py --bump patch --publish --date 2026.10.16.2
     uv run python  scripts/release.py --bump minor --publish --date 2026.10.1
 
     uv run python scripts/release.py --bump patch --publish
