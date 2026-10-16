@@ -345,7 +345,8 @@ def run_doctor(args):
 
     try:
         from hermes_cli.auth import get_nous_auth_status, get_codex_auth_status
-
+        from hermes_cli.auth_xai import get_xai_oauth_auth_status
+        
         nous_status = get_nous_auth_status()
         if nous_status.get("logged_in"):
             check_ok("Nous Portal auth", "(logged in)")
@@ -359,6 +360,15 @@ def run_doctor(args):
             check_warn("OpenAI Codex auth", "(not logged in)")
             if codex_status.get("error"):
                 check_info(codex_status["error"])
+                
+        xai_status = get_xai_oauth_auth_status()
+        if xai_status.get("logged_in"):
+            check_ok("xAI auth", "(logged in)")
+        else:
+            check_warn("xAI auth", "(not logged in)")
+            if xai_status.get("error"):
+                check_info(xai_status["error"])
+                
     except Exception as e:
         check_warn("Auth provider status", f"(could not check: {e})")
 

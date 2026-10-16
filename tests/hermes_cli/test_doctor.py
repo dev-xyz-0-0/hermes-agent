@@ -152,7 +152,7 @@ class TestDoctorMemoryProviderSection:
         (home / "config.yaml").write_text(yaml.dump(config))
         return home
 
-    def _run_doctor_and_capture(self, monkeypatch, tmp_path, provider=""):
+    def _run_doctor_and_capture(self, monkeypatch, tmp_path, provider="", xai_status=None):
         """Run doctor and capture stdout."""
         home = self._make_hermes_home(tmp_path, provider)
         monkeypatch.setattr(doctor_mod, "HERMES_HOME", home)
@@ -174,6 +174,12 @@ class TestDoctorMemoryProviderSection:
             monkeypatch.setattr(_auth_mod, "get_codex_auth_status", lambda: {})
         except Exception:
             pass
+        from hermes_cli import auth_xai as _auth_xai_mod
+        monkeypatch.setattr(
+            _auth_xai_mod,
+            "get_xai_oauth_auth_status",
+            lambda: xai_status or {},
+        )
 
         import io
         import contextlib
@@ -189,6 +195,26 @@ class TestDoctorMemoryProviderSection:
         # Should NOT mention Honcho or Mem0 errors
         assert "Honcho API key" not in out
         assert "Mem0" not in out
+
+    def test_reports_xai_oauth_login_status(self, monkeypatch, tmp_path):
+        out = self._run_doctor_and_capture(
+            monkeypatch,
+            tmp_path,
+            xai_status={"logged_in": True},
+        )
+
+        assert "xAI auth" in out
+        assert "logged in" in out
+
+    def test_reports_xai_oauth_error(self, monkeypatch, tmp_path):
+        out = self._run_doctor_and_capture(
+            monkeypatch,
+            tmp_path,
+            xai_status={"logged_in": False, "error": "xAI token expired"},
+        )
+
+        assert "xAI auth" in out
+        assert "xAI token expired" in out
 
     def test_honcho_provider_not_installed_shows_fail(self, monkeypatch, tmp_path):
         # Make honcho import fail

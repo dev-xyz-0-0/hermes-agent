@@ -283,7 +283,9 @@ uv run pytest tests/tools/test_skills_sync.py -q                 # Tool-level
 
 uv run pytest tests/run_agent/test_run_agent.py -q      
 
-uv run pytest tests/plugins/memory/test_numpy_warning.py -q      
+uv run pytest tests/plugins/memory/test_numpy_warning.py -q     
+
+uv run pytest tests/hermes_cli/test_doctor.py -q      
 
  
 

@@ -2,6 +2,14 @@
 
 Local SQLite fact store with FTS5 search, trust scoring, entity resolution, and HRR-based compositional retrieval.
 
+**Features:**
+- **Automatic recall** — relevant stored facts are injected before each turn with no `fact_store` call needed (see [Automatic recall](#automatic-recall)).
+- **Automatic capture, consolidation, and forgetting** — durable facts stated in conversation are extracted, deduplicated, corrected, and forgotten on request, fully local and deterministic (see [Automatic capture, consolidation, and forgetting](#automatic-capture-consolidation-and-forgetting)).
+- **Profile / chat isolation** — one gateway process serving many chats keeps each chat's memory separate by default (see [Profile / chat isolation](#profile--chat-isolation)).
+- **Shared memory** — explicit, read-only, allowlisted cross-chat sharing (see [Shared memory](#shared-memory-explicit-read-only-allowlisted)).
+- **Diagnostics** — sanitized operational counters via `fact_store` (see [Diagnostics](#diagnostics)).
+- **Backup and restore** — checksum-verified SQLite snapshots with deletion-aware restore (see [Backup and restore](#backup-and-restore)).
+
 ## Requirements
 
 None — uses SQLite (always available). NumPy optional for HRR algebra.
@@ -217,5 +225,26 @@ are unaffected.
 
 | Tool | Description |
 |------|-------------|
-| `fact_store` | 9 actions: add, search, probe, related, reason, contradict, update, remove, list |
+| `fact_store` | 14 actions (see below) |
 | `fact_feedback` | Rate facts as helpful/unhelpful (trains trust scores) |
+
+### `fact_store` actions
+
+| Action | Description |
+|--------|-------------|
+| `add` | Store a new fact (rejected if it fails the write firewall) |
+| `search` | FTS5 + trust-weighted keyword search |
+| `probe` | HRR compositional query for facts where an entity plays a structural role |
+| `related` | HRR query for facts structurally connected to an entity |
+| `reason` | Multi-entity HRR intersection query |
+| `contradict` | Find potentially contradictory fact pairs (entity overlap + content divergence) |
+| `update` | Edit a fact's content/tags/category/trust |
+| `remove` | Delete a fact (tombstoned, so a later restore can't silently reactivate it) |
+| `list` | Browse active facts, optionally filtered by category/trust |
+| `stats` | Fact/entity counts, by-category breakdown, active/superseded counts |
+| `history` | Superseded facts and what replaced them (the only action that surfaces them) |
+| `diagnostics` | Sanitized operational counters (recall/capture/error counts) — never fact content |
+| `backup` | Snapshot the live database (checksum + restricted permissions) |
+| `share` | Copy one of your own active facts into shared memory, if enabled and allowlisted |
+
+All actions except `add`/`search`/`list`/`stats`/`history`/`diagnostics`/`backup`/`share` require numpy for full HRR behavior and fall back to keyword search otherwise. **Restore is intentionally not an action here** — see [Backup and restore](#backup-and-restore) for why.
