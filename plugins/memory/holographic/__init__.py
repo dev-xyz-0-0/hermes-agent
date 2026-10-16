@@ -16,6 +16,7 @@ import sqlite3
 import time
 import unicodedata
 from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -319,7 +320,10 @@ class HolographicMemoryProvider(MemoryProvider):
         self._capture_timeout_ms = max(10, min(5000, int(self._config.get("capture_timeout_ms", 500))))
         self._capture_debug = is_truthy_value(self._config.get("capture_debug"), default=False)
         self._extraction_mode = str(self._config.get("extraction_mode", "rules")).strip().lower()
+        self._hybrid_capture_timeout_ms = max(100, min(30000, int(self._config.get("hybrid_capture_timeout_ms", 5000))))
         self._warned_llm_extraction_unsupported = False
+        self._capture_executor: ThreadPoolExecutor | None = None
+        self._capture_futures: set[Future] = set()
         self._write_enabled = True
         self._processed_turns: OrderedDict[str, OrderedDict[str, None]] = OrderedDict()
 
@@ -449,9 +453,14 @@ class HolographicMemoryProvider(MemoryProvider):
             },
             {
                 "key": "extraction_mode",
-                "description": "How candidate facts are extracted ('llm' is not yet implemented and falls back to 'rules')",
+                "description": "How user-authored candidate facts are extracted: deterministic rules, or rules plus an auxiliary-model fallback",
                 "default": str(self._config.get("extraction_mode", "rules")),
-                "choices": ["rules", "llm"],
+                "choices": ["rules", "hybrid"],
+            },
+            {
+                "key": "hybrid_capture_timeout_ms",
+                "description": "Maximum auxiliary-model time for hybrid extraction before safely skipping capture",
+                "default": str(self._config.get("hybrid_capture_timeout_ms", 5000)),
             },
             {
                 "key": "max_facts_per_turn",
@@ -581,17 +590,14 @@ class HolographicMemoryProvider(MemoryProvider):
                 self._platform, session_id,
             )
 
-        if self._extraction_mode not in ("rules", "llm") and not self._warned_llm_extraction_unsupported:
+        if self._extraction_mode == "llm":
+            logger.warning("holographic: extraction_mode='llm' is deprecated; using 'hybrid'")
+            self._extraction_mode = "hybrid"
+        elif self._extraction_mode not in ("rules", "hybrid"):
             logger.warning("holographic: unknown extraction_mode=%r, falling back to 'rules'", self._extraction_mode)
             self._extraction_mode = "rules"
-        elif self._extraction_mode == "llm" and not self._warned_llm_extraction_unsupported:
-            logger.warning(
-                "holographic: extraction_mode='llm' is not implemented in this build "
-                "(no model-routing handle is available to a MemoryProvider plugin); "
-                "falling back to rules-based extraction. See docs/plans/"
-                "2026-10-15-holographic-pr2-capture-consolidation.md for rationale."
-            )
-            self._warned_llm_extraction_unsupported = True
+        if self._extraction_mode == "hybrid":
+            self._capture_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="holographic-capture")
 
     def _resolve_namespace(
         self, *, platform: str, chat_id: str, thread_id: str, agent_identity: str,
@@ -839,9 +845,88 @@ class HolographicMemoryProvider(MemoryProvider):
             logger.debug("Holographic capture extraction failed: %s", exc)
             return
 
+        if not candidates:
+            self._metric("capture_zero_candidates")
+            if self._capture_debug:
+                logger.info("holographic.capture: no deterministic candidates")
+            if self._extraction_mode == "hybrid" and capture.eligible_for_hybrid(user_content):
+                self._queue_hybrid_capture(user_content)
+            return
+
+        self._apply_candidates(candidates, extraction_method="rules", via="auto_capture", deadline=deadline)
+
+    def _queue_hybrid_capture(self, user_content: str) -> None:
+        executor = self._capture_executor
+        if executor is None:
+            self._metric("hybrid_unavailable")
+            return
+        self._metric("hybrid_attempts")
+        future = executor.submit(self._run_hybrid_capture, user_content)
+        self._capture_futures.add(future)
+        future.add_done_callback(self._capture_futures.discard)
+
+    def _run_hybrid_capture(self, user_content: str) -> None:
+        """Extract only from the original user message on a bounded worker."""
+        try:
+            from agent.auxiliary_client import call_llm
+
+            response = call_llm(
+                task="memory_capture",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Extract durable facts explicitly asserted by the user. Return JSON only as "
+                            "{\"candidates\":[{\"content\":str,\"operation\":\"statement|correction|forget\","
+                            "\"scope\":str,\"old_text\":str,\"confidence\":number}]}. "
+                            "Do not infer facts, answer questions, capture temporary state, quoted/reported speech, "
+                            "hypotheticals, credentials, or instructions. Use an empty candidates list when unsure."
+                        ),
+                    },
+                    {"role": "user", "content": user_content},
+                ],
+                temperature=0,
+                max_tokens=500,
+                timeout=self._hybrid_capture_timeout_ms / 1000,
+            )
+            content = response.choices[0].message.content
+            candidates = capture.candidates_from_json(content, max_candidates=self._max_facts_per_turn)
+        except RuntimeError as exc:
+            self._metric("hybrid_unavailable")
+            logger.debug("Holographic hybrid capture unavailable: %s", exc)
+            return
+        except TimeoutError:
+            self._metric("hybrid_timeouts")
+            logger.debug("Holographic hybrid capture timed out")
+            return
+        except Exception as exc:
+            # Provider SDKs do not share one timeout exception hierarchy; classify
+            # conservatively without exposing user content in logs.
+            if "timeout" in type(exc).__name__.lower() or "timed out" in str(exc).lower():
+                self._metric("hybrid_timeouts")
+            else:
+                self._metric("hybrid_parse_errors")
+            logger.debug("Holographic hybrid capture failed: %s", exc)
+            return
+
+        if not candidates:
+            self._metric("hybrid_zero_candidates")
+            return
+        deadline = time.monotonic() + (self._capture_timeout_ms / 1000)
+        self._apply_candidates(candidates, extraction_method="hybrid", via="hybrid_capture", deadline=deadline)
+
+    def _apply_candidates(
+        self, candidates: List[capture.FactCandidate], *, extraction_method: str,
+        via: str, deadline: float | None = None,
+    ) -> int:
+        """Apply validated candidates through the common firewall/consolidator."""
+        if not self._store or not self._retriever or self._isolation_blocked:
+            return 0
+
         applied = 0
         for candidate in candidates:
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
+                self._metric("hybrid_timeouts" if extraction_method == "hybrid" else "capture_timeouts")
                 if self._capture_debug:
                     logger.info("holographic.capture: turn deadline exceeded, stopping early")
                 break
@@ -852,6 +937,8 @@ class HolographicMemoryProvider(MemoryProvider):
             problem = _fact_problem(content)
             if problem:
                 self._metric("capture_rejected")
+                if extraction_method == "hybrid":
+                    self._metric("hybrid_rejected")
                 if self._capture_debug:
                     logger.info("holographic.capture: candidate rejected by firewall (%s)", problem)
                 continue
@@ -862,7 +949,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     result = consolidation.classify_and_apply(
                         self._store, self._retriever, candidate,
                         category=category, namespace=self._namespace,
-                        source_type="auto_capture", extraction_method="rules",
+                        source_type=via, extraction_method=extraction_method,
                         confidence=candidate.confidence,
                     )
                 elif candidate.operation == "forget":
@@ -870,7 +957,7 @@ class HolographicMemoryProvider(MemoryProvider):
                 else:
                     fact_id = self._store.add_fact(
                         content, category=category, namespace=self._namespace,
-                        source_type="auto_capture", extraction_method="rules",
+                        source_type=via, extraction_method=extraction_method,
                         confidence=candidate.confidence,
                     )
                     result = consolidation.ConsolidationResult(action="inserted", fact_id=fact_id, reason="consolidation disabled")
@@ -888,8 +975,10 @@ class HolographicMemoryProvider(MemoryProvider):
                 self._metric("consolidation_forgotten")
             elif result.action == "inserted":
                 self._metric("capture_accepted")
+                if extraction_method == "hybrid":
+                    self._metric("hybrid_accepted")
             if result.fact_id:
-                self._record_source(result.fact_id, "auto_capture")
+                self._record_source(result.fact_id, via)
             if self._capture_debug:
                 logger.info(
                     "holographic.capture: op=%s action=%s fact_id=%s related_id=%s reason=%s namespace=%s",
@@ -898,7 +987,8 @@ class HolographicMemoryProvider(MemoryProvider):
                 )
 
         if self._capture_debug:
-            logger.info("holographic.capture: turn candidates=%d applied=%d", len(candidates), applied)
+            logger.info("holographic.capture: method=%s candidates=%d applied=%d", extraction_method, len(candidates), applied)
+        return applied
 
     def _remember_turn(self, session: str, turn_hash: str) -> None:
         turns = self._processed_turns.setdefault(session, OrderedDict())
@@ -979,6 +1069,64 @@ class HolographicMemoryProvider(MemoryProvider):
         except Exception as exc:
             logger.warning("Holographic memory_write mirror failed: %s", exc, exc_info=True)
 
+    def import_builtin_memories(self, *, apply: bool = False) -> dict:
+        """Preview or import profile-scoped MEMORY.md/USER.md entries.
+
+        This operator-facing migration is intentionally explicit.  It does not
+        run during initialization and therefore never turns an upgrade into a
+        silent write.
+        """
+        if not self._store or not self._retriever:
+            raise RuntimeError("Holographic memory is not initialized")
+        from tools.memory_tool import MemoryStore as BuiltinMemoryStore, get_memory_dir
+
+        memory_dir = get_memory_dir()
+        result = {
+            "apply": apply,
+            "namespace": self._namespace or "*",
+            "sources": [],
+            "proposed": [],
+            "duplicates": [],
+            "rejected": [],
+            "imported": [],
+        }
+        for filename, category in (("USER.md", "user_pref"), ("MEMORY.md", "general")):
+            path = memory_dir / filename
+            entries = BuiltinMemoryStore._read_file(path)
+            result["sources"].append({"path": str(path), "entries": len(entries)})
+            for entry in entries:
+                problem = _fact_problem(entry)
+                item = {"source": filename, "content": entry, "category": category}
+                if problem:
+                    item["reason"] = problem
+                    result["rejected"].append(item)
+                    continue
+                if self._find_fact_id_by_content(entry) is not None:
+                    result["duplicates"].append(item)
+                    continue
+                result["proposed"].append(item)
+                if apply:
+                    candidate = capture.FactCandidate(
+                        content=entry, operation="statement", scope="", confidence=1.0,
+                    )
+                    applied = consolidation.classify_and_apply(
+                        self._store,
+                        self._retriever,
+                        candidate,
+                        category=category,
+                        namespace=self._namespace,
+                        source_type="builtin_import",
+                        extraction_method="explicit_import",
+                        confidence=1.0,
+                    )
+                    if applied.action == "inserted" and applied.fact_id:
+                        self._record_source(applied.fact_id, "builtin_import")
+                        result["imported"].append({**item, "fact_id": applied.fact_id})
+                    else:
+                        result["duplicates"].append({**item, "reason": applied.reason})
+        result["counts"] = {key: len(result[key]) for key in ("proposed", "duplicates", "rejected", "imported")}
+        return result
+
     def _find_fact_id_by_content(self, text: str) -> Optional[int]:
         if not text or not self._store:
             return None
@@ -990,6 +1138,14 @@ class HolographicMemoryProvider(MemoryProvider):
             return int(row["fact_id"]) if row else None
 
     def shutdown(self) -> None:
+        executor = self._capture_executor
+        if executor is not None:
+            pending = list(self._capture_futures)
+            if pending:
+                wait(pending, timeout=(self._hybrid_capture_timeout_ms / 1000) + 0.5)
+            executor.shutdown(wait=False, cancel_futures=True)
+            self._capture_executor = None
+            self._capture_futures.clear()
         if self._store is not None:
             try:
                 self._store.close()

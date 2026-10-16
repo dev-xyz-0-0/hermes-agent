@@ -16,6 +16,8 @@ import logging
 import sqlite3
 import threading
 import time
+from concurrent.futures import wait
+from types import SimpleNamespace
 
 from plugins.memory.holographic import HolographicMemoryProvider
 from plugins.memory.holographic import capture, consolidation
@@ -93,6 +95,17 @@ class TestExtraction:
         cands = capture.extract_candidates(text, max_candidates=3)
         assert len(cands) == 3
 
+    def test_hybrid_eligibility_rejects_questions(self):
+        assert not capture.eligible_for_hybrid("Which dependency manager do I use?")
+        assert capture.eligible_for_hybrid("The dependency manager of choice remains uv.")
+
+    def test_model_json_is_strictly_validated(self):
+        cands = capture.candidates_from_json(
+            '{"candidates":[{"content":"User prefers uv", "operation":"statement", "confidence":2}]}'
+        )
+        assert len(cands) == 1
+        assert cands[0].confidence == 1.0
+
 
 # ---------------------------------------------------------------------------
 # B. Capture — wired into sync_turn() (provider level)
@@ -111,6 +124,41 @@ class TestSyncTurnCapture:
         provider = _provider(tmp_path)
         provider.sync_turn("ok", "I prefer dark mode and use PostgreSQL for everything.")
         assert provider._store.list_facts(limit=20) == []
+
+    def test_hybrid_fallback_captures_ambiguous_user_statement(self, tmp_path, monkeypatch):
+        seen_messages = []
+
+        def fake_call_llm(**kwargs):
+            seen_messages.extend(kwargs["messages"])
+            message = SimpleNamespace(content=json.dumps({"candidates": [{
+                "content": "User prefers uv for dependency management",
+                "operation": "statement",
+                "scope": "dependency management",
+                "confidence": 0.9,
+            }]}))
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+        monkeypatch.setattr("agent.auxiliary_client.call_llm", fake_call_llm)
+        provider = _provider(tmp_path, extraction_mode="hybrid")
+        provider.sync_turn(
+            "The dependency manager of choice remains uv.",
+            "I invented an assistant-only preference for pip.",
+        )
+        wait(list(provider._capture_futures), timeout=2)
+        facts = provider._store.list_facts(limit=20)
+        provider.shutdown()
+
+        assert [fact["content"] for fact in facts] == ["User prefers uv for dependency management"]
+        assert all("assistant-only" not in message["content"] for message in seen_messages)
+
+    def test_hybrid_never_calls_model_for_question(self, tmp_path, monkeypatch):
+        called = []
+        monkeypatch.setattr("agent.auxiliary_client.call_llm", lambda **kwargs: called.append(kwargs))
+        provider = _provider(tmp_path, extraction_mode="hybrid")
+        provider.sync_turn("Which dependency manager do I use?", "You use uv.")
+        provider.shutdown()
+        assert called == []
+        assert provider._metrics["capture_zero_candidates"] == 1
 
     def test_secret_is_never_stored_even_if_syntactically_capturable(self, tmp_path):
         provider = _provider(tmp_path)

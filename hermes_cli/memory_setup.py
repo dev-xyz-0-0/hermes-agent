@@ -519,5 +519,37 @@ def memory_command(args) -> None:
         cmd_setup(args)
     elif sub == "status":
         cmd_status(args)
+    elif sub == "import":
+        cmd_import(args)
     else:
         cmd_status(args)
+
+
+def cmd_import(args) -> None:
+    """Preview/apply an explicit built-in → Holographic migration."""
+    if getattr(args, "import_source", None) != "builtin" or getattr(args, "provider", None) != "holographic":
+        raise SystemExit("Only --from builtin --provider holographic is currently supported")
+
+    from plugins.memory.holographic import HolographicMemoryProvider
+
+    provider = HolographicMemoryProvider()
+    provider.initialize(session_id="memory-import", platform="cli", agent_context="primary")
+    try:
+        result = provider.import_builtin_memories(apply=bool(getattr(args, "apply", False)))
+    finally:
+        provider.shutdown()
+
+    mode = "APPLY" if result["apply"] else "DRY RUN"
+    print(f"\n  Holographic memory import ({mode})")
+    print(f"  Namespace: {result['namespace']}")
+    for source in result["sources"]:
+        print(f"  Source: {source['path']} ({source['entries']} entries)")
+    for label in ("proposed", "duplicates", "rejected", "imported"):
+        items = result[label]
+        print(f"\n  {label.title()} ({len(items)}):")
+        for item in items:
+            suffix = f" — {item['reason']}" if item.get("reason") else ""
+            print(f"    • [{item['source']}] {item['content']}{suffix}")
+    if not result["apply"] and result["proposed"]:
+        print("\n  No changes made. Re-run with --apply to import proposed entries.")
+    print()

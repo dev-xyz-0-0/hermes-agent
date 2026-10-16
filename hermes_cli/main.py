@@ -5119,6 +5119,10 @@ For more help on a command:
     memory_sub.add_parser("setup", help="Interactive provider selection and configuration")
     memory_sub.add_parser("status", help="Show current memory provider config")
     memory_sub.add_parser("off", help="Disable external provider (built-in only)")
+    memory_import = memory_sub.add_parser("import", help="Preview or import built-in memory into an external provider")
+    memory_import.add_argument("--from", dest="import_source", choices=["builtin"], required=True)
+    memory_import.add_argument("--provider", choices=["holographic"], required=True)
+    memory_import.add_argument("--apply", action="store_true", help="Write the previewed entries (default is dry-run)")
 
     def cmd_memory(args):
         sub = getattr(args, "memory_command", None)

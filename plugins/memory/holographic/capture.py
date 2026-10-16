@@ -16,7 +16,9 @@ tool, so there is exactly one place that decides what's safe to store.
 from __future__ import annotations
 
 import re
+import json
 from dataclasses import dataclass
+from typing import Any
 
 _MAX_CONTENT_LEN = 200
 
@@ -86,6 +88,54 @@ def _looks_rejectable(sentence: str) -> bool:
     if _RE_REPORTED_SPEECH.search(sentence):
         return True
     return False
+
+
+def eligible_for_hybrid(text: str) -> bool:
+    """Return whether a user-authored utterance may be sent to the fallback extractor.
+
+    Questions and the same unsafe/low-signal forms rejected by the deterministic
+    extractor never reach a model.  This is deliberately stricter than asking the
+    model to decide whether a question implies a fact.
+    """
+    text = _normalize(text)
+    if len(text) < 8 or len(text) > 4000:
+        return False
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+    return bool(sentences) and not any(_looks_rejectable(sentence) for sentence in sentences)
+
+
+def candidates_from_json(payload: Any, max_candidates: int = 5) -> list[FactCandidate]:
+    """Validate untrusted structured model output into bounded candidates."""
+    if isinstance(payload, str):
+        payload = payload.strip()
+        if payload.startswith("```"):
+            payload = re.sub(r"^```(?:json)?\s*|\s*```$", "", payload, flags=re.IGNORECASE)
+        payload = json.loads(payload)
+    if isinstance(payload, dict):
+        payload = payload.get("candidates", [])
+    if not isinstance(payload, list):
+        raise ValueError("candidate response must be a list")
+
+    candidates: list[FactCandidate] = []
+    for raw in payload[:max_candidates]:
+        if not isinstance(raw, dict):
+            continue
+        content = _normalize(str(raw.get("content") or ""))[:_MAX_CONTENT_LEN]
+        operation = str(raw.get("operation") or "statement").lower()
+        if not content or operation not in {"statement", "correction", "forget"}:
+            continue
+        try:
+            confidence = float(raw.get("confidence", 0.6))
+        except (TypeError, ValueError):
+            confidence = 0.6
+        candidates.append(FactCandidate(
+            content=content,
+            operation=operation,
+            scope=_normalize(str(raw.get("scope") or ""))[:100].lower(),
+            old_text=_normalize(str(raw.get("old_text") or ""))[:_MAX_CONTENT_LEN],
+            confidence=max(0.0, min(1.0, confidence)),
+        ))
+    return candidates
 
 
 def _scope_hint(sentence: str) -> str:

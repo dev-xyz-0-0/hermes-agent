@@ -285,7 +285,7 @@ uv run pytest tests/run_agent/test_run_agent.py -q
 
 uv run pytest tests/plugins/memory/test_numpy_warning.py -q     
 
-uv run pytest tests/hermes_cli/test_doctor.py -q      
+uv run pytest tests/plugins/memory/test_holographic_import.py -q      
 
  
 

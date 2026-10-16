@@ -44,7 +44,8 @@ Config in `config.yaml` under `plugins.hermes-memory-store`:
 | `recall_timeout_ms` | `300` | Soft deadline for scanning recall candidates; returns what was found so far instead of blocking (clamped 10-5000) |
 | `recall_debug` | `false` | Log sanitized recall diagnostics (candidate/fact counts, timing) — never fact content |
 | `auto_capture` | `false` | Automatically extract, consolidate, and store durable facts stated in conversation |
-| `extraction_mode` | `rules` | How candidates are extracted. `llm` is accepted but not yet implemented — falls back to `rules` with a one-time warning |
+| `extraction_mode` | `rules` | `rules` is local/deterministic; `hybrid` uses rules first and an auxiliary-model fallback for eligible user statements. Legacy `llm` values map to `hybrid` |
+| `hybrid_capture_timeout_ms` | `5000` | Maximum auxiliary-model time for one hybrid fallback (clamped 100-30000 ms) |
 | `max_facts_per_turn` | `5` | Max candidate facts extracted from one user turn (clamped 1-10) |
 | `consolidation_enabled` | `true` | Dedupe/supersede/forget via consolidation; if `false`, captured facts are inserted as-is and forget requests are skipped (never guessed at) |
 | `capture_timeout_ms` | `500` | Soft deadline for processing one turn's capture candidates (clamped 10-5000) |
@@ -153,6 +154,10 @@ vector database):
    X"), and forget requests ("forget...", "don't remember..."). Questions,
    hypotheticals ("we're evaluating...", "for example..."), and quoted/
    reported speech are rejected outright — nothing is captured from them.
+   With `extraction_mode: hybrid`, a non-question user message that produces
+   no rule candidate is sent to the configured auxiliary text model on a
+   background worker. Its JSON output is untrusted candidate data and still
+   passes every check below. Assistant responses are never extraction input.
 2. **Firewall**: every candidate goes through the same write firewall used
    by the explicit `fact_store add` tool — credentials, prompt-injection
    phrasing, and encoded blobs are never stored, regardless of how they were
@@ -188,10 +193,25 @@ different phrasings that share little vocabulary with an existing fact
 may not be matched with high confidence — the pipeline prefers a safe no-op
 over a wrong deletion or a wrong merge in that case.
 
-**`extraction_mode: llm`** is accepted in config but not implemented in this
-build — a `MemoryProvider` plugin has no handle to the agent's model/routing
-layer, and adding one would be a core change outside this PR's scope. Setting
-it logs a one-time warning and falls back to `rules`.
+**`extraction_mode: hybrid`** broadens phrasing coverage at auxiliary-model
+cost and may finish shortly after the response is displayed. If no auxiliary
+provider is available, output is malformed, or the deadline expires, capture
+fails closed and diagnostics record the reason. The old `llm` value is a
+deprecated alias for `hybrid`.
+
+### Importing built-in memory
+
+Existing `MEMORY.md` and `USER.md` entries are not silently copied during an
+upgrade. Preview an idempotent, profile-scoped migration with:
+
+```bash
+hermes memory import --from builtin --provider holographic
+```
+
+The preview lists proposed, duplicate, and rejected entries without writing.
+Apply exactly that migration explicitly with `--apply`. Imported entries pass
+the same write firewall, retain their user/general category, and record
+`builtin_import` provenance.
 
 **To disable automatic capture** (rollback) without losing recall or
 explicit tools, set `auto_capture: false`. Already-captured facts are
