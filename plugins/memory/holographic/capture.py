@@ -95,6 +95,22 @@ _RE_ATOMIC_CONTRAST = re.compile(
     r"but\s+(?P<second>.+?)\s+for\s+my\s+(?P<second_scope>[\w.#+-]+(?:\s+[\w.#+-]+){0,3}\s+projects?)[.!]?\s*$",
     re.IGNORECASE,
 )
+# Scope-first contrast: "For my X projects I prefer A, but for my Y tools I prefer B."
+_RE_ATOMIC_CONTRAST_SCOPE_FIRST = re.compile(
+    r"^\s*for\s+my\s+(?P<first_scope>[\w.#+-]+(?:\s+[\w.#+-]+){0,3}\s+(?:projects?|tools?))\s+"
+    r"i\s+prefer\s+(?P<first>.+?),\s*"
+    r"but\s+for\s+my\s+(?P<second_scope>[\w.#+-]+(?:\s+[\w.#+-]+){0,3}\s+(?:projects?|tools?))\s+"
+    r"i\s+prefer\s+(?P<second>.+?)[.!]?\s*$",
+    re.IGNORECASE,
+)
+# Coordinated assignment: "I use X for A and Y for my B." — two independent
+# value/scope pairs joined by "and", NOT a shared scope with a coordinated
+# value list (e.g. "I prefer X and Y for my Z projects." stays atomic).
+_RE_COORDINATED_ASSIGN = re.compile(
+    r"^\s*i\s+use\s+(?P<first>.+?)\s+for\s+(?:my\s+)?(?P<first_scope>[\w.#+-]+(?:\s+[\w.#+-]+){0,4}?)\s+and\s+"
+    r"(?P<second>.+?)\s+for\s+(?:my\s+)?(?P<second_scope>[\w.#+-]+(?:\s+[\w.#+-]+){0,4})[.!]?\s*$",
+    re.IGNORECASE,
+)
 
 _ALLOWED_OPERATIONS = frozenset({"statement", "correction", "forget"})
 _MODEL_FORBIDDEN_FIELDS = frozenset({
@@ -283,7 +299,8 @@ def extract_candidates(text: str, max_candidates: int = 5) -> list[FactCandidate
     sentences: list[str] = []
     for sentence in re.split(r"(?<=[.!?])\s+", text):
         sentence = sentence.strip()
-        if _RE_ATOMIC_CONTRAST.match(sentence):
+        if (_RE_ATOMIC_CONTRAST.match(sentence) or _RE_ATOMIC_CONTRAST_SCOPE_FIRST.match(sentence)
+                or _RE_COORDINATED_ASSIGN.match(sentence)):
             sentences.append(sentence)
         elif _RE_TENTATIVE.search(sentence) and re.search(r"\s+(?:but|however)\s+|;\s*", sentence, re.IGNORECASE):
             sentences.extend(
@@ -302,13 +319,28 @@ def extract_candidates(text: str, max_candidates: int = 5) -> list[FactCandidate
         if _looks_rejectable(sentence):
             continue
 
-        contrast = _RE_ATOMIC_CONTRAST.match(sentence)
+        contrast = _RE_ATOMIC_CONTRAST.match(sentence) or _RE_ATOMIC_CONTRAST_SCOPE_FIRST.match(sentence)
         if contrast:
             for value_group, scope_group in (("first", "first_scope"), ("second", "second_scope")):
                 value = contrast.group(value_group).strip(" .!?")
                 scope_text = contrast.group(scope_group).strip(" .!?")
                 candidates.append(FactCandidate(
                     content=f"User prefers {value} for {scope_text}.",
+                    operation="statement",
+                    scope=normalize_scope(scope_text),
+                    confidence=0.8,
+                ))
+            if len(candidates) >= max_candidates:
+                break
+            continue
+
+        coordinated = _RE_COORDINATED_ASSIGN.match(sentence)
+        if coordinated:
+            for value_group, scope_group in (("first", "first_scope"), ("second", "second_scope")):
+                value = coordinated.group(value_group).strip(" .!?")
+                scope_text = coordinated.group(scope_group).strip(" .!?")
+                candidates.append(FactCandidate(
+                    content=f"{scope_text} uses {value}.",
                     operation="statement",
                     scope=normalize_scope(scope_text),
                     confidence=0.8,

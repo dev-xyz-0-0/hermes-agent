@@ -82,6 +82,120 @@ def test_coordinated_values_are_not_split():
     assert "CommonJS and JSDoc" in candidates[0].content
 
 
+def test_coordinated_scope_assignments_are_split():
+    candidates = capture.extract_candidates(
+        "I use PostgreSQL for Solana analytics and SQLite for my local benchmark."
+    )
+
+    assert len(candidates) == 2
+
+    assert candidates[0].scope == "project:solana analytics"
+    assert candidates[0].content == "Solana analytics uses PostgreSQL."
+    assert candidates[0].operation == "statement"
+
+    assert candidates[1].scope == "project:local benchmark"
+    assert candidates[1].content == "local benchmark uses SQLite."
+    assert candidates[1].operation == "statement"
+
+
+def test_scope_first_contrast_is_atomic_and_scoped():
+    candidates = capture.extract_candidates(
+        "For my backend projects I prefer Python, but for my Node.js MCP tools I prefer CommonJS."
+    )
+
+    assert len(candidates) == 2
+
+    assert candidates[0].scope == "project:backend projects"
+    assert "Python" in candidates[0].content
+    assert "CommonJS" not in candidates[0].content
+
+    assert candidates[1].scope == "project:node.js mcp tools"
+    assert "CommonJS" in candidates[1].content
+    assert "Python" not in candidates[1].content
+
+
+def test_coordinated_instead_of_preference_not_split():
+    candidates = capture.extract_candidates(
+        "I prefer CommonJS and JSDoc instead of TypeScript and Zod."
+    )
+    assert len(candidates) == 1
+    assert "CommonJS and JSDoc instead of TypeScript and Zod" in candidates[0].content
+
+
+@pytest.mark.parametrize("text", [
+    "I might use PostgreSQL for Solana analytics and SQLite for benchmarking.",
+    "Suppose I used Python for backend projects, but CommonJS for MCP tools.",
+    "An article says PostgreSQL is better for analytics and SQLite for local applications.",
+    "For this example only, I use PostgreSQL for analytics and SQLite for testing.",
+])
+def test_coordinated_and_scope_first_negative_cases_rejected(text):
+    assert capture.extract_candidates(text) == []
+
+
+def test_fictional_benchmark_correction_still_scoped_after_coordinated_fix():
+    candidates = capture.extract_candidates(
+        "I no longer use PostgreSQL for my fictional benchmark project."
+    )
+    assert len(candidates) == 1
+    assert candidates[0].operation == "correction"
+    assert candidates[0].scope == "project:fictional benchmark project"
+    assert candidates[0].old_text == "PostgreSQL"
+    
+def test_coordinated_assignments_survive_preview():
+    result = preview_capture(
+        "I use PostgreSQL for Solana analytics and SQLite "
+        "for my local benchmark."
+    )
+
+    # Adapt to the actual preview_capture return schema.
+    assert result["writes_performed"] is False
+    assert len(result["normalized_candidates"]) == 2
+    
+def test_atomic_candidates_respect_maximum_limit():
+    candidates = capture.extract_candidates(
+        "I use PostgreSQL for Solana analytics and SQLite "
+        "for my local benchmark.",
+        max_candidates=1,
+    )
+
+    assert len(candidates) == 1
+    
+
+def test_coordinated_assignment_with_tentative_trailing_clause():
+    candidates = capture.extract_candidates(
+        "I use PostgreSQL for Solana analytics and SQLite "
+        "for my local benchmark, but I may switch next month."
+    )
+
+    assert len(candidates) == 2
+
+    assert candidates[0].scope == "project:solana analytics"
+    assert candidates[0].content == "Solana analytics uses PostgreSQL."
+
+    assert candidates[1].scope == "project:local benchmark"
+    assert candidates[1].content == "local benchmark uses SQLite."
+
+    # Do not store tentative future plans as confirmed facts.
+    assert all("may switch" not in c.content.lower() for c in candidates)
+    assert all("next month" not in c.content.lower() for c in candidates)
+
+
+def test_coordinated_assignment_with_contradictory_trailing_clause():
+    candidates = capture.extract_candidates(
+        "I use PostgreSQL for Solana analytics and SQLite "
+        "for my local benchmark, but I actually use DuckDB "
+        "for my local benchmark."
+    )
+
+    # Conflicting assertions must not produce an unqualified
+    # SQLite fact for the same project.
+    assert not any(
+        c.scope == "project:local benchmark"
+        and "uses SQLite" in c.content
+        for c in candidates
+    )
+
+
 def test_ambiguous_correction_never_supersedes_unrelated_fact(tmp_path):
     store = MemoryStore(db_path=str(tmp_path / "ambiguous.db"), hrr_dim=32)
     retriever = FactRetriever(store=store, hrr_dim=32, hrr_weight=0.0)
