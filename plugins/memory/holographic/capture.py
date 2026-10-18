@@ -46,6 +46,19 @@ _RE_SWITCH_TO = re.compile(
     r"switch(?:ed|ing)?\s+(?:my\s+)?(?P<scope>[\w]+(?:\s+[\w]+){0,3})\s+to\s+(?P<new>[\w .+-]+?)[.,!?]?\s*$",
     re.IGNORECASE,
 )
+# Cessation / negative correction: "I don't use X (for Y)? anymore." — unlike
+# _RE_CORRECTION_MARKER's "no longer use" phrasing (which _RE_STATEMENT and
+# the catch-all correction branch already handle), this names no replacement
+# value, so it is captured as a "forget" operation rather than "correction" —
+# consolidation.plan_candidate()'s correction branch intentionally refuses an
+# unscoped target with no old_text, but its forget branch is built for
+# exactly this (token-overlap match against existing active facts).
+_RE_CESSATION = re.compile(
+    r"\bi\s+(?:don'?t|do\s+not)\s+use\s+(?P<subject>.+?)"
+    r"(?:\s+for\s+(?:my\s+)?(?P<scope>.+?))?"
+    r"\s+(?:anymore|any\s+more|any\s+longer)\b[.!?]?\s*$",
+    re.IGNORECASE,
+)
 _RE_STATEMENT = re.compile(
     r"\b(?:i\s+use\b|i'?m\s+using\b|i\s+am\s+using\b|i\s+prefer\b|"
     r"my\s+(?:preferred\s+)?\w+(?:\s+\w+)*\s+(?:uses?|is|runs?)\b|"
@@ -229,6 +242,15 @@ def normalize_scope(scope: str, *, content: str = "") -> str:
     return f"project:{value}"
 
 
+def _scope_label(scope: str) -> str:
+    """Human-readable subject text for use IN fact content — never the raw
+    'project:<name>' namespace-scope string (that must never leak into
+    stored content; see normalize_scope())."""
+    if scope in ("", "user"):
+        return "current setup"
+    return scope.split(":", 1)[-1] if scope.startswith("project:") else scope
+
+
 def candidates_from_json(
     payload: Any, max_candidates: int = 5, *, source_text: str = "",
 ) -> list[FactCandidate]:
@@ -386,6 +408,19 @@ def extract_candidates(text: str, max_candidates: int = 5) -> list[FactCandidate
                 ))
             continue
 
+        cessation = _RE_CESSATION.search(sentence)
+        if cessation:
+            subject = cessation.group("subject").strip(" .!?")
+            scope_text = cessation.group("scope")
+            scope = normalize_scope(scope_text) if scope_text else "user"
+            candidates.append(FactCandidate(
+                content=subject[:_MAX_CONTENT_LEN],
+                operation="forget",
+                scope=scope,
+                confidence=0.8,
+            ))
+            continue
+
         no_longer_project = _RE_NO_LONGER_USE_PROJECT.search(sentence)
         if no_longer_project:
             candidates.append(FactCandidate(
@@ -404,7 +439,7 @@ def extract_candidates(text: str, max_candidates: int = 5) -> list[FactCandidate
                 old = switch_ft.group("old").strip(" .!?")
                 new = switch_ft.group("new").strip(" .!?")
                 scope = _scope_hint(sentence)
-                content = f"{scope or 'current setup'} uses {new}".strip()
+                content = f"{_scope_label(scope)} uses {new}".strip()
                 candidates.append(FactCandidate(
                     content=content[:_MAX_CONTENT_LEN],
                     operation="correction",
@@ -415,7 +450,7 @@ def extract_candidates(text: str, max_candidates: int = 5) -> list[FactCandidate
             elif switch_to:
                 new = switch_to.group("new").strip(" .!?")
                 scope = normalize_scope(switch_to.group("scope"))
-                content = f"{scope.split(':', 1)[-1]} uses {new}".strip()
+                content = f"{_scope_label(scope)} uses {new}".strip()
                 candidates.append(FactCandidate(
                     content=content[:_MAX_CONTENT_LEN],
                     operation="correction",

@@ -103,6 +103,10 @@ _RE_SECRET_SHAPE = re.compile(
     r"github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|"
     r"AIza[0-9A-Za-z_-]{30,}|glpat-[A-Za-z0-9_-]{20,})"
 )
+_RE_RECOVERY_PHRASE = re.compile(
+    r"\b(?:recovery|seed|mnemonic)\s+phrase\b\s*(?:\b(?:is|was|are)\b|[:=])",
+    re.IGNORECASE,
+)
 _RE_BLOB = re.compile(r"[A-Za-z0-9+/=_-]{200,}")
 _RE_IMAGE_EXFIL = re.compile(r"!\[[^\]\n]*\]\s*[(\[]|<\s*img\b", re.IGNORECASE)
 _RE_QUOTED_SPAN = re.compile(r"\"[^\"\n]*\"|'[^'\n]*'")
@@ -244,7 +248,7 @@ def _fact_problem(content: str) -> str | None:
         return "reads like an instruction to the assistant"
     if _RE_EXFILTRATION.search(unquoted):
         return "asks to send credentials somewhere"
-    if _has_credential(text) or _RE_SECRET_SHAPE.search(text) or _RE_PRIVATE_KEY.search(text):
+    if _has_credential(text) or _RE_SECRET_SHAPE.search(text) or _RE_PRIVATE_KEY.search(text) or _RE_RECOVERY_PHRASE.search(text):
         return "contains what looks like a credential"
     if _hidden_char(text):
         return "contains invisible formatting characters"
@@ -355,7 +359,7 @@ def _recall_problem(content: str) -> str | None:
         return "chat-role or tool-call markup"
     if _RE_INJECTION.search(text) or _RE_EXFILTRATION.search(text):
         return "instruction-like content"
-    if _has_credential(text) or _RE_SECRET_SHAPE.search(text) or _RE_PRIVATE_KEY.search(text):
+    if _has_credential(text) or _RE_SECRET_SHAPE.search(text) or _RE_PRIVATE_KEY.search(text) or _RE_RECOVERY_PHRASE.search(text):
         return "credential-like content"
     if _hidden_char(text):
         return "invisible formatting characters"

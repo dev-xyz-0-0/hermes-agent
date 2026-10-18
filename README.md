@@ -295,7 +295,8 @@ uv run pytest tests/gateway/test_telegram_approval_buttons.py -q
 
 uv run pytest tests/plugins/memory/test_holographic_lifecycle_stage3.py -q
 
-uv run pytest tests/plugins/memory/test_holographic_capture_hardening.py -q
+uv run pytest tests/plugins/memory/test_holographic_reliability_stage4.py -q
+
 uv run pytest test_retry_utils.py -q
 
 

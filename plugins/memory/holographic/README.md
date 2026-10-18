@@ -151,7 +151,8 @@ vector database):
 
 1. **Extract**: deterministic patterns recognize explicit first-person
    statements, decisions, corrections ("switched X to Y", "no longer use
-   X"), and forget requests ("forget...", "don't remember..."). Questions,
+   X", "I don't use X anymore"), and forget requests ("forget...", "don't
+   remember..."). Questions,
    hypotheticals ("we're evaluating...", "for example..."), and quoted/
    reported speech are rejected outright — nothing is captured from them.
    With `extraction_mode: hybrid`, a non-question user message that produces
@@ -159,9 +160,9 @@ vector database):
    background worker. Its JSON output is untrusted candidate data and still
    passes every check below. Assistant responses are never extraction input.
 2. **Firewall**: every candidate goes through the same write firewall used
-   by the explicit `fact_store add` tool — credentials, prompt-injection
-   phrasing, and encoded blobs are never stored, regardless of how they were
-   phrased.
+   by the explicit `fact_store add` tool — credentials, recovery/seed
+   phrases, prompt-injection phrasing, and encoded blobs are never stored,
+   regardless of how they were phrased.
 3. **Consolidate**: the candidate is matched against existing *active*
    facts via FTS5 search + stopword-stripped token overlap (no embeddings).
    - Exact or near-duplicate wording → ignored (not re-inserted).
@@ -268,3 +269,36 @@ are unaffected.
 | `share` | Copy one of your own active facts into shared memory, if enabled and allowlisted |
 
 All actions except `add`/`search`/`list`/`stats`/`history`/`diagnostics`/`backup`/`share` require numpy for full HRR behavior and fall back to keyword search otherwise. **Restore is intentionally not an action here** — see [Backup and restore](#backup-and-restore) for why.
+
+### Profile Isolation
+
+Holographic memory uses database-level isolation for Hermes profiles.
+
+Each profile requiring independent memory must use a separate resolved SQLite database path, typically through a separate `HERMES_HOME` and profile-specific database configuration.
+
+Within a database:
+
+- Supported messaging platforms use platform/chat-based namespaces.
+- CLI, cron, and subagent contexts use the shared default namespace (`""`).
+- `agent_identity` does not participate in namespace resolution.
+- The `profile_isolation` configuration does not provide profile-level separation when multiple profiles share the same database.
+
+**Security requirement:** Profiles that must not share memory must never point to the same SQLite database.
+
+This includes all associated SQLite WAL and SHM files.
+
+Cross-profile memory sharing is possible only by intentionally configuring profiles to use a common database or through a separately implemented sharing mechanism.
+
+Do not rely on `agent_identity` or `profile_isolation=true` to enforce isolation between profiles sharing one database.
+
+### Known limitations
+
+**No tool-output provenance channel.** `sync_turn(user_content,
+assistant_content, ...)` has no parameter distinguishing genuine
+user-authored text from tool output relayed as if it were user text —
+callers are responsible for ensuring `user_content` is actually what the
+user said. The write firewall's role-markup check (`_fact_problem`/
+`_recall_problem`) happens to reject some impersonation shapes, such as
+content starting with a literal `"USER:"` prefix, but that's a side effect
+of unrelated chat-role/tool-call markup detection, not a dedicated defense
+against this specific risk.
