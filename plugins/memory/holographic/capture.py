@@ -106,9 +106,28 @@ _RE_ATOMIC_CONTRAST_SCOPE_FIRST = re.compile(
 # Coordinated assignment: "I use X for A and Y for my B." — two independent
 # value/scope pairs joined by "and", NOT a shared scope with a coordinated
 # value list (e.g. "I prefer X and Y for my Z projects." stays atomic).
+# Value groups are bounded, word-class patterns (not unrestricted ".+?") so
+# the match cannot cross a comma or run past a contradiction/correction
+# clause such as ", but I actually use DuckDB for my local benchmark." —
+# a prior unrestricted ".+?" allowed exactly that, silently absorbing the
+# correction into the matched value when the scope phrase repeated later
+# in the sentence (see _RE_COORDINATED_ASSIGN_SHAPE for the companion
+# detector used to reject rather than fall through when this happens).
 _RE_COORDINATED_ASSIGN = re.compile(
-    r"^\s*i\s+use\s+(?P<first>.+?)\s+for\s+(?:my\s+)?(?P<first_scope>[\w.#+-]+(?:\s+[\w.#+-]+){0,4}?)\s+and\s+"
-    r"(?P<second>.+?)\s+for\s+(?:my\s+)?(?P<second_scope>[\w.#+-]+(?:\s+[\w.#+-]+){0,4})[.!]?\s*$",
+    r"^\s*i\s+use\s+(?P<first>[\w.#+-]+(?:\s+[\w.#+-]+){0,3})\s+for\s+(?:my\s+)?"
+    r"(?P<first_scope>[\w.#+-]+(?:\s+[\w.#+-]+){0,4}?)\s+and\s+"
+    r"(?P<second>[\w.#+-]+(?:\s+[\w.#+-]+){0,3})\s+for\s+(?:my\s+)?"
+    r"(?P<second_scope>[\w.#+-]+(?:\s+[\w.#+-]+){0,4})[.!]?\s*$",
+    re.IGNORECASE,
+)
+# Loose detector for the same "I use A for B and C for D" shape, without the
+# strict word-bounded groups above. Used only to recognize when a sentence
+# clearly attempted this construction but the strict pattern above could not
+# fullmatch it (extra trailing clause, contradiction, correction, etc.), so
+# we can conservatively reject instead of letting the generic statement rule
+# recapture the whole unresolved sentence as one (possibly wrong) fact.
+_RE_COORDINATED_ASSIGN_SHAPE = re.compile(
+    r"^\s*i\s+use\s+.+?\s+for\s+.+?\s+and\s+.+?\s+for\s+.+",
     re.IGNORECASE,
 )
 
@@ -300,7 +319,7 @@ def extract_candidates(text: str, max_candidates: int = 5) -> list[FactCandidate
     for sentence in re.split(r"(?<=[.!?])\s+", text):
         sentence = sentence.strip()
         if (_RE_ATOMIC_CONTRAST.match(sentence) or _RE_ATOMIC_CONTRAST_SCOPE_FIRST.match(sentence)
-                or _RE_COORDINATED_ASSIGN.match(sentence)):
+                or _RE_COORDINATED_ASSIGN.fullmatch(sentence)):
             sentences.append(sentence)
         elif _RE_TENTATIVE.search(sentence) and re.search(r"\s+(?:but|however)\s+|;\s*", sentence, re.IGNORECASE):
             sentences.extend(
@@ -334,7 +353,7 @@ def extract_candidates(text: str, max_candidates: int = 5) -> list[FactCandidate
                 break
             continue
 
-        coordinated = _RE_COORDINATED_ASSIGN.match(sentence)
+        coordinated = _RE_COORDINATED_ASSIGN.fullmatch(sentence)
         if coordinated:
             for value_group, scope_group in (("first", "first_scope"), ("second", "second_scope")):
                 value = coordinated.group(value_group).strip(" .!?")
@@ -347,6 +366,13 @@ def extract_candidates(text: str, max_candidates: int = 5) -> list[FactCandidate
                 ))
             if len(candidates) >= max_candidates:
                 break
+            continue
+
+        if _RE_COORDINATED_ASSIGN_SHAPE.match(sentence):
+            # Looked like "X for A and Y for B" but the strict pattern
+            # couldn't cleanly bind it (unresolved trailing clause that may
+            # contradict or correct the earlier assignment) — conservative
+            # no-op rather than inventing or merging a fact.
             continue
 
         if _RE_FORGET.search(sentence):
