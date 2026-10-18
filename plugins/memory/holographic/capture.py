@@ -284,13 +284,13 @@ def _scope_hint(sentence: str) -> str:
     m = re.search(r"\bmy\s+([\w]+(?:\s+[\w]+){0,2})\s+(?:uses?|is|runs?)\b", sentence, re.IGNORECASE)
     if m:
         return normalize_scope(m.group(1))
-    m = re.search(r"\b(project\s+\w+)\b", sentence, re.IGNORECASE)
-    if m:
-        return normalize_scope(m.group(1))
     m = re.search(
         r"\bswitch(?:ed|ing)?\s+my\s+([\w]+(?:\s+[\w]+){0,3}?)\s+(?:from|to)\b",
         sentence, re.IGNORECASE,
     )
+    if m:
+        return normalize_scope(m.group(1))
+    m = re.search(r"\b(project\s+\w+)\b", sentence, re.IGNORECASE)
     if m:
         return normalize_scope(m.group(1))
     m = re.search(r"\bfor\s+my\s+([\w.#+-]+(?:\s+[\w.#+-]+){0,3}\s+projects?)\b", sentence, re.IGNORECASE)
