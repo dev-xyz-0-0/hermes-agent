@@ -4699,6 +4699,8 @@ class GatewayRunner:
                     session_id=task_id,
                     platform=platform_key,
                     user_id=source.user_id,
+                    chat_id=source.chat_id,
+                    thread_id=source.thread_id,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )
@@ -6917,6 +6919,8 @@ class GatewayRunner:
                     session_id=session_id,
                     platform=platform_key,
                     user_id=source.user_id,
+                    chat_id=source.chat_id,
+                    thread_id=source.thread_id,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )

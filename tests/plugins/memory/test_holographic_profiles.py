@@ -176,6 +176,87 @@ class TestNamespaceIsolation:
 
 
 # ---------------------------------------------------------------------------
+# A2. fact_store add/search/list parity under the isolation gate
+#
+# Regression coverage for the "list fails, search works" report: both
+# actions are gated by the same handle_tool_call() isolation check, so
+# they must succeed together (chat_id present) or fail together (missing).
+# ---------------------------------------------------------------------------
+
+class TestFactStoreActionParityUnderIsolation:
+    def test_add_search_list_all_succeed_with_chat_id(self, tmp_path):
+        p = _gateway_provider(tmp_path, "chat_A")
+        assert p._isolation_blocked is False
+
+        add_result = json.loads(p.handle_tool_call(
+            "fact_store", {"action": "add", "content": "The deploy key rotates every 90 days"}
+        ))
+        assert "error" not in add_result
+        assert add_result["status"] == "added"
+
+        search_result = json.loads(p.handle_tool_call(
+            "fact_store", {"action": "search", "query": "deploy key"}
+        ))
+        assert "error" not in search_result
+        assert search_result["count"] == 1
+
+        list_result = json.loads(p.handle_tool_call(
+            "fact_store", {"action": "list"}
+        ))
+        assert "error" not in list_result
+        assert list_result["count"] == 1
+        p.shutdown()
+
+    def test_add_search_list_all_fail_closed_without_chat_id(self, tmp_path):
+        """A multi-tenant platform session with no resolvable chat_id must
+        reject every fact_store action identically — not just 'list'."""
+        p = HolographicMemoryProvider(config={"db_path": str(tmp_path / "memory_store.db"), "hrr_dim": 32})
+        p.initialize(session_id="s", platform="telegram", hermes_home=str(tmp_path))  # no chat_id
+
+        expected_error = (
+            "Holographic memory is unavailable for this session: no chat identity "
+            "could be resolved to scope memory to"
+        )
+        for action, extra in [
+            ("add", {"content": "should never be written"}),
+            ("search", {"query": "anything"}),
+            ("list", {}),
+        ]:
+            result = json.loads(p.handle_tool_call("fact_store", {"action": action, **extra}))
+            assert "error" in result, f"action={action} did not fail closed: {result}"
+            assert expected_error in result["error"], f"action={action} wrong error: {result}"
+
+        # Nothing was written to the empty/shared namespace despite the
+        # attempted "add" above.
+        assert p._store.stats(namespace="")["facts"] == 0
+        p.shutdown()
+
+    def test_thread_id_further_scopes_namespace(self, tmp_path):
+        """Two threads within the same chat_id must not share facts."""
+        def _threaded_provider(thread_id):
+            provider = HolographicMemoryProvider(
+                config={"db_path": str(tmp_path / "memory_store.db"), "hrr_dim": 32, "hrr_weight": 0.0}
+            )
+            provider.initialize(
+                session_id=f"sess-{thread_id}", platform="telegram",
+                chat_id="chat_A", thread_id=thread_id, hermes_home=str(tmp_path),
+            )
+            return provider
+
+        a = _threaded_provider("topic_1")
+        b = _threaded_provider("topic_2")
+        assert a._namespace != b._namespace
+
+        a.handle_tool_call("fact_store", {"action": "add", "content": "Topic 1 only fact"})
+        list_a = json.loads(a.handle_tool_call("fact_store", {"action": "list"}))
+        list_b = json.loads(b.handle_tool_call("fact_store", {"action": "list"}))
+        assert list_a["count"] == 1
+        assert list_b["count"] == 0
+        a.shutdown()
+        b.shutdown()
+
+
+# ---------------------------------------------------------------------------
 # B. Shared memory (P3-S*)
 # ---------------------------------------------------------------------------
 

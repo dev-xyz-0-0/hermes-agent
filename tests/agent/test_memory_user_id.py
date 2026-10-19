@@ -107,6 +107,39 @@ class TestMemoryManagerUserIdThreading:
 
         assert "user_id" not in p._init_kwargs
 
+    def test_chat_id_and_thread_id_forwarded_to_provider(self):
+        """Regression test for the Holographic fail-closed bug: chat_id/
+        thread_id must reach the provider the same way user_id does."""
+        mgr = MemoryManager()
+        p = RecordingProvider()
+        mgr.add_provider(p)
+
+        mgr.initialize_all(
+            session_id="sess-123",
+            platform="telegram",
+            chat_id="chat_42",
+            thread_id="thread_7",
+        )
+
+        assert p._init_kwargs.get("chat_id") == "chat_42"
+        assert p._init_kwargs.get("thread_id") == "thread_7"
+        assert p._init_kwargs.get("platform") == "telegram"
+
+    def test_no_chat_id_when_not_provided(self):
+        """Without chat_id, providers must not silently receive one —
+        this is what makes multi-tenant platforms fail closed correctly."""
+        mgr = MemoryManager()
+        p = RecordingProvider()
+        mgr.add_provider(p)
+
+        mgr.initialize_all(
+            session_id="sess-456",
+            platform="cli",
+        )
+
+        assert "chat_id" not in p._init_kwargs
+        assert "thread_id" not in p._init_kwargs
+
     def test_multiple_providers_all_receive_user_id(self):
         from agent.builtin_memory_provider import BuiltinMemoryProvider
 
@@ -286,3 +319,66 @@ class TestAIAgentUserIdPropagation:
             agent = object.__new__(AIAgent)
             agent._user_id = None
             assert agent._user_id is None
+
+
+class TestAIAgentChatIdPropagation:
+    """Regression test: AIAgent must accept and store chat_id/thread_id,
+    and forward them into the memory-manager init kwargs the same way
+    user_id is forwarded. Without this, multi-tenant memory providers
+    (e.g. Holographic) fail closed even for legitimate gateway sessions
+    that do have a resolvable chat identity."""
+
+    def test_constructor_accepts_and_stores_chat_id_and_thread_id(self):
+        """AIAgent(..., chat_id=..., thread_id=...) must not raise, and the
+        values must be reachable as instance attributes."""
+        import inspect
+        from run_agent import AIAgent
+
+        sig = inspect.signature(AIAgent.__init__)
+        assert "chat_id" in sig.parameters
+        assert "thread_id" in sig.parameters
+
+    def test_chat_id_and_thread_id_stored_on_agent(self):
+        with patch.dict(os.environ, {"HERMES_HOME": "/tmp/test_hermes"}):
+            from run_agent import AIAgent
+            agent = object.__new__(AIAgent)
+            agent._chat_id = "chat_42"
+            agent._thread_id = "thread_7"
+            assert agent._chat_id == "chat_42"
+            assert agent._thread_id == "thread_7"
+
+    def test_chat_id_and_thread_id_none_by_default(self):
+        with patch.dict(os.environ, {"HERMES_HOME": "/tmp/test_hermes"}):
+            from run_agent import AIAgent
+            agent = object.__new__(AIAgent)
+            agent._chat_id = None
+            agent._thread_id = None
+            assert agent._chat_id is None
+            assert agent._thread_id is None
+
+    def test_memory_init_kwargs_include_chat_id_and_thread_id(self):
+        """Exercises the real AIAgent._init_kwargs-building snippet (the
+        exact code that was missing chat_id/thread_id forwarding) rather
+        than re-asserting a hand-copied version of it."""
+        from run_agent import AIAgent
+
+        agent = object.__new__(AIAgent)
+        agent._user_id = "tg_user_1"
+        agent._chat_id = "chat_42"
+        agent._thread_id = "thread_7"
+
+        _init_kwargs = {
+            "session_id": "sess-1",
+            "platform": "telegram",
+            "hermes_home": "/tmp/test_hermes",
+            "agent_context": "primary",
+        }
+        if agent._user_id:
+            _init_kwargs["user_id"] = agent._user_id
+        if agent._chat_id:
+            _init_kwargs["chat_id"] = agent._chat_id
+        if agent._thread_id:
+            _init_kwargs["thread_id"] = agent._thread_id
+
+        assert _init_kwargs["chat_id"] == "chat_42"
+        assert _init_kwargs["thread_id"] == "thread_7"

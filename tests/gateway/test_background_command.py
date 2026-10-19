@@ -233,6 +233,40 @@ class TestRunBackgroundTask:
         assert "Hello from background!" in content
 
     @pytest.mark.asyncio
+    async def test_chat_id_and_thread_id_reach_agent(self):
+        """Regression test: source.chat_id/thread_id must be passed to
+        AIAgent so multi-tenant memory providers (e.g. Holographic) don't
+        fail closed for a background task started from a real chat."""
+        runner = _make_runner()
+        mock_adapter = AsyncMock()
+        mock_adapter.send = AsyncMock()
+        mock_adapter.extract_media = MagicMock(return_value=([], "done"))
+        mock_adapter.extract_images = MagicMock(return_value=([], "done"))
+        runner.adapters[Platform.TELEGRAM] = mock_adapter
+
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            user_id="12345",
+            chat_id="67890",
+            thread_id="topic-3",
+            user_name="testuser",
+        )
+
+        mock_result = {"final_response": "done", "messages": []}
+
+        with patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}), \
+             patch("run_agent.AIAgent") as MockAgent:
+            mock_agent_instance = MagicMock()
+            mock_agent_instance.run_conversation.return_value = mock_result
+            MockAgent.return_value = mock_agent_instance
+
+            await runner._run_background_task("say hello", source, "bg_test")
+
+        assert MockAgent.call_args.kwargs.get("chat_id") == "67890"
+        assert MockAgent.call_args.kwargs.get("thread_id") == "topic-3"
+        assert MockAgent.call_args.kwargs.get("user_id") == "12345"
+
+    @pytest.mark.asyncio
     async def test_exception_sends_error_message(self):
         """When the agent raises an exception, an error message is sent."""
         runner = _make_runner()

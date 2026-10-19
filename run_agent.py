@@ -473,6 +473,8 @@ class AIAgent:
         prefill_messages: List[Dict[str, Any]] = None,
         platform: str = None,
         user_id: str = None,
+        chat_id: str = None,
+        thread_id: str = None,
         skip_context_files: bool = False,
         skip_memory: bool = False,
         session_db=None,
@@ -520,6 +522,10 @@ class AIAgent:
                 Example: [{"role": "user", "content": "Hi!"}, {"role": "assistant", "content": "Hello!"}]
             platform (str): The interface platform the user is on (e.g. "cli", "telegram", "discord", "whatsapp").
                 Used to inject platform-specific formatting hints into the system prompt.
+            chat_id (str): Platform chat identifier (gateway sessions). Required by multi-tenant
+                memory providers to scope memory to this chat rather than failing closed.
+            thread_id (str): Platform thread/topic identifier (gateway sessions), e.g. Telegram
+                forum topics or Discord threads, for further scoping within a chat.
             skip_context_files (bool): If True, skip auto-injection of SOUL.md, AGENTS.md, and .cursorrules
                 into the system prompt. Use this for batch processing and data generation to avoid
                 polluting trajectories with user-specific persona or project instructions.
@@ -538,6 +544,8 @@ class AIAgent:
         self.ephemeral_system_prompt = ephemeral_system_prompt
         self.platform = platform  # "cli", "telegram", "discord", "whatsapp", etc.
         self._user_id = user_id  # Platform user identifier (gateway sessions)
+        self._chat_id = chat_id  # Platform chat identifier (gateway sessions, multi-tenant scoping)
+        self._thread_id = thread_id  # Platform thread/topic identifier (gateway sessions)
         # Pluggable print function — CLI replaces this with _cprint so that
         # raw ANSI status lines are routed through prompt_toolkit's renderer
         # instead of going directly to stdout where patch_stdout's StdoutProxy
@@ -1048,6 +1056,12 @@ class AIAgent:
                         # Thread gateway user identity for per-user memory scoping
                         if self._user_id:
                             _init_kwargs["user_id"] = self._user_id
+                        # Thread gateway chat identity for multi-tenant memory scoping
+                        # (required by providers that fail closed without it, e.g. Holographic)
+                        if self._chat_id:
+                            _init_kwargs["chat_id"] = self._chat_id
+                        if self._thread_id:
+                            _init_kwargs["thread_id"] = self._thread_id
                         # Profile identity for per-profile provider scoping
                         try:
                             from hermes_cli.profiles import get_active_profile_name
