@@ -55,7 +55,7 @@ class _CapturingAgent:
         type(self).last_init = dict(kwargs)
         self.tools = []
 
-    def run_conversation(self, user_message: str, conversation_history=None, task_id=None):
+    def run_conversation(self, user_message: str, conversation_history=None, task_id=None, persist_user_message=None):
         return {
             "final_response": "ok",
             "messages": [],

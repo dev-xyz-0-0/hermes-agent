@@ -80,7 +80,7 @@ class _Codex401ThenSuccessAgent(run_agent.AIAgent):
         type(self).refresh_attempts += 1
         return True
 
-    def run_conversation(self, user_message: str, conversation_history=None, task_id=None):
+    def run_conversation(self, user_message: str, conversation_history=None, task_id=None, persist_user_message=None):
         calls = {"api": 0}
 
         def _fake_api_call(api_kwargs):

@@ -127,7 +127,7 @@ def _make_agent_cls(error_cls, recover_after=None):
             self._save_trajectory = lambda messages, user_message, completed: None
             self._save_session_log = lambda messages: None
 
-        def run_conversation(self, user_message, conversation_history=None, task_id=None):
+        def run_conversation(self, user_message, conversation_history=None, task_id=None, persist_user_message=None):
             calls = {"n": 0}
 
             def _fake_api_call(api_kwargs):
@@ -270,7 +270,7 @@ def test_401_credential_refresh_recovers(monkeypatch):
             refresh_count["n"] += 1
             return True  # Simulate successful credential refresh
 
-        def run_conversation(self, user_message, conversation_history=None, task_id=None):
+        def run_conversation(self, user_message, conversation_history=None, task_id=None, persist_user_message=None):
             calls = {"n": 0}
 
             def _fake_api_call(api_kwargs):
@@ -352,7 +352,7 @@ def test_401_refresh_fails_is_non_retryable(monkeypatch):
         def _try_refresh_anthropic_client_credentials(self) -> bool:
             return False  # Simulate failed credential refresh
 
-        def run_conversation(self, user_message, conversation_history=None, task_id=None):
+        def run_conversation(self, user_message, conversation_history=None, task_id=None, persist_user_message=None):
             def _fake_api_call(api_kwargs):
                 raise _UnauthorizedError()
 
@@ -435,7 +435,7 @@ def test_prompt_too_long_triggers_compression(monkeypatch):
                 compressed = messages
             return compressed, system_message
 
-        def run_conversation(self, user_message, conversation_history=None, task_id=None):
+        def run_conversation(self, user_message, conversation_history=None, task_id=None, persist_user_message=None):
             calls = {"n": 0}
 
             def _fake_api_call(api_kwargs):

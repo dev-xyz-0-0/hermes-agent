@@ -6797,6 +6797,11 @@ class GatewayRunner:
             # `_resolve_turn_agent_config(message, …)`.
             nonlocal message
 
+            # Clean, pre-note user text — captured before any synthetic
+            # model-switch/skill-reload note is prepended below, so memory
+            # sync always receives what the user actually sent.
+            _clean_message = message
+
             # Pass session_key to process registry via env var so background
             # processes can be mapped back to this gateway session
             os.environ["HERMES_SESSION_KEY"] = session_key or ""
@@ -7112,7 +7117,12 @@ class GatewayRunner:
             _approval_session_token = set_current_session_key(_approval_session_key)
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
             try:
-                result = agent.run_conversation(message, conversation_history=agent_history, task_id=session_id)
+                result = agent.run_conversation(
+                    message,
+                    conversation_history=agent_history,
+                    task_id=session_id,
+                    persist_user_message=_clean_message,
+                )
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 reset_current_session_key(_approval_session_token)

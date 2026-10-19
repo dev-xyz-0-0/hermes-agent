@@ -6706,7 +6706,11 @@ class HermesCLI:
                         conversation_history=self.conversation_history[:-1],  # Exclude the message we just added
                         stream_callback=stream_callback,
                         task_id=self.session_id,
-                        persist_user_message=message if _voice_prefix else None,
+                        # agent_message may have the voice prefix and/or a
+                        # one-shot model-switch/skill-reload note prepended;
+                        # memory/transcripts must always get the clean
+                        # original message instead.
+                        persist_user_message=message,
                     )
                 except Exception as exc:
                     logging.error("run_conversation raised: %s", exc, exc_info=True)

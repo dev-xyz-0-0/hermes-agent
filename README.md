@@ -291,7 +291,7 @@ uv run pytest tests/plugins/memory/test_holographic_import.py -q
 
 uv run pytest tests/plugins/memory/test_holographic_memory_write.py -q      
  
-uv run pytest tests/gateway/test_telegram_approval_buttons.py -q
+uv run pytest tests/agent/test_memory_input_provenance.py -q
 
 uv run pytest tests/plugins/memory/test_holographic_lifecycle_stage3.py -q
 

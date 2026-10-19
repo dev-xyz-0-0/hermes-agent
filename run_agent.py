@@ -1758,6 +1758,13 @@ class AIAgent:
                         quiet_mode=True,
                         platform=self.platform,
                         provider=self.provider,
+                        # Isolate from the external memory-provider plugin the
+                        # same way cron/subagent agents are: the review prompt
+                        # is synthetic instruction text, not user-authored, so
+                        # it must never reach sync_all() as memory input.
+                        # Explicit memory-tool saves still work below via the
+                        # manually-shared _memory_store.
+                        skip_memory=True,
                     )
                     review_agent._memory_store = self._memory_store
                     review_agent._memory_enabled = self._memory_enabled
