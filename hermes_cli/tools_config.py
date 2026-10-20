@@ -85,8 +85,7 @@ CONFIGURABLE_TOOLSETS = [
     ("cronjob",         "⏰ Cron Jobs",                 "create/list/update/pause/resume/run, with optional attached skills"),
     ("rl",              "🧪 RL Training",               "Tinker-Atropos training tools"),
     ("homeassistant",    "🏠 Home Assistant",           "smart home device control"),
-    ("xai_web_search",  "🌐 xAI Web Search",            "xai_web_search (requires xAI OAuth or XAI_API_KEY)"),
-    ("x_search",        "🐦 X (Twitter) Search",        "x_search (requires xAI OAuth or XAI_API_KEY)")
+    ("xai_web_search",  "🌐 xAI Web Search",            "xai_web_search (requires xAI OAuth or XAI_API_KEY)")
 ]
 
 # Toolsets that are OFF by default for new installs.
@@ -278,7 +277,8 @@ TOOL_CATEGORIES = {
             },
         ],
     },
-   "x_search": {
+    
+        "x_search": {
         "name": "X (Twitter) Search",
         "setup_title": "Select xAI Credential Source",
         "setup_note": (
