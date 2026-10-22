@@ -2579,7 +2579,33 @@ class AIAgent:
                     "Memory provider shutdown failed: %s", exc,
                     exc_info=True,
                 )
-    
+
+    def release_memory_provider(self) -> None:
+        """Release memory-provider resources WITHOUT ending the durable session.
+
+        Call this when the runtime AIAgent object itself is being discarded
+        (cache eviction, gateway shutdown, config replacement) but the
+        underlying conversation is still resumable. Unlike
+        shutdown_memory_provider(), this never calls on_session_end() — it
+        only closes provider resources via shutdown_all(). Shares the same
+        finalization flag/lock as shutdown_memory_provider() so the two are
+        mutually exclusive and each agent is torn down at most once, by
+        whichever call wins the race.
+        """
+        with self._memory_provider_finalization_lock:
+            if self._memory_provider_finalized:
+                return
+            self._memory_provider_finalized = True
+
+        if self._memory_manager:
+            try:
+                self._memory_manager.shutdown_all()
+            except Exception as exc:
+                logger.warning(
+                    "Memory provider release failed: %s", exc,
+                    exc_info=True,
+                )
+
     def _hydrate_todo_store(self, history: List[Dict[str, Any]]) -> None:
         """
         Recover todo state from conversation history.

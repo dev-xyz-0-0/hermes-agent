@@ -1417,14 +1417,27 @@ class GatewayRunner:
                 for key, entry in _expired_entries:
                     try:
                         await self._async_flush_memories(entry.session_id)
-                        # Shut down memory provider on the cached agent
-                        cached_agent = self._running_agents.get(key)
-                        if cached_agent and cached_agent is not _AGENT_PENDING_SENTINEL:
-                            try:
-                                if hasattr(cached_agent, 'shutdown_memory_provider'):
-                                    cached_agent.shutdown_memory_provider()
-                            except Exception:
-                                pass
+                        # True expiration is a real session boundary (Class A):
+                        # the cached runtime agent lives in _agent_cache (NOT
+                        # _running_agents, which is only populated mid-turn),
+                        # and finalization needs the real persisted transcript,
+                        # not an empty one. Isolate failures here from the
+                        # built-in-flush retry counter below.
+                        try:
+                            transcript = self.session_store.load_transcript(entry.session_id)
+                        except Exception as e:
+                            transcript = []
+                            logger.warning(
+                                "Failed to load transcript before expiry finalization "
+                                "for %s: %s", entry.session_id, e,
+                            )
+                        try:
+                            await self._finalize_and_evict_cached_agent(key, transcript)
+                        except Exception as e:
+                            logger.warning(
+                                "Memory provider finalization failed during expiry "
+                                "for session %s: %s", entry.session_id, e,
+                            )
                         # Mark as flushed and persist to disk so the flag
                         # survives gateway restarts.
                         with self.session_store._lock:
@@ -1583,15 +1596,33 @@ class GatewayRunner:
         logger.info("Stopping gateway...")
         self._running = False
 
+        # Gateway shutdown discards runtime agent objects, but the durable
+        # conversations they belong to are NOT ending (Class C, resource
+        # release only) — a restarted gateway should resume them normally.
+        # Collect every unique agent from both the per-turn dict and the
+        # persistent cache so neither is left unreleased.
+        _shutdown_agents: dict = {}
         for session_key, agent in list(self._running_agents.items()):
             if agent is _AGENT_PENDING_SENTINEL:
                 continue
+            _shutdown_agents.setdefault(id(agent), (session_key, agent))
+        _cache_lock = getattr(self, "_agent_cache_lock", None)
+        _cache = getattr(self, "_agent_cache", None)
+        if _cache_lock and _cache is not None:
+            with _cache_lock:
+                _cached_snapshot = list(_cache.items())
+            for session_key, cached in _cached_snapshot:
+                agent = cached[0] if cached else None
+                if agent is not None:
+                    _shutdown_agents.setdefault(id(agent), (session_key, agent))
+
+        for session_key, agent in _shutdown_agents.values():
             try:
                 agent.interrupt("Gateway shutting down")
-                logger.debug("Interrupted running agent for session %s during shutdown", session_key[:20])
+                logger.debug("Interrupted agent for session %s during shutdown", session_key[:20])
             except Exception as e:
                 logger.debug("Failed interrupting agent during shutdown: %s", e)
-            # Fire plugin on_session_finalize hook before memory shutdown
+            # Fire plugin on_session_finalize hook before memory release
             try:
                 from hermes_cli.plugins import invoke_hook as _invoke_hook
                 _invoke_hook("on_session_finalize",
@@ -1599,12 +1630,17 @@ class GatewayRunner:
                              platform="gateway")
             except Exception:
                 pass
-            # Shut down memory provider at actual session boundary
+            # Release provider resources only — the durable session is not
+            # ending, so never call shutdown_memory_provider()/on_session_end()
+            # here.
             try:
-                if hasattr(agent, 'shutdown_memory_provider'):
-                    agent.shutdown_memory_provider()
-            except Exception:
-                pass
+                if hasattr(agent, 'release_memory_provider'):
+                    agent.release_memory_provider()
+            except Exception as e:
+                logger.warning(
+                    "Memory provider release failed during shutdown for session %s: %s",
+                    session_key[:20], e,
+                )
 
         for platform, adapter in list(self.adapters.items()):
             try:
@@ -1624,6 +1660,9 @@ class GatewayRunner:
 
         self.adapters.clear()
         self._running_agents.clear()
+        if _cache_lock and _cache is not None:
+            with _cache_lock:
+                _cache.clear()
         self._pending_messages.clear()
         self._pending_approvals.clear()
         self._shutdown_event.set()
@@ -2425,6 +2464,12 @@ class GatewayRunner:
             _platform_name, source.user_name or source.user_id or "unknown",
             source.chat_id or "unknown", _msg_preview,
         )
+
+        # Next-message expiration fallback: if the watcher hasn't processed
+        # this session's expiry yet, get_or_create_session() below will
+        # rotate it to a new session_id before we get a chance to finalize
+        # the old one. Finalize first.
+        await self._finalize_expired_session_before_rotation(source)
 
         # Get or create session
         session_entry = self.session_store.get_or_create_session(source)
@@ -3372,47 +3417,22 @@ class GatewayRunner:
         except Exception as e:
             logger.debug("Could not resolve session being reset: %s", e)
 
-        # Telegram memory providers are scoped to the cached agent. Finalize
-        # that exact provider with the persisted old transcript before either
-        # the agent or old session identity is discarded.
-        cached_agent = None
-        if source.platform == Platform.TELEGRAM and old_entry:
+        # The cached agent's memory provider is scoped to this session key.
+        # Finalize that exact provider with the persisted old transcript
+        # before either the agent or old session identity is discarded —
+        # this is a real session boundary (Class A) for every platform.
+        if old_entry:
             try:
                 old_transcript = self.session_store.load_transcript(old_entry.session_id)
             except Exception as e:
                 old_transcript = []
                 logger.warning(
-                    "Failed to load transcript before Telegram session reset for %s: %s",
+                    "Failed to load transcript before session reset for %s: %s",
                     old_entry.session_id, e,
                 )
-
-            cache_lock = getattr(self, "_agent_cache_lock", None)
-            cache = getattr(self, "_agent_cache", None)
-            if cache_lock and cache is not None:
-                with cache_lock:
-                    cached = cache.get(session_key)
-                    if cached:
-                        cached_agent = cached[0]
-
-            if cached_agent and hasattr(cached_agent, "shutdown_memory_provider"):
-                try:
-                    # Use a dedicated executor rather than the event loop's
-                    # shared pool: finalization is awaited and this worker is
-                    # guaranteed to be reaped at the session boundary.
-                    with ThreadPoolExecutor(
-                        max_workers=1, thread_name_prefix="memory-finalize"
-                    ) as executor:
-                        await asyncio.get_running_loop().run_in_executor(
-                            executor,
-                            cached_agent.shutdown_memory_provider,
-                            old_transcript,
-                        )
-                except Exception as e:
-                    logger.warning(
-                        "Memory provider finalization failed before Telegram "
-                        "session reset for %s: %s",
-                        old_entry.session_id, e,
-                    )
+            await self._finalize_and_evict_cached_agent(session_key, old_transcript)
+        else:
+            self._evict_cached_agent(session_key)
 
         # Preserve the existing built-in memory flush as a background task.
         try:
@@ -3424,17 +3444,6 @@ class GatewayRunner:
                 _flush_task.add_done_callback(self._background_tasks.discard)
         except Exception as e:
             logger.debug("Gateway memory flush on reset failed: %s", e)
-
-        if cached_agent is not None:
-            cache_lock = getattr(self, "_agent_cache_lock", None)
-            cache = getattr(self, "_agent_cache", None)
-            if cache_lock and cache is not None:
-                with cache_lock:
-                    cached = cache.get(session_key)
-                    if cached and cached[0] is cached_agent:
-                        cache.pop(session_key, None)
-        else:
-            self._evict_cached_agent(session_key)
         
         try:
             from tools.env_passthrough import clear_env_passthrough
@@ -5327,6 +5336,13 @@ class GatewayRunner:
         if session_key in self._running_agents:
             del self._running_agents[session_key]
 
+        # The current session remains durable/resumable — this is a session
+        # switch (Class B), not a boundary. Release (never finalize) the
+        # cached runtime agent so the next turn builds a fresh one bound to
+        # the session we're switching to, instead of reusing an agent whose
+        # internal session_id is now stale.
+        self._release_and_evict_cached_agent(session_key)
+
         # Switch the session entry to point at the old session
         new_entry = self.session_store.switch_session(session_key, target_id)
         if not new_entry:
@@ -5415,13 +5431,17 @@ class GatewayRunner:
         except Exception:
             pass
 
+        # The original session remains durable/resumable — this is a session
+        # fork (Class B), not a boundary. Release (never finalize) the
+        # cached runtime agent so the next turn builds a fresh one bound to
+        # the branch, instead of reusing an agent whose internal session_id
+        # still points at the original.
+        self._release_and_evict_cached_agent(session_key)
+
         # Switch the session store entry to the new session
         new_entry = self.session_store.switch_session(session_key, new_session_id)
         if not new_entry:
             return "Branch created but failed to switch to it."
-
-        # Evict any cached agent for this session
-        self._evict_cached_agent(session_key)
 
         msg_count = len([m for m in history if m.get("role") == "user"])
         return (
@@ -6536,12 +6556,127 @@ class GatewayRunner:
         override = self._session_model_overrides.get(session_key)
         return override is not None and override.get("model") == agent_model
 
-    def _evict_cached_agent(self, session_key: str) -> None:
-        """Remove a cached agent for a session (called on /new, /model, etc)."""
+    def _evict_cached_agent(self, session_key: str):
+        """Remove a cached agent for a session (called on /new, /model, etc).
+
+        Returns the popped (agent, signature) tuple, or None if nothing was
+        cached. Callers that need to release provider resources should use
+        the returned agent rather than assuming eviction alone is cleanup.
+        """
         _lock = getattr(self, "_agent_cache_lock", None)
         if _lock:
             with _lock:
-                self._agent_cache.pop(session_key, None)
+                return self._agent_cache.pop(session_key, None)
+        return None
+
+    async def _finalize_and_evict_cached_agent(self, session_key: str, transcript: list) -> None:
+        """Real session-boundary finalize (Class A).
+
+        Calls on_session_end() + shutdown_all() on the cached agent's
+        memory provider via shutdown_memory_provider(transcript), then
+        evicts that exact agent from _agent_cache. Used by /new, /reset,
+        the session-expiry watcher, and the next-message expiration
+        fallback — every path where the durable conversation has actually
+        ended. Never runs provider code while holding _agent_cache_lock.
+        """
+        cache_lock = getattr(self, "_agent_cache_lock", None)
+        cache = getattr(self, "_agent_cache", None)
+        agent = None
+        if cache_lock and cache is not None:
+            with cache_lock:
+                cached = cache.get(session_key)
+                if cached:
+                    agent = cached[0]
+
+        if agent is not None and hasattr(agent, "shutdown_memory_provider"):
+            try:
+                with ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="memory-finalize"
+                ) as executor:
+                    await asyncio.get_running_loop().run_in_executor(
+                        executor,
+                        agent.shutdown_memory_provider,
+                        transcript,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Memory provider finalization failed for session %s: %s",
+                    session_key, e,
+                )
+
+            if cache_lock and cache is not None:
+                with cache_lock:
+                    cached = cache.get(session_key)
+                    if cached and cached[0] is agent:
+                        cache.pop(session_key, None)
+        else:
+            self._evict_cached_agent(session_key)
+
+    def _release_and_evict_cached_agent(self, session_key: str, expected_agent=None) -> None:
+        """Resource-only release (Class C).
+
+        Calls shutdown_all() on the cached agent's memory provider via
+        release_memory_provider() — never on_session_end() — then evicts
+        that exact agent from _agent_cache. Used wherever the runtime
+        AIAgent object is being discarded but the durable conversation
+        remains resumable (/resume, /branch, config-signature replacement,
+        fallback-model eviction). Never runs provider code while holding
+        _agent_cache_lock.
+        """
+        cache_lock = getattr(self, "_agent_cache_lock", None)
+        cache = getattr(self, "_agent_cache", None)
+        agent = expected_agent
+        if agent is None and cache_lock and cache is not None:
+            with cache_lock:
+                cached = cache.get(session_key)
+                if cached:
+                    agent = cached[0]
+
+        if agent is not None and hasattr(agent, "release_memory_provider"):
+            try:
+                agent.release_memory_provider()
+            except Exception as e:
+                logger.warning(
+                    "Memory provider release failed for session %s: %s",
+                    session_key, e,
+                )
+
+        if agent is not None and cache_lock and cache is not None:
+            with cache_lock:
+                cached = cache.get(session_key)
+                if cached and cached[0] is agent:
+                    cache.pop(session_key, None)
+
+    async def _finalize_expired_session_before_rotation(self, source: SessionSource) -> None:
+        """Next-message expiration fallback (Class A).
+
+        get_or_create_session() silently rotates an expired session to a
+        new session_id, after which the old session_id/transcript are no
+        longer reachable through the session key. If the background expiry
+        watcher hasn't gotten to this session yet, call this BEFORE
+        get_or_create_session() so the old cached agent is finalized with
+        the real OLD transcript. Races harmlessly against the watcher via
+        the agent-level at-most-once finalization guarantee in
+        AIAgent.shutdown_memory_provider().
+        """
+        try:
+            session_key = self._session_key_for_source(source)
+            with self.session_store._lock:
+                old_entry = self.session_store._entries.get(session_key)
+                old_entry_expired = bool(old_entry) and self.session_store._is_session_expired(old_entry)
+            if not old_entry_expired:
+                return
+            try:
+                old_transcript = self.session_store.load_transcript(old_entry.session_id)
+            except Exception as e:
+                old_transcript = []
+                logger.warning(
+                    "Failed to load transcript before next-message expiration "
+                    "fallback for %s: %s", old_entry.session_id, e,
+                )
+            await self._finalize_and_evict_cached_agent(session_key, old_transcript)
+        except Exception as e:
+            logger.debug("Next-message expiration fallback check failed: %s", e)
 
     async def _run_agent(
         self,
@@ -6946,6 +7081,7 @@ class GatewayRunner:
                 combined_ephemeral,
             )
             agent = None
+            cached = None
             _cache_lock = getattr(self, "_agent_cache_lock", None)
             _cache = getattr(self, "_agent_cache", None)
             if _cache_lock and _cache is not None:
@@ -6956,7 +7092,12 @@ class GatewayRunner:
                         logger.debug("Reusing cached agent for session %s", session_key)
 
             if agent is None:
-                # Config changed or first message — create fresh agent
+                # Config changed or first message — create fresh agent.
+                # If a differently-signed agent was cached for this session
+                # key, its durable conversation is NOT ending — only the
+                # runtime object is being replaced (Class C) — so release
+                # its provider resources without calling on_session_end().
+                _old_agent_to_release = cached[0] if cached else None
                 agent = AIAgent(
                     model=turn_route["model"],
                     **turn_route["runtime"],
@@ -6985,6 +7126,14 @@ class GatewayRunner:
                     with _cache_lock:
                         _cache[session_key] = (agent, _sig)
                 logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
+                if _old_agent_to_release is not None and hasattr(_old_agent_to_release, "release_memory_provider"):
+                    try:
+                        _old_agent_to_release.release_memory_provider()
+                    except Exception as e:
+                        logger.warning(
+                            "Memory provider release failed for replaced agent in session %s: %s",
+                            session_key, e,
+                        )
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
@@ -7523,7 +7672,19 @@ class GatewayRunner:
                     self._effective_provider = getattr(_agent, 'provider', None)
                     # Fallback activated — evict cached agent so the next
                     # message starts fresh and retries the primary model.
-                    self._evict_cached_agent(session_key)
+                    # The durable conversation continues, so release the
+                    # evicted agent's provider resources (Class C) rather
+                    # than finalizing it.
+                    _popped = self._evict_cached_agent(session_key)
+                    if _popped and hasattr(_popped[0], "release_memory_provider"):
+                        try:
+                            _popped[0].release_memory_provider()
+                        except Exception as e:
+                            logger.warning(
+                                "Memory provider release failed for fallback-evicted "
+                                "agent in session %s: %s",
+                                session_key, e,
+                            )
                 else:
                     # Primary model worked (or intentional /model switch)
                     # — clear any stale fallback state.

@@ -15,9 +15,9 @@ from gateway.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
 
-def _make_source() -> SessionSource:
+def _make_source(platform: Platform = Platform.TELEGRAM) -> SessionSource:
     return SessionSource(
-        platform=Platform.TELEGRAM,
+        platform=platform,
         user_id="u1",
         chat_id="c1",
         user_name="tester",
@@ -25,8 +25,8 @@ def _make_source() -> SessionSource:
     )
 
 
-def _make_event(text: str) -> MessageEvent:
-    return MessageEvent(text=text, source=_make_source(), message_id="m1")
+def _make_event(text: str, platform: Platform = Platform.TELEGRAM) -> MessageEvent:
+    return MessageEvent(text=text, source=_make_source(platform), message_id="m1")
 
 
 class _InlineExecutor:
@@ -50,16 +50,16 @@ class _InlineExecutor:
         return future
 
 
-def _make_runner():
+def _make_runner(platform: Platform = Platform.TELEGRAM):
     from gateway.run import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
-        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="***")}
+        platforms={platform: PlatformConfig(enabled=True, token="***")}
     )
     adapter = MagicMock()
     adapter.send = AsyncMock()
-    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner.adapters = {platform: adapter}
     runner._voice_mode = {}
     runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
     runner._session_model_overrides = {}
@@ -68,13 +68,13 @@ def _make_runner():
     runner._agent_cache = {}
     runner._async_flush_memories = AsyncMock()
 
-    session_key = build_session_key(_make_source())
+    session_key = build_session_key(_make_source(platform))
     session_entry = SessionEntry(
         session_key=session_key,
         session_id="sess-old",
         created_at=datetime.now(),
         updated_at=datetime.now(),
-        platform=Platform.TELEGRAM,
+        platform=platform,
         chat_type="dm",
     )
     new_session_entry = SessionEntry(
@@ -82,7 +82,7 @@ def _make_runner():
         session_id="sess-new",
         created_at=datetime.now(),
         updated_at=datetime.now(),
-        platform=Platform.TELEGRAM,
+        platform=platform,
         chat_type="dm",
     )
     runner.session_store = MagicMock()
@@ -164,6 +164,74 @@ async def test_telegram_reset_dispatches_transcript_to_holographic_session_end(
         "user_pref",
         "Prefers PostgreSQL for analytics workloads.",
         "telegram:c1",
+    )
+
+
+@pytest.mark.asyncio
+@patch("hermes_cli.plugins.invoke_hook")
+async def test_reset_finalizes_holographic_on_non_telegram_platform(
+    mock_invoke_hook, tmp_path, monkeypatch
+):
+    """/new finalization is no longer Telegram-only — it must also run for
+    other gateway platforms (e.g. Discord) that share this command handler.
+    """
+    from agent.memory_manager import MemoryManager
+    from plugins.memory.holographic import HolographicMemoryProvider
+    from run_agent import AIAgent
+
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    db_path = tmp_path / "holographic.db"
+    transcript = [
+        {"role": "user", "content": "I prefer PostgreSQL for analytics workloads."},
+        {"role": "assistant", "content": "Understood."},
+    ]
+
+    provider = HolographicMemoryProvider({
+        "auto_extract": True,
+        "db_path": str(db_path),
+        "profile_isolation": True,
+    })
+    provider.initialize(
+        "sess-old",
+        hermes_home=str(hermes_home),
+        platform="discord",
+        chat_id="c1",
+        user_id="u1",
+        agent_context="primary",
+    )
+    manager = MemoryManager()
+    manager.add_provider(provider)
+    agent = object.__new__(AIAgent)
+    agent._memory_manager = manager
+    agent._memory_provider_finalized = False
+    agent._memory_provider_finalization_lock = threading.Lock()
+
+    runner = _make_runner(Platform.DISCORD)
+    monkeypatch.setattr("gateway.run.ThreadPoolExecutor", _InlineExecutor)
+    runner._agent_cache_lock = threading.Lock()
+    session_key = build_session_key(_make_source(Platform.DISCORD))
+    runner._agent_cache[session_key] = (agent, "sig")
+    runner.session_store.load_transcript.return_value = transcript
+    runner._async_flush_memories = AsyncMock()
+
+    result = await runner._handle_reset_command(_make_event("/new", Platform.DISCORD))
+    await asyncio.sleep(0)
+
+    assert "Session reset" in result
+    runner.session_store.load_transcript.assert_called_once_with("sess-old")
+    runner.session_store.reset_session.assert_called_once_with(session_key)
+    assert session_key not in runner._agent_cache
+
+    with sqlite3.connect(db_path) as conn:
+        fact = conn.execute(
+            "SELECT category, content, namespace FROM facts"
+        ).fetchone()
+    assert fact == (
+        "user_pref",
+        "Prefers PostgreSQL for analytics workloads.",
+        "discord:c1",
     )
 
 
@@ -513,6 +581,51 @@ async def test_shutdown_fires_finalize_for_active_agents(mock_invoke_hook):
     ]
     session_ids = {c[1]["session_id"] for c in finalize_calls}
     assert session_ids == {"sess-a", "sess-b"}
+
+    # Gateway shutdown is resource release only (Class C) — the durable
+    # conversation is not ending, so it must release provider resources
+    # via release_memory_provider() and must NEVER call
+    # shutdown_memory_provider()/on_session_end() on process termination.
+    agent1.release_memory_provider.assert_called_once()
+    agent2.release_memory_provider.assert_called_once()
+    agent1.shutdown_memory_provider.assert_not_called()
+    agent2.shutdown_memory_provider.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("hermes_cli.plugins.invoke_hook")
+async def test_shutdown_releases_agents_from_agent_cache(mock_invoke_hook):
+    """Gateway stop() must release agents living only in _agent_cache.
+
+    _running_agents is normally empty between turns — the persistent
+    cache (_agent_cache) is where agents actually live, and shutdown must
+    not abandon them unreleased.
+    """
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    runner._background_tasks = set()
+    runner._pending_messages = {}
+    runner._pending_approvals = {}
+    runner._shutdown_event = MagicMock()
+    runner.adapters = {}
+    runner._session_model_overrides = {}
+    runner._exit_reason = "test"
+    runner._running_agents = {}
+
+    agent = MagicMock()
+    agent.session_id = "sess-cached"
+    runner._agent_cache_lock = threading.Lock()
+    runner._agent_cache = {"key-cached": (agent, "sig-1")}
+
+    with patch("gateway.status.remove_pid_file"), \
+         patch("gateway.status.write_runtime_status"):
+        await runner.stop()
+
+    agent.release_memory_provider.assert_called_once()
+    agent.shutdown_memory_provider.assert_not_called()
+    assert runner._agent_cache == {}
 
 
 @pytest.mark.asyncio

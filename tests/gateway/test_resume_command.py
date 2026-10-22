@@ -4,6 +4,7 @@ Tests the _handle_resume_command handler (switch to a previously-named session)
 across gateway messenger platforms.
 """
 
+import threading
 from unittest.mock import MagicMock, AsyncMock
 
 import pytest
@@ -199,6 +200,43 @@ class TestHandleResumeCommand:
         await runner._handle_resume_command(event)
 
         assert real_key not in runner._running_agents
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_releases_and_evicts_cached_agent_without_finalizing(self, tmp_path):
+        """/resume is a session switch (Class B), not a boundary: the old
+        cached agent must be evicted and released, but on_session_end()/
+        shutdown_memory_provider() must NEVER be called — the durable
+        session being left behind remains resumable.
+        """
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("old_session", "telegram")
+        db.set_session_title("old_session", "Old Work")
+        db.create_session("current_session_001", "telegram")
+
+        event = _make_event(text="/resume Old Work")
+        runner = _make_runner(session_db=db, current_session_id="current_session_001",
+                              event=event)
+        real_key = _session_key_for_event(event)
+        cached_agent = MagicMock()
+        runner._agent_cache_lock = threading.Lock()
+        runner._agent_cache = {real_key: (cached_agent, "sig")}
+
+        # Regression guard: release_memory_provider() must never run while
+        # _agent_cache_lock is held, or this acquire deadlocks/fails.
+        def _assert_lock_not_held():
+            acquired = runner._agent_cache_lock.acquire(blocking=False)
+            assert acquired, "release_memory_provider() ran while _agent_cache_lock was held"
+            runner._agent_cache_lock.release()
+
+        cached_agent.release_memory_provider.side_effect = _assert_lock_not_held
+
+        await runner._handle_resume_command(event)
+
+        cached_agent.release_memory_provider.assert_called_once()
+        cached_agent.shutdown_memory_provider.assert_not_called()
+        assert real_key not in runner._agent_cache
         db.close()
 
     @pytest.mark.asyncio

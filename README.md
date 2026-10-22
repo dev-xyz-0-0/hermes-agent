@@ -297,6 +297,17 @@ uv run pytest tests/plugins/memory/test_holographic_lifecycle_stage3.py -q
 
 uv run pytest tests/plugins/memory/test_holographic_fixes.py -q
 
+# Memory-provider lifecycle (session boundaries vs. switches vs. resource release)
+uv run pytest tests/run_agent/test_memory_provider_shutdown.py -q
+uv run pytest tests/run_agent/test_memory_provider_release.py -q
+uv run pytest tests/gateway/test_session_boundary_hooks.py -q
+uv run pytest tests/gateway/test_resume_command.py -q
+uv run pytest tests/gateway/test_branch_command.py -q
+uv run pytest tests/gateway/test_config_signature_release.py -q
+uv run pytest tests/gateway/test_fallback_eviction_release.py -q
+uv run pytest tests/gateway/test_session_expiry_watcher.py -q
+uv run pytest tests/gateway/test_next_message_expiration_fallback.py -q
+
 uv run pytest test_retry_utils.py -q
 
 
