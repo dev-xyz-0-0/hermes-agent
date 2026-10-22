@@ -208,18 +208,32 @@ class TestAutoExtract:
         provider._store = store
         provider._config = {"auto_extract": True}
         provider._hrr_available = True
+        provider._namespace = ""
+        provider._record_source = MagicMock()
         return provider
+
+    @staticmethod
+    def _assert_fact(store, content, category):
+        facts = store.list_facts()
+        assert len(facts) == 1
+        assert facts[0]["content"] == content
+        assert facts[0]["category"] == category
 
     def test_preference_extraction(self, store):
         """'I prefer dark mode' should extract 'prefers dark mode'."""
         provider = self._make_provider(store)
-        provider._auto_extract_facts([
-            {"role": "user", "content": "I prefer dark mode over light mode"}
-        ])
-        facts = store.list_facts(category="user_pref")
-        assert any("dark mode" in f["content"] for f in facts)
-        # Should NOT contain the raw message
-        assert not any("over light mode" not in f["content"] and "I prefer" in f["content"] for f in facts)
+        provider._auto_extract_facts([{"role": "user", "content": "I prefer PostgreSQL for analytics workloads."}])
+        self._assert_fact(store, "Prefers PostgreSQL for analytics workloads.", "user_pref")
+
+    def test_preference_comparison(self, store):
+        provider = self._make_provider(store)
+        provider._auto_extract_facts([{"role": "user", "content": "I prefer dark mode over light mode."}])
+        self._assert_fact(store, "Prefers dark mode over light mode.", "user_pref")
+
+    def test_preference_excludes_trailing_request(self, store):
+        provider = self._make_provider(store)
+        provider._auto_extract_facts([{"role": "user", "content": "I prefer dark mode over light mode, can you help me configure it?"}])
+        self._assert_fact(store, "Prefers dark mode over light mode.", "user_pref")
 
     def test_no_raw_message_dump(self, store):
         """'I like that, sounds good' should NOT be stored as a fact."""
@@ -227,28 +241,48 @@ class TestAutoExtract:
         provider._auto_extract_facts([
             {"role": "user", "content": "I like that, sounds good"}
         ])
-        facts = store.list_facts()
-        # "I like" no longer matches — we removed "like" from the pattern
-        assert not any("I like that" in f["content"] for f in facts)
+        assert store.list_facts() == []
 
     def test_decision_extraction(self, store):
         """'We decided to use PostgreSQL' should extract 'decided to use PostgreSQL'."""
         provider = self._make_provider(store)
-        provider._auto_extract_facts([
-            {"role": "user", "content": "We decided to use PostgreSQL for the backend"}
-        ])
-        facts = store.list_facts(category="project")
-        assert any("PostgreSQL" in f["content"] for f in facts)
-        assert any(f["content"].startswith("decided to") for f in facts)
+        provider._auto_extract_facts([{"role": "user", "content": "We decided to use CommonJS for this Hermes MCP project."}])
+        self._assert_fact(store, "Decided to use CommonJS for this Hermes MCP project.", "project")
+
+    def test_decision_excludes_trailing_question(self, store):
+        provider = self._make_provider(store)
+        provider._auto_extract_facts([{"role": "user", "content": "We decided to use PostgreSQL for analytics, but can you first check whether SQLite would be enough?"}])
+        self._assert_fact(store, "Decided to use PostgreSQL for analytics.", "project")
+
+    def test_project_requirement(self, store):
+        provider = self._make_provider(store)
+        provider._auto_extract_facts([{"role": "user", "content": "The project requires explicit runtime validation."}])
+        self._assert_fact(store, "Requires explicit runtime validation.", "project")
+
+    def test_requirement_excludes_followup_command(self, store):
+        provider = self._make_provider(store)
+        provider._auto_extract_facts([{"role": "user", "content": "The project requires explicit runtime validation. Can you implement it now?"}])
+        self._assert_fact(store, "Requires explicit runtime validation.", "project")
+
+    def test_project_technology(self, store):
+        provider = self._make_provider(store)
+        provider._auto_extract_facts([{"role": "user", "content": "The project uses PostgreSQL."}])
+        self._assert_fact(store, "Uses PostgreSQL.", "project")
 
     def test_habit_extraction(self, store):
-        """'I always check git status' should extract 'always check git status'."""
+        """A stated habit should be normalized to a declarative fact."""
         provider = self._make_provider(store)
         provider._auto_extract_facts([
-            {"role": "user", "content": "I always check git status before committing"}
+            {
+                "role": "user",
+                "content": "I always run git status before committing changes.",
+            }
         ])
-        facts = store.list_facts(category="user_pref")
-        assert any("always check git status" in f["content"] for f in facts)
+        self._assert_fact(
+            store,
+            "Always runs git status before committing changes.",
+            "user_pref",
+        )
 
     def test_assistant_messages_ignored(self, store):
         """Assistant messages should not produce facts."""
@@ -263,10 +297,39 @@ class TestAutoExtract:
         """Messages under 10 chars should be skipped."""
         provider = self._make_provider(store)
         provider._auto_extract_facts([
-            {"role": "user", "content": "I like"}
+            {"role": "user", "content": "I prefer"}
         ])
         facts = store.list_facts()
         assert len(facts) == 0
+
+    @pytest.mark.parametrize("content", [
+        "I want you to add tests for the endpoint.",
+        "Do I prefer PostgreSQL or SQLite?",
+        'You said "I prefer PostgreSQL". Is that correct?',
+    ])
+    def test_non_fact_user_messages_ignored(self, store, content):
+        provider = self._make_provider(store)
+        provider._auto_extract_facts([{"role": "user", "content": content}])
+        assert store.list_facts() == []
+
+    @pytest.mark.parametrize("role", ["system", "tool", "assistant"])
+    def test_non_user_roles_ignored(self, store, role):
+        provider = self._make_provider(store)
+        provider._auto_extract_facts([
+            {"role": role, "content": "I prefer structured outputs."}
+        ])
+        assert store.list_facts() == []
+
+    def test_compaction_summary_ignored(self, store):
+        provider = self._make_provider(store)
+        provider._auto_extract_facts([{
+            "role": "user",
+            "content": (
+                "[CONTEXT COMPACTION] Earlier turns in this conversation were "
+                "compacted to save context space.\nI prefer PostgreSQL."
+            ),
+        }])
+        assert store.list_facts() == []
 
     def test_one_fact_per_message(self, store):
         """A single message should produce at most one fact."""
@@ -277,6 +340,7 @@ class TestAutoExtract:
         facts = store.list_facts(category="user_pref")
         # Should produce at most 1 fact for this message (first match wins)
         assert len([f for f in facts if "Rust" in f["content"]]) <= 1
+        self._assert_fact(store, "Prefers Rust.", "user_pref")
 
     def test_fact_length_capped(self, store):
         """Extracted facts should not exceed 200 characters."""
@@ -286,8 +350,9 @@ class TestAutoExtract:
             {"role": "user", "content": f"I prefer {long_pref}"}
         ])
         facts = store.list_facts()
-        for f in facts:
-            assert len(f["content"]) <= 200
+        assert len(facts) == 1
+        assert facts[0]["category"] == "user_pref"
+        assert len(facts[0]["content"]) <= 200
 
 
 # =========================================================================

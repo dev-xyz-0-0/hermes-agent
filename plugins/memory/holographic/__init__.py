@@ -1517,13 +1517,29 @@ class HolographicMemoryProvider(MemoryProvider):
             return tool_error(str(exc))
 
     def _auto_extract_facts(self, messages: list) -> None:
+        # Match direct statements only.  The lookahead deliberately stops before
+        # a conversational request/question appended with a comma; that text is
+        # not part of the durable fact.
+        fact_end = r"(?=\s*(?:[.!?]|,\s*(?:but\s+)?(?:can|could|would|will)\b|$))"
         patterns = [
-            (re.compile(r"\bI\s+prefer\s+(.+?)(?:\s+(?:over|instead of|rather than)\s+(.+?))?(?:\.|!|$)", re.I), "pref"),
-            (re.compile(r"\bI\s+(?:always|never|usually)\s+(.+?)(?:\.|!|$)", re.I), "habit"),
-            (re.compile(r"\bmy\s+(?:favorite|preferred|default)\s+(\w+)\s+is\s+(.+?)(?:\.|!|$)", re.I), "pref"),
-            (re.compile(r"\bwe\s+(?:decided|agreed|chose)\s+(?:to\s+)?(.+?)(?:\.|!|$)", re.I), "decision"),
-            (re.compile(r"\bthe\s+project\s+(?:uses|needs|requires)\s+(.+?)(?:\.|!|$)", re.I), "project"),
+            (re.compile(rf"^\s*I\s+prefer\s+(.+?){fact_end}", re.I), "pref"),
+            (re.compile(rf"^\s*I\s+(always|never|usually)\s+(.+?){fact_end}", re.I), "habit"),
+            (re.compile(rf"^\s*my\s+(?:favorite|preferred|default)\s+\w+\s+is\s+(.+?){fact_end}", re.I), "pref"),
+            (re.compile(rf"^\s*we\s+(?:decided|agreed|chose)\s+(?:to\s+)?(.+?){fact_end}", re.I), "decision"),
+            (re.compile(rf"^\s*the\s+project\s+(uses|needs|requires)\s+(.+?){fact_end}", re.I), "project"),
         ]
+
+        def _third_person(phrase: str) -> str:
+            """Conjugate the leading verb for a concise third-person habit."""
+            verb, separator, remainder = phrase.partition(" ")
+            lower = verb.lower()
+            if lower.endswith(("s", "x", "z", "ch", "sh", "o")):
+                verb += "es"
+            elif lower.endswith("y") and len(lower) > 1 and lower[-2] not in "aeiou":
+                verb = verb[:-1] + "ies"
+            else:
+                verb += "s"
+            return verb + (separator + remainder if separator else "")
 
         extracted = 0
         for msg in messages:
@@ -1537,26 +1553,23 @@ class HolographicMemoryProvider(MemoryProvider):
                 match = pattern.search(content)
                 if not match:
                     continue
-                groups = [g.strip().rstrip(".,;!") for g in match.groups() if g]
+                groups = [g.strip().rstrip(".,;!?") for g in match.groups() if g]
                 if not groups:
                     continue
 
-                if kind == "pref" and len(groups) >= 2 and " over " in content[match.start() : match.end()].lower():
-                    fact_text = f"prefers {groups[0]} over {groups[1]}"
-                elif kind == "pref":
-                    fact_text = f"prefers {groups[-1] if len(groups) > 1 else groups[0]}"
+                if kind == "pref":
+                    fact_text = f"Prefers {groups[0]}"
                 elif kind == "habit":
-                    span = content[match.start() : match.end()].lower()
-                    habit_word = "always" if "always" in span else ("never" if "never" in span else "usually")
-                    fact_text = f"{habit_word} {groups[0]}"
+                    fact_text = f"{groups[0].capitalize()} {_third_person(groups[1])}"
                 elif kind == "decision":
-                    fact_text = f"decided to {groups[0]}"
+                    fact_text = f"Decided to {groups[0]}"
                 elif kind == "project":
-                    fact_text = f"project requires {groups[0]}"
+                    fact_text = f"{groups[0].capitalize()} {groups[1]}"
                 else:
                     fact_text = groups[0]
 
-                fact_text = fact_text[:200]
+                fact_text = fact_text.rstrip(".")
+                fact_text = (fact_text[:199].rstrip() + ".") if fact_text else ""
                 problem = _fact_problem(fact_text)
                 if problem:
                     break
