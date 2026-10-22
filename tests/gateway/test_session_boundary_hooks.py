@@ -2,6 +2,7 @@
 import asyncio
 from concurrent.futures import Future
 from datetime import datetime
+import json
 import sqlite3
 import threading
 from types import SimpleNamespace
@@ -164,6 +165,192 @@ async def test_telegram_reset_dispatches_transcript_to_holographic_session_end(
         "Prefers PostgreSQL for analytics workloads.",
         "telegram:c1",
     )
+
+
+@pytest.mark.asyncio
+@patch("hermes_cli.plugins.invoke_hook")
+async def test_telegram_reset_preserves_holographic_chat_isolation(
+    mock_invoke_hook, tmp_path, monkeypatch
+):
+    """Two Telegram chats sharing one DB only see their own reset extracts."""
+    from agent.memory_manager import MemoryManager
+    from plugins.memory.holographic import HolographicMemoryProvider
+    from run_agent import AIAgent
+
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    db_path = tmp_path / "shared-holographic.db"
+    provider_config = {
+        "auto_extract": True,
+        "db_path": str(db_path),
+        "profile_isolation": True,
+    }
+
+    def source(chat_id):
+        return SessionSource(
+            platform=Platform.TELEGRAM,
+            user_id="same-profile-user",
+            chat_id=chat_id,
+            user_name="tester",
+            chat_type="dm",
+        )
+
+    sources = {chat_id: source(chat_id) for chat_id in ("chat-a", "chat-b")}
+    session_keys = {
+        chat_id: build_session_key(chat_source)
+        for chat_id, chat_source in sources.items()
+    }
+    transcripts = {
+        "a-old": [
+            {"role": "user", "content": "I prefer PostgreSQL for analytics workloads."},
+            {"role": "assistant", "content": "Understood."},
+        ],
+        "b-old": [
+            {"role": "user", "content": "I prefer SQLite for local prototypes."},
+            {"role": "assistant", "content": "Understood."},
+        ],
+        "b-postgres": [
+            {"role": "user", "content": "I prefer PostgreSQL for analytics workloads."},
+            {"role": "assistant", "content": "Understood."},
+        ],
+    }
+
+    def entry(chat_id, session_id):
+        now = datetime.now()
+        return SessionEntry(
+            session_key=session_keys[chat_id],
+            session_id=session_id,
+            created_at=now,
+            updated_at=now,
+            origin=sources[chat_id],
+            platform=Platform.TELEGRAM,
+            chat_type="dm",
+        )
+
+    runner = _make_runner()
+    monkeypatch.setattr("gateway.run.ThreadPoolExecutor", _InlineExecutor)
+    runner._agent_cache_lock = threading.Lock()
+    runner.session_store._generate_session_key.side_effect = build_session_key
+    runner.session_store._entries = {
+        session_keys["chat-a"]: entry("chat-a", "a-old"),
+        session_keys["chat-b"]: entry("chat-b", "b-old"),
+    }
+    runner.session_store.load_transcript.side_effect = lambda session_id: transcripts[
+        session_id
+    ]
+    reset_count = 0
+
+    def reset_session(session_key):
+        nonlocal reset_count
+        reset_count += 1
+        old_entry = runner.session_store._entries[session_key]
+        chat_id = old_entry.origin.chat_id
+        new_entry = entry(chat_id, f"{chat_id}-new-{reset_count}")
+        runner.session_store._entries[session_key] = new_entry
+        return new_entry
+
+    runner.session_store.reset_session.side_effect = reset_session
+
+    def cached_agent(chat_id, session_id):
+        provider = HolographicMemoryProvider(provider_config)
+        provider.initialize(
+            session_id,
+            hermes_home=str(hermes_home),
+            platform="telegram",
+            chat_id=chat_id,
+            user_id="same-profile-user",
+            agent_identity="default",
+            agent_context="primary",
+        )
+        manager = MemoryManager()
+        manager.add_provider(provider)
+        agent = object.__new__(AIAgent)
+        agent._memory_manager = manager
+        agent._memory_provider_finalized = False
+        agent._memory_provider_finalization_lock = threading.Lock()
+        return agent
+
+    def inspect_chat(chat_id, query=None):
+        provider = HolographicMemoryProvider(provider_config)
+        provider.initialize(
+            f"inspect-{chat_id}",
+            hermes_home=str(hermes_home),
+            platform="telegram",
+            chat_id=chat_id,
+            user_id="same-profile-user",
+            agent_identity="default",
+            agent_context="primary",
+        )
+        try:
+            listed = json.loads(
+                provider.handle_tool_call("fact_store", {"action": "list", "limit": 100})
+            )
+            searched = None
+            if query is not None:
+                searched = json.loads(provider.handle_tool_call(
+                    "fact_store",
+                    {"action": "search", "query": query, "limit": 100},
+                ))
+            return listed, searched
+        finally:
+            provider.shutdown()
+
+    async def reset_chat(chat_id, session_id):
+        session_key = session_keys[chat_id]
+        agent = cached_agent(chat_id, session_id)
+        runner._agent_cache[session_key] = (agent, f"sig-{session_id}")
+        result = await runner._handle_reset_command(
+            MessageEvent(text="/new", source=sources[chat_id], message_id=session_id)
+        )
+        assert "Session reset" in result
+        assert session_key not in runner._agent_cache
+
+    postgres = "Prefers PostgreSQL for analytics workloads."
+    sqlite = "Prefers SQLite for local prototypes."
+
+    await reset_chat("chat-a", "a-old")
+    a_list, a_postgres = inspect_chat("chat-a", "PostgreSQL")
+    assert [fact["content"] for fact in a_list["facts"]] == [postgres]
+    assert [fact["content"] for fact in a_postgres["results"]] == [postgres]
+
+    b_list, b_postgres = inspect_chat("chat-b", "PostgreSQL")
+    assert b_list == {"facts": [], "count": 0}
+    assert b_postgres == {"results": [], "count": 0}
+
+    await reset_chat("chat-b", "b-old")
+    a_list, a_sqlite = inspect_chat("chat-a", "SQLite")
+    b_list, b_sqlite = inspect_chat("chat-b", "SQLite")
+    _, a_postgres = inspect_chat("chat-a", "PostgreSQL")
+    _, b_postgres = inspect_chat("chat-b", "PostgreSQL")
+    assert {fact["content"] for fact in a_list["facts"]} == {postgres}
+    assert a_sqlite["count"] == 0
+    assert a_postgres["count"] == 1
+    assert {fact["content"] for fact in b_list["facts"]} == {sqlite}
+    assert b_sqlite["count"] == 1
+    assert b_postgres["count"] == 0
+
+    runner.session_store._entries[session_keys["chat-b"]] = entry(
+        "chat-b", "b-postgres"
+    )
+    await reset_chat("chat-b", "b-postgres")
+    a_list, a_postgres = inspect_chat("chat-a", "PostgreSQL")
+    b_list, b_postgres = inspect_chat("chat-b", "PostgreSQL")
+    assert [fact["content"] for fact in a_list["facts"]] == [postgres]
+    assert a_postgres["count"] == 1
+    assert {fact["content"] for fact in b_list["facts"]} == {sqlite, postgres}
+    assert b_postgres["count"] == 1
+
+    assert runner.session_store.reset_session.call_count == 3
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT content, namespace FROM facts WHERE content = ? ORDER BY namespace",
+            (postgres,),
+        ).fetchall()
+    assert rows == [
+        (postgres, "telegram:chat-a"),
+        (postgres, "telegram:chat-b"),
+    ]
 
 
 @pytest.mark.asyncio
