@@ -136,6 +136,8 @@ async def test_telegram_reset_dispatches_transcript_to_holographic_session_end(
     manager.add_provider(provider)
     agent = object.__new__(AIAgent)
     agent._memory_manager = manager
+    agent._memory_provider_finalized = False
+    agent._memory_provider_finalization_lock = threading.Lock()
 
     runner = _make_runner()
     monkeypatch.setattr("gateway.run.ThreadPoolExecutor", _InlineExecutor)

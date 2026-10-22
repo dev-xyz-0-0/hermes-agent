@@ -623,6 +623,13 @@ class AIAgent:
         self._interrupt_requested = False
         self._interrupt_message = None  # Optional message that triggered interrupt
         self._client_lock = threading.RLock()
+
+        # Memory-provider finalization is a terminal, at-most-once lifecycle
+        # transition. Cleanup can be requested concurrently by independent
+        # session-boundary paths, so guard the transition separately from
+        # provider work and never hold this lock while calling plugin code.
+        self._memory_provider_finalized = False
+        self._memory_provider_finalization_lock = threading.Lock()
         
         # Subagent delegation state
         self._delegate_depth = 0        # 0 = top-level agent, incremented for children
@@ -2549,17 +2556,29 @@ class AIAgent:
 
         This calls on_session_end() then shutdown_all() on the memory
         manager. NOT called per-turn — only at CLI exit, /reset, gateway
-        session expiry, etc.
+        session expiry, etc. Finalization is terminal and happens at most once
+        for this agent, including when provider callbacks fail.
         """
+        with self._memory_provider_finalization_lock:
+            if self._memory_provider_finalized:
+                return
+            self._memory_provider_finalized = True
+
         if self._memory_manager:
             try:
                 self._memory_manager.on_session_end(messages or [])
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Memory provider session finalization failed: %s", exc,
+                    exc_info=True,
+                )
             try:
                 self._memory_manager.shutdown_all()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Memory provider shutdown failed: %s", exc,
+                    exc_info=True,
+                )
     
     def _hydrate_todo_store(self, history: List[Dict[str, Any]]) -> None:
         """
