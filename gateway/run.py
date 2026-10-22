@@ -24,6 +24,7 @@ import signal
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Any, List
@@ -3365,10 +3366,56 @@ class GatewayRunner:
         # Get existing session key
         session_key = self._session_key_for_source(source)
         
-        # Flush memories in the background (fire-and-forget) so the user
-        # gets the "Session reset!" response immediately.
+        old_entry = None
         try:
             old_entry = self.session_store._entries.get(session_key)
+        except Exception as e:
+            logger.debug("Could not resolve session being reset: %s", e)
+
+        # Telegram memory providers are scoped to the cached agent. Finalize
+        # that exact provider with the persisted old transcript before either
+        # the agent or old session identity is discarded.
+        cached_agent = None
+        if source.platform == Platform.TELEGRAM and old_entry:
+            try:
+                old_transcript = self.session_store.load_transcript(old_entry.session_id)
+            except Exception as e:
+                old_transcript = []
+                logger.warning(
+                    "Failed to load transcript before Telegram session reset for %s: %s",
+                    old_entry.session_id, e,
+                )
+
+            cache_lock = getattr(self, "_agent_cache_lock", None)
+            cache = getattr(self, "_agent_cache", None)
+            if cache_lock and cache is not None:
+                with cache_lock:
+                    cached = cache.get(session_key)
+                    if cached:
+                        cached_agent = cached[0]
+
+            if cached_agent and hasattr(cached_agent, "shutdown_memory_provider"):
+                try:
+                    # Use a dedicated executor rather than the event loop's
+                    # shared pool: finalization is awaited and this worker is
+                    # guaranteed to be reaped at the session boundary.
+                    with ThreadPoolExecutor(
+                        max_workers=1, thread_name_prefix="memory-finalize"
+                    ) as executor:
+                        await asyncio.get_running_loop().run_in_executor(
+                            executor,
+                            cached_agent.shutdown_memory_provider,
+                            old_transcript,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "Memory provider finalization failed before Telegram "
+                        "session reset for %s: %s",
+                        old_entry.session_id, e,
+                    )
+
+        # Preserve the existing built-in memory flush as a background task.
+        try:
             if old_entry:
                 _flush_task = asyncio.create_task(
                     self._async_flush_memories(old_entry.session_id)
@@ -3377,7 +3424,17 @@ class GatewayRunner:
                 _flush_task.add_done_callback(self._background_tasks.discard)
         except Exception as e:
             logger.debug("Gateway memory flush on reset failed: %s", e)
-        self._evict_cached_agent(session_key)
+
+        if cached_agent is not None:
+            cache_lock = getattr(self, "_agent_cache_lock", None)
+            cache = getattr(self, "_agent_cache", None)
+            if cache_lock and cache is not None:
+                with cache_lock:
+                    cached = cache.get(session_key)
+                    if cached and cached[0] is cached_agent:
+                        cache.pop(session_key, None)
+        else:
+            self._evict_cached_agent(session_key)
         
         try:
             from tools.env_passthrough import clear_env_passthrough
