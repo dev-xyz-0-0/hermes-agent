@@ -11,8 +11,6 @@ column rather than FTS5 search — avoiding ranking limits and
 ``retrieval_count`` side effects (per teknium1's review on PR #55098).
 """
 
-import pytest
-
 from plugins.memory.holographic import HolographicMemoryProvider
 
 
@@ -30,15 +28,18 @@ def _make_provider(tmp_path):
 
 class TestOnMemoryWriteAdd:
     def test_add_action_creates_fact(self, tmp_path):
+        # Deliberately not a recognized durable-fact pattern (see
+        # TestMirrorCanonicalization below for that) — this test is about
+        # the generic verbatim add path.
         provider = _make_provider(tmp_path)
-        provider.on_memory_write("add", "memory", "The project uses pytest")
+        provider.on_memory_write("add", "memory", "Repository default branch is main")
 
         row = provider._store._conn.execute(
             "SELECT content, category FROM facts WHERE content = ?",
-            ("The project uses pytest",),
+            ("Repository default branch is main",),
         ).fetchone()
         assert row is not None
-        assert row["content"] == "The project uses pytest"
+        assert row["content"] == "Repository default branch is main"
         assert row["category"] == "general"
 
     def test_add_to_user_target_uses_user_pref_category(self, tmp_path):
@@ -118,7 +119,13 @@ class TestOnMemoryWriteReplace:
         assert row is not None
 
     def test_replace_falls_back_to_add_when_metadata_missing_old_text(self, tmp_path):
-        """metadata dict present but old_text key absent — graceful fallback."""
+        """metadata dict present but old_text key absent — graceful fallback.
+
+        "User prefers emacs" is itself a recognized built-in-memory pattern
+        (see TestMirrorCanonicalization), so the fallback add canonicalizes
+        it to "Prefers emacs." — this also pins that canonicalization still
+        applies on the replace-fallback-to-add path, not just plain add.
+        """
         provider = _make_provider(tmp_path)
         provider.on_memory_write(
             "replace", "user", "User prefers emacs",
@@ -126,10 +133,11 @@ class TestOnMemoryWriteReplace:
         )
 
         row = provider._store._conn.execute(
-            "SELECT content FROM facts WHERE content = ?",
-            ("User prefers emacs",),
+            "SELECT content, category FROM facts WHERE content = ?",
+            ("Prefers emacs.",),
         ).fetchone()
         assert row is not None
+        assert row["category"] == "user_pref"
 
 
 # ---------------------------------------------------------------------------
@@ -404,3 +412,208 @@ class TestReplaceUniqueCollision:
         facts = provider._store.list_facts(limit=100)
         assert len(facts) == 1
         assert facts[0]["content"] == "Fact B"
+
+
+# ---------------------------------------------------------------------------
+# Cross-path duplication: built-in mirror vs. auto_extract now canonicalize
+# the same durable preference into the SAME string, so the existing
+# (content, namespace) UNIQUE constraint naturally deduplicates them. See
+# _canonicalize_memory_fact() in plugins/memory/holographic/__init__.py,
+# shared by both on_memory_write() (mirror) and _auto_extract_facts().
+# ---------------------------------------------------------------------------
+
+_RUFF_SENTENCE = "I prefer using Ruff for Python linting in Hermes projects."
+_RUFF_CANONICAL = "Prefers using Ruff for Python linting in Hermes projects."
+
+
+def _namespaced_provider(tmp_path, *, auto_extract: bool = True):
+    """Provider initialised with a multi-tenant namespace, matching production
+    (telegram:<chat_id>), and auto_extract enabled so on_session_end actually
+    runs _auto_extract_facts()."""
+    db_path = str(tmp_path / "memory_store.db")
+    provider = HolographicMemoryProvider(
+        config={"db_path": db_path, "hrr_dim": 64, "auto_extract": auto_extract}
+    )
+    provider.initialize(session_id="test-session", platform="telegram", chat_id="test-chat")
+    return provider
+
+
+def _fact_count(provider, namespace: str) -> int:
+    rows = provider._store._conn.execute(
+        "SELECT COUNT(*) AS c FROM facts WHERE namespace = ?", (namespace,)
+    ).fetchone()
+    return int(rows["c"])
+
+
+class TestMirrorVsAutoExtractDuplication:
+    def test_mirror_then_auto_extract_yields_one_fact(self, tmp_path):
+        provider = _namespaced_provider(tmp_path)
+        assert provider._namespace == "telegram:test-chat"
+
+        # Path 1: built-in memory tool mirror.
+        provider.on_memory_write("add", "user", _RUFF_SENTENCE)
+
+        # Path 2: session-end auto_extract over the same transcript sentence.
+        provider.on_session_end([{"role": "user", "content": _RUFF_SENTENCE}])
+
+        assert _fact_count(provider, "telegram:test-chat") == 1
+        assert provider._find_fact_id_by_content(_RUFF_CANONICAL) is not None
+
+    def test_auto_extract_then_mirror_yields_one_fact(self, tmp_path):
+        """Reverse ordering: auto_extract fires first (e.g. mid-session
+        compression), then the built-in mirror write lands afterward."""
+        provider = _namespaced_provider(tmp_path)
+
+        provider.on_session_end([{"role": "user", "content": _RUFF_SENTENCE}])
+        provider.on_memory_write("add", "user", _RUFF_SENTENCE)
+
+        assert _fact_count(provider, "telegram:test-chat") == 1
+        assert provider._find_fact_id_by_content(_RUFF_CANONICAL) is not None
+
+    def test_mirror_canonicalizes_recognized_pattern_to_match_auto_extract(self, tmp_path):
+        """The built-in mirror now canonicalizes a recognized 'I prefer X'
+        sentence to the same third-person form auto_extract produces —
+        this is the fix: both paths converge on identical text."""
+        provider = _namespaced_provider(tmp_path)
+        provider.on_memory_write("add", "user", _RUFF_SENTENCE)
+
+        assert provider._find_fact_id_by_content(_RUFF_CANONICAL) is not None
+        assert provider._find_fact_id_by_content(_RUFF_SENTENCE) is None
+
+    def test_auto_extract_produces_canonical_third_person_form(self, tmp_path):
+        """Confirms the auto_extract path rewrites 'I prefer X' to 'Prefers X.'"""
+        provider = _namespaced_provider(tmp_path)
+        provider.on_session_end([{"role": "user", "content": _RUFF_SENTENCE}])
+
+        assert provider._find_fact_id_by_content(_RUFF_CANONICAL) is not None
+        assert provider._find_fact_id_by_content(_RUFF_SENTENCE) is None
+
+
+class TestMirrorCanonicalization:
+    """Part 3/4: mirrored built-in-memory writes canonicalize recognized
+    durable-fact patterns (both first-person 'I ...' and the built-in
+    memory tool's own third-person 'User ...' wording) but leave
+    unrecognized/arbitrary content exactly as given."""
+
+    _RUFF_BUILTIN_WORDING = "User prefers using Ruff for Python linting in Hermes projects."
+
+    def test_user_prefers_wording_canonicalizes(self, tmp_path):
+        provider = _namespaced_provider(tmp_path)
+        provider.on_memory_write("add", "user", self._RUFF_BUILTIN_WORDING)
+
+        assert provider._find_fact_id_by_content(_RUFF_CANONICAL) is not None
+
+    def test_user_prefers_then_i_prefer_auto_extract_converge(self, tmp_path):
+        """Part 8: built-in-memory wording mirrored first, then auto_extract
+        over the first-person phrasing of the same fact — one fact."""
+        provider = _namespaced_provider(tmp_path)
+        provider.on_memory_write("add", "user", self._RUFF_BUILTIN_WORDING)
+        provider.on_session_end([{"role": "user", "content": _RUFF_SENTENCE}])
+
+        assert _fact_count(provider, "telegram:test-chat") == 1
+        assert provider._find_fact_id_by_content(_RUFF_CANONICAL) is not None
+
+    def test_i_prefer_auto_extract_then_user_prefers_mirror_converge(self, tmp_path):
+        """Reverse of the above ordering."""
+        provider = _namespaced_provider(tmp_path)
+        provider.on_session_end([{"role": "user", "content": _RUFF_SENTENCE}])
+        provider.on_memory_write("add", "user", self._RUFF_BUILTIN_WORDING)
+
+        assert _fact_count(provider, "telegram:test-chat") == 1
+        assert provider._find_fact_id_by_content(_RUFF_CANONICAL) is not None
+
+    def test_arbitrary_codename_fact_untouched(self, tmp_path):
+        provider = _namespaced_provider(tmp_path)
+        text = "Project codename is I Prefer Ruff."
+        provider.on_memory_write("add", "memory", text)
+
+        assert provider._find_fact_id_by_content(text) is not None
+        assert provider._find_fact_id_by_content("Prefers Ruff.") is None
+
+    def test_quoted_customer_statement_untouched(self, tmp_path):
+        provider = _namespaced_provider(tmp_path)
+        text = 'The customer said "I prefer PostgreSQL".'
+        provider.on_memory_write("add", "memory", text)
+
+        assert provider._find_fact_id_by_content(text) is not None
+        assert provider._find_fact_id_by_content("Prefers PostgreSQL.") is None
+
+    def test_documentation_example_untouched(self, tmp_path):
+        provider = _namespaced_provider(tmp_path)
+        text = "Documentation example: User prefers dark mode."
+        provider.on_memory_write("add", "memory", text)
+
+        assert provider._find_fact_id_by_content(text) is not None
+        assert provider._find_fact_id_by_content("Prefers dark mode.") is None
+
+
+class TestMirrorCanonicalizationReplaceRemove:
+    """Part 12: replace/remove must still locate the canonicalized fact via
+    its original (pre-canonicalization) old_text."""
+
+    def test_replace_recognized_pattern_updates_canonical_fact(self, tmp_path):
+        provider = _namespaced_provider(tmp_path)
+        provider.on_memory_write("add", "user", "I prefer Ruff.")
+        assert provider._find_fact_id_by_content("Prefers Ruff.") is not None
+
+        provider.on_memory_write(
+            "replace", "user", "I prefer Black.",
+            metadata={"old_text": "I prefer Ruff."},
+        )
+
+        assert provider._find_fact_id_by_content("Prefers Ruff.") is None
+        assert provider._find_fact_id_by_content("Prefers Black.") is not None
+
+    def test_remove_recognized_pattern_removes_canonical_fact(self, tmp_path):
+        provider = _namespaced_provider(tmp_path)
+        provider.on_memory_write("add", "user", "I prefer Black.")
+        assert provider._find_fact_id_by_content("Prefers Black.") is not None
+
+        provider.on_memory_write(
+            "remove", "user", "",
+            metadata={"old_text": "I prefer Black."},
+        )
+
+        assert provider._find_fact_id_by_content("Prefers Black.") is None
+
+
+class TestDistinctPreferencesPreserved:
+    """Any eventual fix must not collapse genuinely different preferences."""
+
+    def test_ruff_and_black_remain_distinct_via_auto_extract(self, tmp_path):
+        provider = _namespaced_provider(tmp_path)
+        provider.on_session_end([
+            {"role": "user", "content": "I prefer Ruff for linting."},
+            {"role": "user", "content": "I prefer Black for formatting."},
+        ])
+        assert _fact_count(provider, "telegram:test-chat") == 2
+
+    def test_postgres_analytics_and_production_remain_distinct(self, tmp_path):
+        provider = _namespaced_provider(tmp_path)
+        provider.on_memory_write("add", "user", "Prefers PostgreSQL for analytics workloads.")
+        provider.on_memory_write("add", "user", "Prefers PostgreSQL for production workloads.")
+        assert _fact_count(provider, "telegram:test-chat") == 2
+
+    def test_identical_canonical_fact_in_different_namespaces_both_valid(self, tmp_path):
+        db_path = str(tmp_path / "memory_store.db")
+        provider_a = HolographicMemoryProvider(config={"db_path": db_path, "hrr_dim": 64})
+        provider_a.initialize(session_id="s-a", platform="telegram", chat_id="chat-a")
+        provider_b = HolographicMemoryProvider(config={"db_path": db_path, "hrr_dim": 64})
+        provider_b.initialize(session_id="s-b", platform="telegram", chat_id="chat-b")
+
+        provider_a.on_memory_write("add", "user", _RUFF_CANONICAL)
+        provider_b.on_memory_write("add", "user", _RUFF_CANONICAL)
+
+        assert _fact_count(provider_a, "telegram:chat-a") == 1
+        assert _fact_count(provider_b, "telegram:chat-b") == 1
+
+    def test_arbitrary_memory_mentioning_prefer_is_not_rewritten(self, tmp_path):
+        """A fact that happens to contain 'I prefer' as part of an arbitrary
+        explicit note must not be mistaken for a canonicalizable preference
+        by any future fix — pinned here as a guardrail."""
+        provider = _namespaced_provider(tmp_path)
+        arbitrary = "Project codename is I Prefer Ruff."
+        provider.on_memory_write("add", "memory", arbitrary)
+
+        assert provider._find_fact_id_by_content(arbitrary) is not None
+        assert provider._find_fact_id_by_content("Prefers Ruff.") is None

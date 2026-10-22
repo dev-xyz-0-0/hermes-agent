@@ -259,6 +259,83 @@ def _fact_problem(content: str) -> str | None:
     return None
 
 
+# Lookahead deliberately stops before a conversational request/question
+# appended with a comma; that text is not part of the durable fact.
+_FACT_END = r"(?=\s*(?:[.!?]|,\s*(?:but\s+)?(?:can|could|would|will)\b|$))"
+
+# (pattern, kind, needs_conjugation). Start-anchored (^) so each pattern only
+# recognizes a sentence that IS the fact, never one that merely mentions a
+# trigger phrase mid-sentence (e.g. 'The customer said "I prefer Postgres"').
+# "user ..." variants match the built-in memory tool's own third-person
+# wording (e.g. "User prefers Ruff.") and need no re-conjugation.
+_FACT_PATTERNS = [
+    (re.compile(rf"^\s*I\s+prefer\s+(.+?){_FACT_END}", re.I), "pref", False),
+    (re.compile(rf"^\s*user\s+prefers\s+(.+?){_FACT_END}", re.I), "pref", False),
+    (re.compile(rf"^\s*I\s+(always|never|usually)\s+(.+?){_FACT_END}", re.I), "habit", True),
+    (re.compile(rf"^\s*user\s+(always|never|usually)\s+(.+?){_FACT_END}", re.I), "habit", False),
+    (re.compile(rf"^\s*my\s+(?:favorite|preferred|default)\s+\w+\s+is\s+(.+?){_FACT_END}", re.I), "pref", False),
+    (re.compile(rf"^\s*we\s+(?:decided|agreed|chose)\s+(?:to\s+)?(.+?){_FACT_END}", re.I), "decision", False),
+    (re.compile(rf"^\s*the\s+project\s+(uses|needs|requires)\s+(.+?){_FACT_END}", re.I), "project", False),
+]
+
+
+def _third_person(phrase: str) -> str:
+    """Conjugate the leading verb for a concise third-person habit."""
+    verb, separator, remainder = phrase.partition(" ")
+    lower = verb.lower()
+    if lower.endswith(("s", "x", "z", "ch", "sh", "o")):
+        verb += "es"
+    elif lower.endswith("y") and len(lower) > 1 and lower[-2] not in "aeiou":
+        verb = verb[:-1] + "ies"
+    else:
+        verb += "s"
+    return verb + (separator + remainder if separator else "")
+
+
+def _canonicalize_memory_fact(text: str) -> "tuple[str, str] | None":
+    """Deterministically rewrite a recognized durable-fact sentence into
+    Holographic's canonical third-person form.
+
+    Shared by ``_auto_extract_facts()`` (conversation transcripts) and
+    ``on_memory_write()`` (built-in memory tool mirroring) so both write
+    paths converge on identical text for the same underlying fact, letting
+    the ``(content, namespace)`` UNIQUE constraint deduplicate them.
+
+    Returns ``(category, canonical_text)``, or ``None`` if no supported
+    pattern matches — callers must then store the original content
+    verbatim rather than guessing at a transformation.
+    """
+    if not isinstance(text, str):
+        return None
+    for pattern, kind, needs_conjugation in _FACT_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        groups = [g.strip().rstrip(".,;!?") for g in match.groups() if g]
+        if not groups:
+            continue
+
+        if kind == "pref":
+            fact_text = f"Prefers {groups[0]}"
+        elif kind == "habit":
+            verb_phrase = _third_person(groups[1]) if needs_conjugation else groups[1]
+            fact_text = f"{groups[0].capitalize()} {verb_phrase}"
+        elif kind == "decision":
+            fact_text = f"Decided to {groups[0]}"
+        elif kind == "project":
+            fact_text = f"{groups[0].capitalize()} {groups[1]}"
+        else:
+            fact_text = groups[0]
+
+        fact_text = fact_text.rstrip(".")
+        fact_text = (fact_text[:199].rstrip() + ".") if fact_text else ""
+        if not fact_text or _fact_problem(fact_text):
+            return None
+        category = "user_pref" if kind in {"pref", "habit"} else "project"
+        return category, fact_text
+    return None
+
+
 def preview_capture(
     text: str,
     *,
@@ -1148,26 +1225,50 @@ class HolographicMemoryProvider(MemoryProvider):
         if content and _fact_problem(content):
             return
 
-        category = "user_pref" if target == "user" else "general"
+        default_category = "user_pref" if target == "user" else "general"
         old_text = (metadata or {}).get("previous_content") or (metadata or {}).get("old_text", "")
+
+        def _mirrored_content(raw: str) -> tuple[str, str]:
+            """Canonicalize a recognized durable-fact sentence to converge
+            with auto_extract's output; otherwise store it verbatim."""
+            canonical = _canonicalize_memory_fact(raw)
+            if canonical is not None:
+                return canonical
+            return default_category, raw
+
+        def _resolve_fact_id(raw_old_text: str) -> Optional[int]:
+            """Look up a previously mirrored/extracted fact by its old text,
+            trying the canonical form first (since add/replace may have
+            stored that instead of the raw sentence) and falling back to
+            the raw text for facts stored before canonicalization applied."""
+            if not raw_old_text:
+                return None
+            canonical = _canonicalize_memory_fact(raw_old_text)
+            if canonical is not None:
+                fact_id = self._find_fact_id_by_content(canonical[1])
+                if fact_id is not None:
+                    return fact_id
+            return self._find_fact_id_by_content(raw_old_text)
 
         try:
             if action == "add" and content:
-                fact_id = self._store.add_fact(content, category=category, namespace=self._namespace)
+                category, stored_content = _mirrored_content(content)
+                fact_id = self._store.add_fact(stored_content, category=category, namespace=self._namespace)
                 self._record_source(fact_id, "mirror")
             elif action == "replace" and content:
-                fact_id = self._find_fact_id_by_content(old_text) if old_text else None
+                category, stored_content = _mirrored_content(content)
+                fact_id = _resolve_fact_id(old_text)
                 if fact_id is not None:
                     try:
-                        self._store.update_fact(fact_id, content=content, namespace=self._namespace)
+                        self._store.update_fact(fact_id, content=stored_content, namespace=self._namespace)
                         self._record_source(fact_id, "mirror")
                     except sqlite3.IntegrityError:
                         self._store.remove_fact(fact_id, namespace=self._namespace, tombstone=False)
                 else:
-                    fact_id = self._store.add_fact(content, category=category, namespace=self._namespace)
+                    fact_id = self._store.add_fact(stored_content, category=category, namespace=self._namespace)
                     self._record_source(fact_id, "mirror")
             elif action == "remove" and old_text:
-                fact_id = self._find_fact_id_by_content(old_text)
+                fact_id = _resolve_fact_id(old_text)
                 if fact_id is not None:
                     self._store.remove_fact(fact_id, namespace=self._namespace, tombstone=True)
         except Exception as exc:
@@ -1517,30 +1618,7 @@ class HolographicMemoryProvider(MemoryProvider):
             return tool_error(str(exc))
 
     def _auto_extract_facts(self, messages: list) -> None:
-        # Match direct statements only.  The lookahead deliberately stops before
-        # a conversational request/question appended with a comma; that text is
-        # not part of the durable fact.
-        fact_end = r"(?=\s*(?:[.!?]|,\s*(?:but\s+)?(?:can|could|would|will)\b|$))"
-        patterns = [
-            (re.compile(rf"^\s*I\s+prefer\s+(.+?){fact_end}", re.I), "pref"),
-            (re.compile(rf"^\s*I\s+(always|never|usually)\s+(.+?){fact_end}", re.I), "habit"),
-            (re.compile(rf"^\s*my\s+(?:favorite|preferred|default)\s+\w+\s+is\s+(.+?){fact_end}", re.I), "pref"),
-            (re.compile(rf"^\s*we\s+(?:decided|agreed|chose)\s+(?:to\s+)?(.+?){fact_end}", re.I), "decision"),
-            (re.compile(rf"^\s*the\s+project\s+(uses|needs|requires)\s+(.+?){fact_end}", re.I), "project"),
-        ]
-
-        def _third_person(phrase: str) -> str:
-            """Conjugate the leading verb for a concise third-person habit."""
-            verb, separator, remainder = phrase.partition(" ")
-            lower = verb.lower()
-            if lower.endswith(("s", "x", "z", "ch", "sh", "o")):
-                verb += "es"
-            elif lower.endswith("y") and len(lower) > 1 and lower[-2] not in "aeiou":
-                verb = verb[:-1] + "ies"
-            else:
-                verb += "s"
-            return verb + (separator + remainder if separator else "")
-
+        # Match direct statements only — see _canonicalize_memory_fact().
         extracted = 0
         for msg in messages:
             if msg.get("role") != "user":
@@ -1549,38 +1627,16 @@ class HolographicMemoryProvider(MemoryProvider):
             if not isinstance(content, str) or len(content) < 10:
                 continue
 
-            for pattern, kind in patterns:
-                match = pattern.search(content)
-                if not match:
-                    continue
-                groups = [g.strip().rstrip(".,;!?") for g in match.groups() if g]
-                if not groups:
-                    continue
-
-                if kind == "pref":
-                    fact_text = f"Prefers {groups[0]}"
-                elif kind == "habit":
-                    fact_text = f"{groups[0].capitalize()} {_third_person(groups[1])}"
-                elif kind == "decision":
-                    fact_text = f"Decided to {groups[0]}"
-                elif kind == "project":
-                    fact_text = f"{groups[0].capitalize()} {groups[1]}"
-                else:
-                    fact_text = groups[0]
-
-                fact_text = fact_text.rstrip(".")
-                fact_text = (fact_text[:199].rstrip() + ".") if fact_text else ""
-                problem = _fact_problem(fact_text)
-                if problem:
-                    break
-                category = "user_pref" if kind in {"pref", "habit"} else "project"
-                try:
-                    fact_id = self._store.add_fact(fact_text, category=category, namespace=getattr(self, "_namespace", ""))
-                    self._record_source(fact_id, "auto_extract")
-                    extracted += 1
-                except Exception:
-                    pass
-                break
+            canonical = _canonicalize_memory_fact(content)
+            if canonical is None:
+                continue
+            category, fact_text = canonical
+            try:
+                fact_id = self._store.add_fact(fact_text, category=category, namespace=getattr(self, "_namespace", ""))
+                self._record_source(fact_id, "auto_extract")
+                extracted += 1
+            except Exception:
+                pass
 
         if extracted:
             logger.info("Auto-extracted %d facts from conversation", extracted)

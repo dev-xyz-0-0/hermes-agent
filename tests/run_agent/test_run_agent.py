@@ -1063,12 +1063,18 @@ class TestExecuteToolCalls:
                 _mock_assistant_msg(content="", tool_calls=[tc]), [], "task-1"
             )
 
+        # "User prefers PostgreSQL." is a recognized built-in-memory wording
+        # (see _canonicalize_memory_fact) and is canonicalized to the same
+        # third-person form auto_extract would produce — not stored verbatim.
         execute(
             {"action": "add", "target": "user", "content": "User prefers PostgreSQL."},
             "m1",
         )
-        assert provider._find_fact_id_by_content("User prefers PostgreSQL.") is not None
+        assert provider._find_fact_id_by_content("User prefers PostgreSQL.") is None
+        assert provider._find_fact_id_by_content("Prefers PostgreSQL.") is not None
 
+        # replace/remove still locate the fact via the original (raw,
+        # pre-canonicalization) old_text the model would naturally send.
         execute(
             {
                 "action": "replace",
@@ -1078,9 +1084,9 @@ class TestExecuteToolCalls:
             },
             "m2",
         )
-        assert provider._find_fact_id_by_content("User prefers PostgreSQL.") is None
+        assert provider._find_fact_id_by_content("Prefers PostgreSQL.") is None
         assert provider._find_fact_id_by_content(
-            "User prefers PostgreSQL for analytics."
+            "Prefers PostgreSQL for analytics."
         ) is not None
 
         execute(
@@ -1092,7 +1098,7 @@ class TestExecuteToolCalls:
             "m3",
         )
         assert provider._find_fact_id_by_content(
-            "User prefers PostgreSQL for analytics."
+            "Prefers PostgreSQL for analytics."
         ) is None
         assert provider._store.list_facts(namespace="telegram:c1") == []
         provider.shutdown()
