@@ -29,6 +29,7 @@ Usage in run_agent.py:
 from __future__ import annotations
 
 import logging
+import inspect
 import re
 from typing import Any, Dict, List, Optional
 
@@ -305,16 +306,36 @@ class MemoryManager:
                 )
         return "\n\n".join(parts)
 
-    def on_memory_write(self, action: str, target: str, content: str) -> None:
+    def on_memory_write(
+        self,
+        action: str,
+        target: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Notify external providers when the built-in memory tool writes.
 
         Skips the builtin provider itself (it's the source of the write).
+        Providers using the legacy three-argument hook remain supported.
         """
         for provider in self._providers:
             if provider.name == "builtin":
                 continue
             try:
-                provider.on_memory_write(action, target, content)
+                try:
+                    parameters = inspect.signature(provider.on_memory_write).parameters
+                    supports_metadata = "metadata" in parameters or any(
+                        parameter.kind == inspect.Parameter.VAR_KEYWORD
+                        for parameter in parameters.values()
+                    )
+                except (TypeError, ValueError):
+                    supports_metadata = False
+                if supports_metadata:
+                    provider.on_memory_write(
+                        action, target, content, metadata=metadata or {}
+                    )
+                else:
+                    provider.on_memory_write(action, target, content)
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' on_memory_write failed: %s",

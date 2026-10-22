@@ -963,6 +963,141 @@ class TestFormatToolsForSystemMessage:
 
 
 class TestExecuteToolCalls:
+    def test_sequential_memory_add_notifies_after_success(self, agent):
+        args = {"action": "add", "target": "user", "content": "User prefers PostgreSQL."}
+        tc = _mock_tool_call(name="memory", arguments=json.dumps(args), call_id="m1")
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        agent._memory_manager = MagicMock()
+
+        with patch(
+            "tools.memory_tool.memory_tool", return_value='{"success": true}'
+        ) as memory_tool:
+            agent._execute_tool_calls_sequential(mock_msg, [], "task-1")
+
+        memory_tool.assert_called_once()
+        agent._memory_manager.on_memory_write.assert_called_once_with(
+            "add", "user", "User prefers PostgreSQL.", metadata={}
+        )
+
+    @pytest.mark.parametrize(
+        "result",
+        ['{"success": false, "error": "failed"}', "not-json", "[]"],
+    )
+    def test_sequential_memory_failure_does_not_notify(self, agent, result):
+        args = {"action": "add", "target": "user", "content": "value"}
+        tc = _mock_tool_call(name="memory", arguments=json.dumps(args), call_id="m1")
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        agent._memory_manager = MagicMock()
+
+        with patch("tools.memory_tool.memory_tool", return_value=result):
+            agent._execute_tool_calls_sequential(mock_msg, [], "task-1")
+
+        agent._memory_manager.on_memory_write.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            (
+                {"action": "add", "target": "user", "content": "new"},
+                ("add", "user", "new", {"metadata": {}}),
+            ),
+            (
+                {"action": "replace", "target": "memory", "content": "new", "old_text": "old"},
+                ("replace", "memory", "new", {"metadata": {"old_text": "old"}}),
+            ),
+            (
+                {"action": "remove", "target": "memory", "old_text": "old"},
+                ("remove", "memory", "", {"metadata": {"old_text": "old"}}),
+            ),
+        ],
+    )
+    def test_memory_notification_mapping_matches_both_paths(self, agent, args, expected):
+        agent._memory_manager = MagicMock()
+        with patch("tools.memory_tool.memory_tool", return_value='{"success": true}'):
+            agent._invoke_tool("memory", args, "task-1")
+        invoke_call = agent._memory_manager.on_memory_write.call_args
+
+        agent._memory_manager.reset_mock()
+        tc = _mock_tool_call(name="memory", arguments=json.dumps(args), call_id="m1")
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        with patch("tools.memory_tool.memory_tool", return_value='{"success": true}'):
+            agent._execute_tool_calls_sequential(mock_msg, [], "task-1")
+
+        assert invoke_call == agent._memory_manager.on_memory_write.call_args
+        assert invoke_call.args == expected[:3]
+        assert invoke_call.kwargs == expected[3]
+
+    def test_sequential_memory_lifecycle_mirrors_to_holographic(
+        self, agent, tmp_path, monkeypatch
+    ):
+        from agent.memory_manager import MemoryManager
+        from plugins.memory.holographic import HolographicMemoryProvider
+        from tools.memory_tool import MemoryStore
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        provider = HolographicMemoryProvider({
+            "db_path": str(tmp_path / "holographic.db"),
+            "profile_isolation": True,
+        })
+        provider.initialize(
+            "session-1",
+            hermes_home=str(hermes_home),
+            platform="telegram",
+            chat_id="c1",
+            user_id="u1",
+            agent_context="primary",
+        )
+        manager = MemoryManager()
+        manager.add_provider(provider)
+        agent._memory_manager = manager
+        agent._memory_store = MemoryStore()
+        agent._memory_store.load_from_disk()
+
+        def execute(args, call_id):
+            tc = _mock_tool_call(
+                name="memory", arguments=json.dumps(args), call_id=call_id
+            )
+            agent._execute_tool_calls_sequential(
+                _mock_assistant_msg(content="", tool_calls=[tc]), [], "task-1"
+            )
+
+        execute(
+            {"action": "add", "target": "user", "content": "User prefers PostgreSQL."},
+            "m1",
+        )
+        assert provider._find_fact_id_by_content("User prefers PostgreSQL.") is not None
+
+        execute(
+            {
+                "action": "replace",
+                "target": "user",
+                "old_text": "User prefers PostgreSQL.",
+                "content": "User prefers PostgreSQL for analytics.",
+            },
+            "m2",
+        )
+        assert provider._find_fact_id_by_content("User prefers PostgreSQL.") is None
+        assert provider._find_fact_id_by_content(
+            "User prefers PostgreSQL for analytics."
+        ) is not None
+
+        execute(
+            {
+                "action": "remove",
+                "target": "user",
+                "old_text": "User prefers PostgreSQL for analytics.",
+            },
+            "m3",
+        )
+        assert provider._find_fact_id_by_content(
+            "User prefers PostgreSQL for analytics."
+        ) is None
+        assert provider._store.list_facts(namespace="telegram:c1") == []
+        provider.shutdown()
+
+
     def test_single_tool_executed(self, agent):
         tc = _mock_tool_call(name="web_search", arguments='{"q":"test"}', call_id="c1")
         mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
@@ -1028,6 +1163,23 @@ class TestExecuteToolCalls:
 
 class TestConcurrentToolExecution:
     """Tests for _execute_tool_calls_concurrent and dispatch logic."""
+
+    def test_memory_batch_forces_sequential_path(self, agent):
+        """Memory mutations must not be added to the parallel-safe set."""
+        tc1 = _mock_tool_call(
+            name="memory",
+            arguments='{"action":"add","target":"user","content":"value"}',
+            call_id="m1",
+        )
+        tc2 = _mock_tool_call(name="web_search", arguments='{}', call_id="c2")
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
+
+        with patch.object(agent, "_execute_tool_calls_sequential") as mock_seq:
+            with patch.object(agent, "_execute_tool_calls_concurrent") as mock_con:
+                agent._execute_tool_calls(mock_msg, [], "task-1")
+
+        mock_seq.assert_called_once()
+        mock_con.assert_not_called()
 
     def test_single_tool_uses_sequential_path(self, agent):
         """Single tool call should use sequential path, not concurrent."""

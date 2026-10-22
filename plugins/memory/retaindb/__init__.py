@@ -744,7 +744,9 @@ class RetainDBMemoryProvider(MemoryProvider):
 
     # ── Optional hooks ─────────────────────────────────────────────────────
 
-    def on_memory_write(self, action: str, target: str, content: str) -> None:
+    def on_memory_write(
+        self, action: str, target: str, content: str, metadata: dict | None = None
+    ) -> None:
         """Mirror built-in memory writes to RetainDB."""
         if action != "add" or not content or not self._client:
             return

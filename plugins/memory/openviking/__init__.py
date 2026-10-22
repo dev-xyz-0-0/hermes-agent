@@ -435,7 +435,9 @@ class OpenVikingMemoryProvider(MemoryProvider):
         except Exception as e:
             logger.warning("OpenViking session commit failed: %s", e)
 
-    def on_memory_write(self, action: str, target: str, content: str) -> None:
+    def on_memory_write(
+        self, action: str, target: str, content: str, metadata: dict | None = None
+    ) -> None:
         """Mirror built-in memory writes to OpenViking as explicit memories."""
         if not self._client or action != "add" or not content:
             return

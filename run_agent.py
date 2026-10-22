@@ -6254,16 +6254,7 @@ class AIAgent:
                 old_text=function_args.get("old_text"),
                 store=self._memory_store,
             )
-            # Bridge: notify external memory provider of built-in memory writes
-            if self._memory_manager and function_args.get("action") in ("add", "replace"):
-                try:
-                    self._memory_manager.on_memory_write(
-                        function_args.get("action", ""),
-                        target,
-                        function_args.get("content", ""),
-                    )
-                except Exception:
-                    pass
+            self._notify_memory_provider_of_write(function_args, result)
             return result
         elif self._memory_manager and self._memory_manager.has_tool(function_name):
             return self._memory_manager.handle_tool_call(function_name, function_args)
@@ -6291,6 +6282,35 @@ class AIAgent:
                 session_id=self.session_id or "",
                 enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
             )
+
+    def _notify_memory_provider_of_write(
+        self, function_args: dict, function_result: str
+    ) -> None:
+        """Mirror a successful built-in memory mutation to external providers."""
+        if not self._memory_manager:
+            return
+        try:
+            result = json.loads(function_result)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if not isinstance(result, dict) or result.get("success") is not True:
+            return
+
+        action = function_args.get("action")
+        if action not in ("add", "replace", "remove"):
+            return
+        target = function_args.get("target", "memory")
+        content = function_args.get("content", "") if action != "remove" else ""
+        metadata = {}
+        if action in ("replace", "remove"):
+            metadata["old_text"] = function_args.get("old_text", "")
+
+        try:
+            self._memory_manager.on_memory_write(
+                action, target, content or "", metadata=metadata
+            )
+        except Exception as exc:
+            logger.debug("Memory provider write notification failed: %s", exc)
 
     def _execute_tool_calls_concurrent(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute multiple tool calls concurrently using a thread pool.
@@ -6638,6 +6658,7 @@ class AIAgent:
                     old_text=function_args.get("old_text"),
                     store=self._memory_store,
                 )
+                self._notify_memory_provider_of_write(function_args, function_result)
                 tool_duration = time.time() - tool_start_time
                 if self.quiet_mode:
                     self._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")

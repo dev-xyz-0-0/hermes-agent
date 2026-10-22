@@ -333,6 +333,31 @@ class TestMemoryManager:
         mgr.on_memory_write("add", "memory", "test fact")
         assert external.memory_writes == [("add", "memory", "test fact")]
 
+    def test_on_memory_write_preserves_legacy_three_argument_provider(self):
+        """Metadata dispatch remains compatible with older provider hooks."""
+        mgr = MemoryManager()
+        provider = FakeMemoryProvider("external")
+        mgr.add_provider(provider)
+
+        mgr.on_memory_write(
+            "replace", "user", "new value", metadata={"old_text": "old value"}
+        )
+
+        assert provider.memory_writes == [("replace", "user", "new value")]
+
+    def test_on_memory_write_passes_metadata_when_supported(self):
+        mgr = MemoryManager()
+        provider = FakeMemoryProvider("external")
+        provider.on_memory_write = MagicMock()
+        mgr.add_provider(provider)
+        metadata = {"old_text": "old value"}
+
+        mgr.on_memory_write("replace", "user", "new value", metadata=metadata)
+
+        provider.on_memory_write.assert_called_once_with(
+            "replace", "user", "new value", metadata=metadata
+        )
+
     def test_shutdown_all_reverse_order(self):
         mgr = MemoryManager()
         order = []

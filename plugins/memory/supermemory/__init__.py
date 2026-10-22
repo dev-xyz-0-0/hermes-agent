@@ -614,7 +614,9 @@ class SupermemoryMemoryProvider(MemoryProvider):
         except Exception:
             logger.warning("Supermemory session ingest failed", exc_info=True)
 
-    def on_memory_write(self, action: str, target: str, content: str) -> None:
+    def on_memory_write(
+        self, action: str, target: str, content: str, metadata: dict | None = None
+    ) -> None:
         if not self._active or not self._write_enabled or not self._client:
             return
         if action != "add" or not (content or "").strip():

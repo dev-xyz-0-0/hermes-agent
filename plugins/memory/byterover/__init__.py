@@ -261,7 +261,9 @@ class ByteRoverMemoryProvider(MemoryProvider):
         )
         self._sync_thread.start()
 
-    def on_memory_write(self, action: str, target: str, content: str) -> None:
+    def on_memory_write(
+        self, action: str, target: str, content: str, metadata: dict | None = None
+    ) -> None:
         """Mirror built-in memory writes to ByteRover."""
         if action not in ("add", "replace") or not content:
             return

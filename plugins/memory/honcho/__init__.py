@@ -593,7 +593,9 @@ class HonchoMemoryProvider(MemoryProvider):
         )
         self._sync_thread.start()
 
-    def on_memory_write(self, action: str, target: str, content: str) -> None:
+    def on_memory_write(
+        self, action: str, target: str, content: str, metadata: dict | None = None
+    ) -> None:
         """Mirror built-in user profile writes as Honcho conclusions."""
         if action != "add" or target != "user" or not content:
             return
