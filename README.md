@@ -295,7 +295,7 @@ uv run pytest tests/plugins/memory/test_holographic_profiles.py -q
 
 uv run pytest tests/plugins/memory/test_holographic_lifecycle_stage3.py -q
 
-uv run pytest tests/plugins/memory/test_holographic_reliability_stage4.py -q
+uv run pytest tests/plugins/memory/test_holographic_fixes.py -q
 
 uv run pytest test_retry_utils.py -q
 

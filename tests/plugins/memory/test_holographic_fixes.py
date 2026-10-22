@@ -8,6 +8,7 @@ Covers:
   - Fuzzing edge cases for FTS5 queries
 """
 
+import json
 import os
 import sqlite3
 import tempfile
@@ -34,6 +35,36 @@ def store(tmp_path):
 def retriever(store):
     """Create a FactRetriever for the temp store."""
     return FactRetriever(store=store, hrr_dim=128, hrr_weight=0.0)
+
+
+@pytest.fixture
+def holographic_provider_factory(tmp_path):
+    """Create initialized providers sharing only this test's temporary DB."""
+    from plugins.memory.holographic import HolographicMemoryProvider
+
+    providers = []
+    db_path = str(tmp_path / "lifecycle_memory.db")
+
+    def create(auto_extract=True, *, chat_id="test-chat-a"):
+        provider = HolographicMemoryProvider(config={
+            "auto_extract": auto_extract,
+            "db_path": db_path,
+            "hrr_dim": 128,
+            "hrr_weight": 0.0,
+        })
+        provider.initialize(
+            f"session-{len(providers) + 1}",
+            hermes_home=str(tmp_path),
+            platform="telegram",
+            chat_id=chat_id,
+        )
+        providers.append(provider)
+        return provider
+
+    yield create
+
+    for provider in providers:
+        provider.shutdown()
 
 
 # =========================================================================
@@ -353,6 +384,142 @@ class TestAutoExtract:
         assert len(facts) == 1
         assert facts[0]["category"] == "user_pref"
         assert len(facts[0]["content"]) <= 200
+
+
+class TestAutoExtractLifecycle:
+    """Configuration, lifecycle, namespace, and deduplication regressions."""
+
+    message = [{
+        "role": "user",
+        "content": "I prefer PostgreSQL for analytics workloads.",
+    }]
+
+    @staticmethod
+    def _tool(provider, action, **kwargs):
+        return json.loads(provider.handle_tool_call(
+            "fact_store", {"action": action, **kwargs}
+        ))
+
+    def test_auto_extract_false_disables_extraction(
+        self, holographic_provider_factory
+    ):
+        provider = holographic_provider_factory(False)
+        provider.on_session_end(self.message)
+        assert provider._store.list_facts() == []
+
+        # The setting gates automatic extraction only; explicit storage remains active.
+        result = self._tool(
+            provider,
+            "add",
+            content="Explicitly stored fact.",
+            category="general",
+        )
+        assert result["status"] == "added"
+        facts = self._tool(provider, "list")["facts"]
+        assert [fact["content"] for fact in facts] == ["Explicitly stored fact."]
+
+    @pytest.mark.parametrize("configured_value", ["false", "False", "0"])
+    def test_auto_extract_string_false_disables_extraction(
+        self, holographic_provider_factory, configured_value
+    ):
+        provider = holographic_provider_factory(configured_value)
+        provider.on_session_end(self.message)
+        assert provider._store.list_facts() == []
+
+    @pytest.mark.parametrize("configured_value", [True, "true", "True", "1"])
+    def test_auto_extract_string_true_enables_extraction(
+        self, holographic_provider_factory, configured_value
+    ):
+        provider = holographic_provider_factory(configured_value)
+        provider.on_session_end(self.message)
+        facts = provider._store.list_facts(namespace="telegram:test-chat-a")
+        assert len(facts) == 1
+        assert facts[0]["content"] == "Prefers PostgreSQL for analytics workloads."
+        assert facts[0]["category"] == "user_pref"
+
+    def test_auto_extract_runs_on_real_session_end(
+        self, holographic_provider_factory
+    ):
+        provider = holographic_provider_factory(True)
+        provider.on_session_end(self.message)
+        facts = self._tool(provider, "list")["facts"]
+        assert len(facts) == 1
+        assert facts[0]["content"] == "Prefers PostgreSQL for analytics workloads."
+        assert facts[0]["category"] == "user_pref"
+
+    def test_auto_extract_disabled_on_real_session_end(
+        self, holographic_provider_factory
+    ):
+        provider = holographic_provider_factory(False)
+        provider.on_session_end(self.message)
+        assert self._tool(provider, "list")["facts"] == []
+
+    def test_auto_extract_respects_namespace_isolation(
+        self, holographic_provider_factory
+    ):
+        provider_a = holographic_provider_factory(True, chat_id="test-chat-a")
+        provider_b = holographic_provider_factory(True, chat_id="test-chat-b")
+        provider_a.on_session_end(self.message)
+        provider_b.on_session_end([{
+            "role": "user",
+            "content": "I prefer SQLite for local prototypes.",
+        }])
+
+        facts_a = self._tool(provider_a, "list")["facts"]
+        facts_b = self._tool(provider_b, "list")["facts"]
+        assert [fact["content"] for fact in facts_a] == [
+            "Prefers PostgreSQL for analytics workloads."
+        ]
+        assert [fact["content"] for fact in facts_b] == [
+            "Prefers SQLite for local prototypes."
+        ]
+        assert self._tool(provider_a, "search", query="SQLite")["results"] == []
+        assert self._tool(provider_b, "search", query="PostgreSQL")["results"] == []
+
+    def test_auto_extract_same_fact_not_duplicated_same_namespace(
+        self, holographic_provider_factory
+    ):
+        first_session = holographic_provider_factory(True, chat_id="test-chat-a")
+        first_session.on_session_end(self.message)
+        first_session.shutdown()
+
+        second_session = holographic_provider_factory(True, chat_id="test-chat-a")
+        second_session.on_session_end(self.message)
+        facts = self._tool(second_session, "list")["facts"]
+        assert len(facts) == 1
+        assert facts[0]["content"] == "Prefers PostgreSQL for analytics workloads."
+
+    def test_auto_extract_same_fact_allowed_different_namespaces(
+        self, holographic_provider_factory
+    ):
+        provider_a = holographic_provider_factory(True, chat_id="test-chat-a")
+        provider_b = holographic_provider_factory(True, chat_id="test-chat-b")
+        provider_a.on_session_end(self.message)
+        provider_b.on_session_end(self.message)
+
+        facts_a = self._tool(provider_a, "list")["facts"]
+        facts_b = self._tool(provider_b, "list")["facts"]
+        assert len(facts_a) == 1
+        assert len(facts_b) == 1
+        assert facts_a[0]["content"] == facts_b[0]["content"]
+        assert facts_a[0]["namespace"] == "telegram:test-chat-a"
+        assert facts_b[0]["namespace"] == "telegram:test-chat-b"
+
+    def test_auto_extract_similar_but_distinct_facts_preserved(
+        self, holographic_provider_factory
+    ):
+        provider = holographic_provider_factory(True, chat_id="test-chat-a")
+        provider.on_session_end(self.message)
+        provider.on_session_end([{
+            "role": "user",
+            "content": "I prefer PostgreSQL for production workloads.",
+        }])
+
+        facts = self._tool(provider, "list")["facts"]
+        assert {fact["content"] for fact in facts} == {
+            "Prefers PostgreSQL for analytics workloads.",
+            "Prefers PostgreSQL for production workloads.",
+        }
 
 
 # =========================================================================
