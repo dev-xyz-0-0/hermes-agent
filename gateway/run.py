@@ -474,6 +474,24 @@ class GatewayRunner:
         self.config = config or load_gateway_config()
         self.adapters: Dict[Platform, BasePlatformAdapter] = {}
 
+        from gateway.custom_commands import (
+            set_active_custom_commands,
+            validate_custom_commands,
+        )
+        self._custom_commands, custom_command_errors = validate_custom_commands(
+            getattr(self.config, "quick_commands", {})
+        )
+        set_active_custom_commands(self._custom_commands)
+        for error in custom_command_errors:
+            logger.warning("Custom command disabled: %s", error)
+        for custom_command in self._custom_commands.values():
+            if custom_command.type == "exec":
+                logger.warning(
+                    "Custom command '/%s' uses deprecated type 'exec'; "
+                    "prefer alias, skill, or prompt",
+                    custom_command.name,
+                )
+
         # Load ephemeral config from config.yaml / env vars.
         # Both are injected at API-call time only and never persisted.
         self._prefill_messages = self._load_prefill_messages()
@@ -1231,6 +1249,7 @@ class GatewayRunner:
             
             # Set up message + fatal error handlers
             adapter.set_message_handler(self._handle_message)
+            adapter._custom_command_bypass = self._custom_commands.should_bypass_active_guard
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
             
@@ -1956,6 +1975,48 @@ class GatewayRunner:
                 label = response_text if len(response_text) <= 20 else response_text[:20] + "…"
                 return f"✓ Sent `{label}` to the update process."
 
+        # Expand validated custom commands before busy-state and native
+        # dispatch so aliases inherit their terminal command's behavior.
+        _custom_name = event.get_command()
+        from gateway.custom_commands import CustomCommandRegistry
+        _custom_registry = getattr(self, "_custom_commands", None) or CustomCommandRegistry()
+        _custom = _custom_registry.get(_custom_name)
+        if _custom and _custom.type == "alias":
+            _custom_target = _custom_registry.get(_custom.target)
+            if _custom_target is None:
+                _custom_args = event.get_command_args().strip()
+                event.text = f"/{_custom.target} {_custom_args}".strip()
+                _custom = None
+            else:
+                _custom = _custom_target
+
+        if _custom and _custom.type == "skill":
+            from agent.skill_commands import get_skill_commands
+            _skill_info = get_skill_commands().get(_custom.skill_key, {})
+            _skill_name = _skill_info.get("name", _custom.skill_key.lstrip("/"))
+            _platform = source.platform.value if source.platform else None
+            if _platform:
+                from agent.skill_utils import get_disabled_skill_names
+                if _skill_name in get_disabled_skill_names(platform=_platform):
+                    return (
+                        f"The **{_skill_name}** skill is disabled for {_platform}.\n"
+                        "Enable it with: `hermes skills config`"
+                    )
+            from agent.skill_commands import build_skill_invocation_message
+            _skill_message = build_skill_invocation_message(
+                _custom.skill_key,
+                event.get_command_args().strip(),
+                task_id=_quick_key,
+            )
+            if not _skill_message:
+                return f"The configured skill **{_skill_name}** is no longer available."
+            event.text = _skill_message
+        elif _custom and _custom.type == "prompt":
+            _prompt_args = event.get_command_args().strip()
+            event.text = _custom.text
+            if _prompt_args:
+                event.text += f"\n\nUser-provided arguments:\n{_prompt_args}"
+
         # PRIORITY handling when an agent is already running for this session.
         # Default behavior is to interrupt immediately so user text/stop messages
         # are handled with minimal latency.
@@ -2265,47 +2326,27 @@ class GatewayRunner:
         if canonical == "voice":
             return await self._handle_voice_command(event)
 
-        # User-defined quick commands (bypass agent loop, no LLM call)
+        # Deprecated legacy exec commands bypass the agent loop. Alias, skill,
+        # and prompt commands were expanded before busy-state handling above.
         if command:
-            if isinstance(self.config, dict):
-                quick_commands = self.config.get("quick_commands", {}) or {}
-            else:
-                quick_commands = getattr(self.config, "quick_commands", {}) or {}
-            if not isinstance(quick_commands, dict):
-                quick_commands = {}
-            if command in quick_commands:
-                qcmd = quick_commands[command]
-                if qcmd.get("type") == "exec":
-                    exec_cmd = qcmd.get("command", "")
-                    if exec_cmd:
-                        try:
-                            proc = await asyncio.create_subprocess_shell(
-                                exec_cmd,
-                                stdout=asyncio.subprocess.PIPE,
-                                stderr=asyncio.subprocess.PIPE,
-                            )
-                            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-                            output = (stdout or stderr).decode().strip()
-                            return output if output else "Command returned no output."
-                        except asyncio.TimeoutError:
-                            return "Quick command timed out (30s)."
-                        except Exception as e:
-                            return f"Quick command error: {e}"
-                    else:
-                        return f"Quick command '/{command}' has no command defined."
-                elif qcmd.get("type") == "alias":
-                    target = qcmd.get("target", "").strip()
-                    if target:
-                        target = target if target.startswith("/") else f"/{target}"
-                        target_command = target.lstrip("/")
-                        user_args = event.get_command_args().strip()
-                        event.text = f"{target} {user_args}".strip()
-                        command = target_command
-                        # Fall through to normal command dispatch below
-                    else:
-                        return f"Quick command '/{command}' has no target defined."
-                else:
-                    return f"Quick command '/{command}' has unsupported type (supported: 'exec', 'alias')."
+            qcmd = _custom_registry.get(command)
+            if qcmd and qcmd.type == "exec":
+                exec_cmd = qcmd.command
+                if exec_cmd:
+                    try:
+                        proc = await asyncio.create_subprocess_shell(
+                            exec_cmd,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                        output = (stdout or stderr).decode().strip()
+                        return output if output else "Command returned no output."
+                    except asyncio.TimeoutError:
+                        return "Quick command timed out (30s)."
+                    except Exception as e:
+                        return f"Quick command error: {e}"
+                return f"Quick command '/{command}' has no command defined."
 
         # Plugin-registered slash commands
         if command:

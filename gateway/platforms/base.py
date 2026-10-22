@@ -1170,7 +1170,10 @@ class BasePlatformAdapter(ABC):
             # session lifecycle and its cleanup races with the running task
             # (see PR #4926).
             cmd = event.get_command()
-            if cmd in ("approve", "deny", "status", "stop", "new", "reset"):
+            custom_bypass = getattr(self, "_custom_command_bypass", None)
+            if cmd in ("approve", "deny", "status", "stop", "new", "reset") or (
+                callable(custom_bypass) and custom_bypass(cmd)
+            ):
                 logger.debug(
                     "[%s] Command '/%s' bypassing active-session guard for %s",
                     self.name, cmd, session_key,

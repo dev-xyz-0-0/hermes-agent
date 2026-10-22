@@ -80,6 +80,52 @@ Hermes has two entry points: start the terminal UI with `hermes`, or run the gat
 
 For the full command lists, see the [CLI guide](https://hermes-agent.nousresearch.com/docs/user-guide/cli) and the [Messaging Gateway guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging).
 
+### Custom gateway commands
+
+Gateway shortcuts are configured in the active profile's `config.yaml` (normally
+`~/.hermes/config.yaml`). They work on every messaging gateway and valid entries
+are added to Telegram's command menu on startup:
+
+```yaml
+quick_commands:
+  s:
+    type: alias
+    target: status
+    description: Show Hermes status
+
+  wb:
+    type: skill
+    target: wallet-balance
+    description: Check wallet balance
+
+  brief:
+    type: prompt
+    description: Crypto and AI briefing
+    text: >
+      Summarize recent developments in cryptocurrency, AI, and financial markets.
+```
+
+An alias forwards its arguments to an existing command. A skill shortcut loads
+the installed skill's `SKILL.md` and passes trailing text as its user instruction:
+`/wb solana` invokes the `wallet-balance` skill with `solana`. The skill then
+guides the normal agent loop and may use any available, authorized MCP tools; the
+shortcut does not invoke an MCP tool directly. Name the exact MCP tool in the
+skill when deterministic selection matters.
+
+Prompt shortcuts submit their configured text through the normal conversation
+flow and append any trailing arguments. Add `enabled: false` to disable an entry
+without deleting it. Command names cannot collide with native commands, skills,
+plugins, or other Telegram-normalized names. Telegram keeps native commands
+first and caps its menu at 100 entries.
+
+Custom commands retain the gateway's user authorization, skill availability,
+and tool-approval rules. Legacy `type: exec` entries remain supported for
+compatibility but are deprecated because they execute shell commands outside the
+agent/tool approval flow. Prefer aliases, skills, or prompts.
+
+Configuration is loaded at startup. Apply changes with `hermes gateway restart`
+for a managed gateway, or stop and rerun `hermes gateway run` for a manual one.
+
 ---
 
 ## Documentation
@@ -246,7 +292,7 @@ tests/tools/test_send_message_missing_platforms.py
 
 uv run pytest tests/tools/test_approval_mcp.py -q
 uv run pytest tests/tools/test_approval.py -q
-uv run pytest tests/gateway/test_status_command.py -q
+uv run pytest tests/gateway/test_custom_commands.py -q
 
 
 

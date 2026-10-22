@@ -345,6 +345,13 @@ def gateway_help_lines() -> list[str]:
             alias_parts.append(f"`/{a}`")
         alias_note = f" (alias: {', '.join(alias_parts)})" if alias_parts else ""
         lines.append(f"`/{cmd.name}{args}` -- {cmd.description}{alias_note}")
+    try:
+        from gateway.custom_commands import get_active_custom_commands
+        custom_lines = get_active_custom_commands().help_lines()
+        if custom_lines:
+            lines.extend(["", "⚡ **Custom Commands**:", *custom_lines])
+    except Exception:
+        pass
     return lines
 
 
@@ -554,21 +561,34 @@ def telegram_menu_commands(max_commands: int = 100) -> tuple[list[tuple[str, str
 
     Priority order (higher priority = never bumped by overflow):
       1. Core CommandDef commands (always included)
-      2. Plugin slash commands (take precedence over skills)
-      3. Built-in skill commands (fill remaining slots, alphabetical)
+      2. Profile-scoped custom commands
+      3. Plugin slash commands (take precedence over skills)
+      4. Built-in skill commands (fill remaining slots, alphabetical)
 
-    Skills are the only tier that gets trimmed when the cap is hit.
+    Custom commands beyond the remaining menu capacity and skills are trimmed
+    when the cap is hit; core commands are never displaced.
     User-installed hub skills are excluded — accessible via /skills.
     Skills disabled for the ``"telegram"`` platform (via ``hermes skills
     config``) are excluded from the menu entirely.
 
     Returns:
         (menu_commands, hidden_count) where hidden_count is the number of
-        skill commands omitted due to the cap.
+        custom or skill commands omitted due to the cap.
     """
     core_commands = list(telegram_bot_commands())
     reserved_names = {n for n, _ in core_commands}
     all_commands = list(core_commands)
+
+    try:
+        from gateway.custom_commands import get_active_custom_commands
+        custom_entries = get_active_custom_commands().telegram_entries()
+    except Exception:
+        custom_entries = []
+    custom_entries = _clamp_command_names(custom_entries, reserved_names)
+    available_custom_slots = max(0, max_commands - len(all_commands))
+    hidden_custom_count = max(0, len(custom_entries) - available_custom_slots)
+    all_commands.extend(custom_entries[:available_custom_slots])
+    reserved_names.update(name for name, _ in all_commands)
 
     remaining_slots = max(0, max_commands - len(all_commands))
     entries, hidden_count = _collect_gateway_skill_entries(
@@ -580,7 +600,7 @@ def telegram_menu_commands(max_commands: int = 100) -> tuple[list[tuple[str, str
     )
     # Drop the cmd_key — Telegram only needs (name, desc) pairs.
     all_commands.extend((n, d) for n, d, _k in entries)
-    return all_commands[:max_commands], hidden_count
+    return all_commands[:max_commands], hidden_custom_count + hidden_count
 
 
 def discord_skill_commands(
