@@ -405,13 +405,27 @@ snapshot. Verified real top-level fields: `diagnostics_enabled`,
 (a dict of counters that only appear once incremented — e.g.
 `recall_attempts`, `recall_success`, `capture_attempts`,
 `capture_accepted`, `capture_rejected`, `capture_duplicate`,
-`consolidation_superseded`, `consolidation_forgotten`, `sqlite_errors`),
-and `by_category` (only present when `diagnostics_include_content: true`).
-It never includes raw fact content, and works even against a down/erroring
-store (so the error counters themselves stay reachable). Set
-`diagnostics_enabled: false` to get a minimal `{"diagnostics_enabled": false}`
-stub instead (counters still aren't collected in that case). See the
+`consolidation_superseded`, `consolidation_forgotten`, `feedback_attempts`,
+`feedback_helpful`, `feedback_unhelpful`, `sqlite_errors`), and `by_category`
+(only present when
+`diagnostics_include_content: true`). It never includes raw fact content,
+and works even against a down/erroring store (so the error counters
+themselves stay reachable). Set `diagnostics_enabled: false` to get a
+minimal `{"diagnostics_enabled": false}` stub instead (counters still
+aren't collected in that case). See the
 [Quick Start example](#5-check-diagnostics) for a full sample response.
+
+**Scope and persistence of `metrics`:** counters live in a plain in-memory
+dict on the provider instance (`self._metrics`), never written to SQLite.
+They reset to empty on every `initialize()` call — a new session, a profile
+switch, or a gateway restart — so they are a snapshot of activity since the
+last initialize, not a durable running total. Because one provider instance
+is also re-initialized (and its namespace recomputed) each time it's handed
+a different chat/session, `metrics` is not a per-namespace running total
+either — it reflects whichever namespace was last active, not an aggregate
+across all namespaces the process has ever served. `facts`/`active`/
+`superseded`, by contrast, come straight from SQLite and are both durable
+and namespace-scoped.
 
 ## Backup and Restore
 

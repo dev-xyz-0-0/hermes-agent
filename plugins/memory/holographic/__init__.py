@@ -1608,11 +1608,15 @@ class HolographicMemoryProvider(MemoryProvider):
         try:
             if self._store is None:
                 return tool_error("Holographic memory is not initialized")
+            self._metric("feedback_attempts")
+            helpful = args["action"] == "helpful"
             result = self._store.record_feedback(
-                int(args["fact_id"]), helpful=args["action"] == "helpful", namespace=self._namespace,
+                int(args["fact_id"]), helpful=helpful, namespace=self._namespace,
             )
+            self._metric("feedback_helpful" if helpful else "feedback_unhelpful")
             return json.dumps(result)
         except KeyError as exc:
+            self._metric("feedback_errors")
             return tool_error(f"Missing required argument: {exc}")
         except Exception as exc:
             return tool_error(str(exc))

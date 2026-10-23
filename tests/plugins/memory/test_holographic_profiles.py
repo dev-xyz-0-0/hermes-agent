@@ -14,6 +14,7 @@ All tests use temporary SQLite databases — never $HERMES_HOME.
 """
 
 import json
+import math
 import sqlite3
 
 from plugins.memory.holographic import HolographicMemoryProvider
@@ -376,6 +377,52 @@ class TestDiagnostics:
         assert diag["metrics"]["capture_accepted"] >= 1
         p.shutdown()
 
+    def test_rejected_candidate_updates_counter(self, tmp_path):
+        """Write-firewall rejection via sync_turn() — the candidate is
+        extracted (matches _RE_STATEMENT's "i use" pattern) but then rejected
+        by _fact_problem()'s credential-shape check. The value is an obvious
+        synthetic placeholder, not a real key."""
+        p = _cli_provider(tmp_path, auto_capture="true")
+        before = len(p._store.list_facts(limit=100))
+        p.sync_turn("I use sk-FAKE1234567890ABCDEFGHIJKLMNOP for my test project.", "ok")
+        diag = json.loads(p.handle_tool_call("fact_store", {"action": "diagnostics"}))
+        assert diag["metrics"]["capture_rejected"] >= 1
+        assert len(p._store.list_facts(limit=100)) == before
+        p.shutdown()
+
+    def test_duplicate_candidate_updates_counter(self, tmp_path):
+        """A differently-worded restatement (different turn_hash, so it isn't
+        caught by sync_turn()'s own transport-replay dedup) that consolidation
+        still classifies as a duplicate of the first fact."""
+        p = _cli_provider(tmp_path, auto_capture="true")
+        p.sync_turn("I use PostgreSQL for analytics.", "Got it.")
+        active_before = len(p._store.list_facts(limit=100))
+        p.sync_turn("I use PostgreSQL for analytics, really.", "Got it.")
+        diag = json.loads(p.handle_tool_call("fact_store", {"action": "diagnostics"}))
+        assert diag["metrics"]["capture_duplicate"] >= 1
+        assert len(p._store.list_facts(limit=100)) == active_before
+        p.shutdown()
+
+    def test_correction_updates_superseded_counter(self, tmp_path):
+        p = _cli_provider(tmp_path, auto_capture="true")
+        p.sync_turn("My Solana analytics uses PostgreSQL.", "Got it.")
+        p.sync_turn("I've decided to switch my Solana analytics database to ClickHouse.", "Updated.")
+        diag = json.loads(p.handle_tool_call("fact_store", {"action": "diagnostics"}))
+        assert diag["metrics"]["consolidation_superseded"] >= 1
+        active = [f["content"] for f in p._store.list_facts(limit=20)]
+        assert any("ClickHouse" in f for f in active)
+        assert not any("PostgreSQL" in f for f in active)
+        p.shutdown()
+
+    def test_forget_updates_forgotten_counter(self, tmp_path):
+        p = _cli_provider(tmp_path, auto_capture="true")
+        p.sync_turn("My preferred editor is Vim.", "Got it.")
+        p.sync_turn("Forget my editor preference.", "Done.")
+        diag = json.loads(p.handle_tool_call("fact_store", {"action": "diagnostics"}))
+        assert diag["metrics"]["consolidation_forgotten"] >= 1
+        assert p._store.list_facts(limit=20) == []
+        p.shutdown()
+
     def test_sqlite_failure_updates_error_counter(self, tmp_path):
         """P3-O04. A closed connection degrades gracefully inside
         _fts_candidates's own per-attempt try/except (empty result, not an
@@ -426,6 +473,140 @@ class TestDiagnostics:
             blocked.initialize(session_id="s", platform="discord", hermes_home=str(tmp_path))
         assert any("failing closed" in r.message for r in caplog.records)
         blocked.shutdown()
+
+    def test_metrics_reset_and_do_not_leak_across_namespaces_on_reinitialize(self, tmp_path):
+        """_metrics is a plain instance dict reset to {} on every
+        initialize() call (not persisted, not namespace-partitioned) — this
+        locks in that documented behavior: re-initializing the same provider
+        for a different namespace must not carry over the previous
+        namespace's counters."""
+        p = _gateway_provider(tmp_path, "chat_A", auto_capture="true")
+        p.sync_turn("I use Rust for chat A's backend.", "ok")
+        diag_a = json.loads(p.handle_tool_call("fact_store", {"action": "diagnostics"}))
+        assert diag_a["metrics"]["capture_attempts"] >= 1
+
+        p.initialize(session_id="sess-chat_B", platform="telegram", chat_id="chat_B", hermes_home=str(tmp_path))
+        diag_b = json.loads(p.handle_tool_call("fact_store", {"action": "diagnostics"}))
+        assert diag_b.get("metrics", {}) == {}
+        p.shutdown()
+
+
+class TestFactFeedback:
+    def test_feedback_attempt_updates_counter_regardless_of_outcome(self, tmp_path):
+        """feedback_attempts increments once per request that reaches the
+        handler with an initialized store — including one that ultimately
+        fails (unknown fact_id) — mirroring capture_attempts' semantics of
+        counting entry into the pipeline, not success."""
+        p = _cli_provider(tmp_path)
+        fact_id = p._store.add_fact("User prefers dark mode", category="user_pref")
+        p.handle_tool_call("fact_feedback", {"fact_id": fact_id, "action": "helpful"})
+        p.handle_tool_call("fact_feedback", {"fact_id": 999999, "action": "helpful"})
+        diag = json.loads(p.handle_tool_call("fact_store", {"action": "diagnostics"}))
+        assert diag["metrics"]["feedback_attempts"] == 2
+        p.shutdown()
+
+    def test_helpful_feedback_increases_trust_and_counter(self, tmp_path):
+        p = _cli_provider(tmp_path)
+        fact_id = p._store.add_fact("User prefers dark mode", category="user_pref")
+        result = json.loads(p.handle_tool_call("fact_feedback", {"fact_id": fact_id, "action": "helpful"}))
+        assert math.isclose(result["new_trust"] - result["old_trust"], 0.05, abs_tol=1e-9)
+        diag = json.loads(p.handle_tool_call("fact_store", {"action": "diagnostics"}))
+        assert diag["metrics"]["feedback_attempts"] >= 1
+        assert diag["metrics"]["feedback_helpful"] >= 1
+        p.shutdown()
+
+    def test_unhelpful_feedback_decreases_trust_and_counter(self, tmp_path):
+        p = _cli_provider(tmp_path)
+        fact_id = p._store.add_fact("User prefers dark mode", category="user_pref")
+        result = json.loads(p.handle_tool_call("fact_feedback", {"fact_id": fact_id, "action": "unhelpful"}))
+        assert math.isclose(result["new_trust"] - result["old_trust"], -0.10, abs_tol=1e-9)
+        diag = json.loads(p.handle_tool_call("fact_store", {"action": "diagnostics"}))
+        assert diag["metrics"]["feedback_unhelpful"] >= 1
+        p.shutdown()
+
+    def test_trust_is_clamped_within_bounds(self, tmp_path):
+        p = _cli_provider(tmp_path)
+        fact_id = p._store.add_fact("User prefers dark mode", category="user_pref")
+        for _ in range(20):
+            result = json.loads(p.handle_tool_call("fact_feedback", {"fact_id": fact_id, "action": "unhelpful"}))
+        assert result["new_trust"] >= 0.0
+        for _ in range(20):
+            result = json.loads(p.handle_tool_call("fact_feedback", {"fact_id": fact_id, "action": "helpful"}))
+        assert result["new_trust"] <= 1.0
+        p.shutdown()
+
+    def test_feedback_does_not_affect_unrelated_facts(self, tmp_path):
+        p = _cli_provider(tmp_path)
+        fact_a = p._store.add_fact("User prefers dark mode", category="user_pref")
+        fact_b = p._store.add_fact("User prefers tabs over spaces", category="user_pref")
+        p.handle_tool_call("fact_feedback", {"fact_id": fact_a, "action": "unhelpful"})
+        facts = {f["fact_id"]: f["trust_score"] for f in p._store.list_facts(limit=20)}
+        assert facts[fact_b] == 0.5
+        p.shutdown()
+
+    def test_feedback_respects_namespace_isolation(self, tmp_path):
+        a = _gateway_provider(tmp_path, "chat_A")
+        b = _gateway_provider(tmp_path, "chat_B")
+        fact_id = a._store.add_fact("Chat A's secret project is Nightjar", category="project", namespace=a._namespace)
+
+        result = json.loads(b.handle_tool_call("fact_feedback", {"fact_id": fact_id, "action": "helpful"}))
+        assert "error" in result
+
+        unchanged = a._store.list_facts(limit=20, namespace=a._namespace)
+        assert unchanged[0]["trust_score"] == 0.5
+        a.shutdown()
+        b.shutdown()
+        
+    def test_feedback_metrics_form_complete_outcome_partition(self, tmp_path):
+        p = _cli_provider(tmp_path)
+
+        helpful_id = p._store.add_fact(
+            "User prefers dark mode",
+            category="user_pref",
+        )
+        unhelpful_id = p._store.add_fact(
+            "User prefers compact output",
+            category="user_pref",
+        )
+
+        # Successful helpful feedback
+        p.handle_tool_call(
+            "fact_feedback",
+            {"fact_id": helpful_id, "action": "helpful"},
+        )
+
+        # Successful unhelpful feedback
+        p.handle_tool_call(
+            "fact_feedback",
+            {"fact_id": unhelpful_id, "action": "unhelpful"},
+        )
+
+        # Failed lookup
+        p.handle_tool_call(
+            "fact_feedback",
+            {"fact_id": 999999, "action": "helpful"},
+        )
+
+        diag = json.loads(
+            p.handle_tool_call(
+                "fact_store",
+                {"action": "diagnostics"},
+            )
+        )
+        metrics = diag["metrics"]
+
+        assert metrics["feedback_attempts"] == 3
+        assert metrics["feedback_helpful"] == 1
+        assert metrics["feedback_unhelpful"] == 1
+        assert metrics["feedback_errors"] == 1
+
+        assert metrics["feedback_attempts"] == (
+            metrics["feedback_helpful"]
+            + metrics["feedback_unhelpful"]
+            + metrics["feedback_errors"]
+        )
+
+        p.shutdown()
 
 
 # ---------------------------------------------------------------------------
