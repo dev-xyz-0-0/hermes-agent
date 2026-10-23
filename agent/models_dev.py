@@ -673,17 +673,11 @@ def get_providers_for_env_var(env_var: str) -> List[str]:
 # Model-level queries (rich ModelInfo)
 # ---------------------------------------------------------------------------
 
-def get_model_info(
-    provider_id: str, model_id: str
+def _get_model_info_from_data(
+    data: Dict[str, Any], provider_id: str, model_id: str
 ) -> Optional[ModelInfo]:
-    """Get full model metadata from models.dev.
-
-    Accepts Hermes or models.dev provider ID.  Tries exact match then
-    case-insensitive fallback.  Returns None if not found.
-    """
+    """Resolve model metadata from an already-loaded registry."""
     mdev_id = PROVIDER_TO_MODELS_DEV.get(provider_id, provider_id)
-
-    data = fetch_models_dev()
     pdata = data.get(mdev_id)
     if not isinstance(pdata, dict):
         return None
@@ -704,6 +698,30 @@ def get_model_info(
             return _parse_model_info(mid, mdata, mdev_id)
 
     return None
+
+
+def get_cached_model_info(
+    provider_id: str, model_id: str
+) -> Optional[ModelInfo]:
+    """Get model metadata without performing network I/O.
+
+    Uses the in-memory registry when populated, otherwise the on-disk cache.
+    This is intended for request-building paths where capability lookup must
+    never add network latency.
+    """
+    data = _models_dev_cache or _load_disk_cache()
+    return _get_model_info_from_data(data, provider_id, model_id)
+
+
+def get_model_info(
+    provider_id: str, model_id: str
+) -> Optional[ModelInfo]:
+    """Get full model metadata from models.dev.
+
+    Accepts Hermes or models.dev provider ID. Tries exact match then
+    case-insensitive fallback. Returns None if not found.
+    """
+    return _get_model_info_from_data(fetch_models_dev(), provider_id, model_id)
 
 
 def get_model_info_any_provider(model_id: str) -> Optional[ModelInfo]:

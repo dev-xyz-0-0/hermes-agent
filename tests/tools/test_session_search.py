@@ -1,6 +1,11 @@
 """Tests for tools/session_search_tool.py — helper functions and search dispatcher."""
 
+import asyncio
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from tools.session_search_tool import (
     _format_timestamp,
@@ -9,7 +14,64 @@ from tools.session_search_tool import (
     _HIDDEN_SESSION_SOURCES,
     MAX_SESSION_CHARS,
     SESSION_SEARCH_SCHEMA,
+    _summarize_session,
 )
+
+
+def _summary_response(content="summary"):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+    )
+
+
+class TestSummarizeSessionRetries:
+    def test_permanent_400_is_not_retried(self):
+        error = ValueError("invalid parameter: something_else")
+        error.status_code = 400
+        llm = AsyncMock(side_effect=error)
+
+        with patch("tools.session_search_tool.async_call_llm", llm):
+            result = asyncio.run(_summarize_session("transcript", "query", {}))
+
+        assert result is None
+        assert llm.await_count == 1
+
+    @pytest.mark.parametrize("status", [429, 500, 502, 503])
+    def test_transient_http_errors_are_retried(self, status):
+        error = ValueError("temporary provider failure")
+        error.status_code = status
+        llm = AsyncMock(side_effect=[error, _summary_response()])
+
+        with (
+            patch("tools.session_search_tool.async_call_llm", llm),
+            patch("tools.session_search_tool.asyncio.sleep", new_callable=AsyncMock) as sleep,
+        ):
+            result = asyncio.run(_summarize_session("transcript", "query", {}))
+
+        assert result == "summary"
+        assert llm.await_count == 2
+        sleep.assert_awaited_once_with(1)
+
+    def test_concurrent_summaries_remain_independent(self):
+        async def summarize(**kwargs):
+            user_prompt = kwargs["messages"][1]["content"]
+            query = user_prompt.splitlines()[0].split(": ", 1)[1]
+            await asyncio.sleep(0)
+            return _summary_response(f"summary:{query}")
+
+        async def run_summaries():
+            return await asyncio.gather(*(
+                _summarize_session(f"transcript-{index}", f"query-{index}", {})
+                for index in range(4)
+            ))
+
+        with patch(
+            "tools.session_search_tool.async_call_llm",
+            new=AsyncMock(side_effect=summarize),
+        ):
+            results = asyncio.run(run_summaries())
+
+        assert results == [f"summary:query-{index}" for index in range(4)]
 
 
 # =========================================================================

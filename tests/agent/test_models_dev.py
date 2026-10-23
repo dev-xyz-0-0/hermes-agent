@@ -5,6 +5,7 @@ from agent.models_dev import (
     PROVIDER_TO_MODELS_DEV,
     _extract_context,
     fetch_models_dev,
+    get_cached_model_info,
     lookup_models_dev_context,
 )
 
@@ -151,6 +152,29 @@ class TestLookupModelsDevContext:
 
 
 class TestFetchModelsDev:
+    def test_cached_model_info_never_fetches_network(self):
+        import agent.models_dev as md
+
+        registry = {
+            "openai": {
+                "models": {
+                    "gpt-test": {
+                        "name": "GPT Test",
+                        "temperature": False,
+                    }
+                }
+            }
+        }
+        with (
+            patch.object(md, "_models_dev_cache", registry),
+            patch("agent.models_dev.requests.get") as network,
+        ):
+            info = get_cached_model_info("openai", "gpt-test")
+
+        assert info is not None
+        assert info.temperature is False
+        network.assert_not_called()
+
     @patch("agent.models_dev.requests.get")
     def test_fetch_success(self, mock_get):
         mock_resp = MagicMock()

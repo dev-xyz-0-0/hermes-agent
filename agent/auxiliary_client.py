@@ -1206,6 +1206,113 @@ def _is_unsupported_parameter_error(exc: Exception, param: str) -> bool:
     ))
 
 
+def _temperature_capability(
+    provider: str,
+    model: Optional[str],
+    *,
+    base_url: Optional[str] = None,
+) -> Optional[bool]:
+    """Return whether *model* supports configurable temperature.
+
+    ``None`` means metadata is unavailable. Explicit temperatures are retained
+    in that case for backwards compatibility and corrected reactively if the
+    provider rejects them.
+    """
+    if not model:
+        return None
+
+    normalized_provider = (provider or "").strip().lower()
+    metadata_provider = {"openai-api": "openai"}.get(
+        normalized_provider, normalized_provider
+    )
+    if metadata_provider == "custom":
+        custom_base = base_url or _current_custom_base_url()
+        if "api.openai.com" not in custom_base.lower():
+            return None
+        metadata_provider = "openai"
+
+    try:
+        from agent.models_dev import get_cached_model_info
+        info = get_cached_model_info(metadata_provider, model)
+    except Exception:
+        logger.debug(
+            "Unable to resolve temperature capability for provider=%s model=%s",
+            metadata_provider or "unknown",
+            model,
+            exc_info=True,
+        )
+        return None
+    return info.temperature if info is not None else None
+
+
+def _can_correct_unsupported_parameter(exc: Exception, param: str) -> bool:
+    """Return whether a client error can be corrected by removing *param*."""
+    status = getattr(exc, "status_code", None)
+    return status in (None, 400, 422) and _is_unsupported_parameter_error(exc, param)
+
+
+def _call_with_parameter_recovery(
+    create, kwargs: Dict[str, Any], max_tokens: Optional[int]
+) -> Any:
+    """Make a sync request with bounded, parameter-specific corrections."""
+    corrected_temperature = False
+    corrected_max_tokens = False
+    while True:
+        try:
+            return create(**kwargs)
+        except Exception as exc:
+            if (
+                not corrected_temperature
+                and "temperature" in kwargs
+                and _can_correct_unsupported_parameter(exc, "temperature")
+            ):
+                kwargs.pop("temperature", None)
+                corrected_temperature = True
+                continue
+            if (
+                not corrected_max_tokens
+                and "max_tokens" in kwargs
+                and _can_correct_unsupported_parameter(exc, "max_tokens")
+            ):
+                kwargs.pop("max_tokens", None)
+                if max_tokens is not None:
+                    kwargs["max_completion_tokens"] = max_tokens
+                corrected_max_tokens = True
+                continue
+            raise
+
+
+async def _async_call_with_parameter_recovery(
+    create, kwargs: Dict[str, Any], max_tokens: Optional[int]
+) -> Any:
+    """Async counterpart to :func:`_call_with_parameter_recovery`."""
+    corrected_temperature = False
+    corrected_max_tokens = False
+    while True:
+        try:
+            return await create(**kwargs)
+        except Exception as exc:
+            if (
+                not corrected_temperature
+                and "temperature" in kwargs
+                and _can_correct_unsupported_parameter(exc, "temperature")
+            ):
+                kwargs.pop("temperature", None)
+                corrected_temperature = True
+                continue
+            if (
+                not corrected_max_tokens
+                and "max_tokens" in kwargs
+                and _can_correct_unsupported_parameter(exc, "max_tokens")
+            ):
+                kwargs.pop("max_tokens", None)
+                if max_tokens is not None:
+                    kwargs["max_completion_tokens"] = max_tokens
+                corrected_max_tokens = True
+                continue
+            raise
+
+
 def _try_payment_fallback(
     failed_provider: str,
     task: str = None,
@@ -2133,7 +2240,9 @@ def _build_call_kwargs(
         "timeout": timeout,
     }
 
-    if temperature is not None:
+    if temperature is not None and _temperature_capability(
+        provider, model, base_url=base_url
+    ) is not False:
         kwargs["temperature"] = temperature
 
     if max_tokens is not None:
@@ -2273,23 +2382,12 @@ def call_llm(
         tools=tools, timeout=effective_timeout, extra_body=extra_body,
         base_url=resolved_base_url)
 
-    # Handle max_tokens vs max_completion_tokens retry, then payment fallback.
+    # Correct unsupported optional parameters, then try payment fallback.
     try:
-        return client.chat.completions.create(**kwargs)
+        return _call_with_parameter_recovery(
+            client.chat.completions.create, kwargs, max_tokens
+        )
     except Exception as first_err:
-        err_str = str(first_err)
-        if "max_tokens" in err_str or "unsupported_parameter" in err_str:
-            kwargs.pop("max_tokens", None)
-            kwargs["max_completion_tokens"] = max_tokens
-            try:
-                return client.chat.completions.create(**kwargs)
-            except Exception as retry_err:
-                # If the max_tokens retry also hits a payment error,
-                # fall through to the payment fallback below.
-                if not _is_payment_error(retry_err):
-                    raise
-                first_err = retry_err
-
         # ── Payment / credit exhaustion fallback ──────────────────────
         # When the resolved provider returns 402 or a credit-related error,
         # try alternative providers instead of giving up.  This handles the
@@ -2304,7 +2402,9 @@ def call_llm(
                     temperature=temperature, max_tokens=max_tokens,
                     tools=tools, timeout=effective_timeout,
                     extra_body=extra_body)
-                return fb_client.chat.completions.create(**fb_kwargs)
+                return _call_with_parameter_recovery(
+                    fb_client.chat.completions.create, fb_kwargs, max_tokens
+                )
         raise
 
 
@@ -2444,12 +2544,6 @@ async def async_call_llm(
         tools=tools, timeout=effective_timeout, extra_body=extra_body,
         base_url=resolved_base_url)
 
-    try:
-        return await client.chat.completions.create(**kwargs)
-    except Exception as first_err:
-        err_str = str(first_err)
-        if "max_tokens" in err_str or "unsupported_parameter" in err_str:
-            kwargs.pop("max_tokens", None)
-            kwargs["max_completion_tokens"] = max_tokens
-            return await client.chat.completions.create(**kwargs)
-        raise
+    return await _async_call_with_parameter_recovery(
+        client.chat.completions.create, kwargs, max_tokens
+    )

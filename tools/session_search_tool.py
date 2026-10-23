@@ -22,8 +22,16 @@ import logging
 from typing import Dict, Any, List, Optional, Union
 
 from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
+from agent.error_classifier import FailoverReason, classify_api_error
 MAX_SESSION_CHARS = 100_000
 MAX_SUMMARY_TOKENS = 10000
+
+_TRANSIENT_SUMMARY_ERRORS = frozenset({
+    FailoverReason.rate_limit,
+    FailoverReason.overloaded,
+    FailoverReason.server_error,
+    FailoverReason.timeout,
+})
 
 
 def _format_timestamp(ts: Union[int, float, str, None]) -> str:
@@ -170,20 +178,24 @@ async def _summarize_session(
                 await asyncio.sleep(1 * (attempt + 1))
                 continue
             return content
-        except RuntimeError:
-            logging.warning("No auxiliary model available for session summarization")
-            return None
         except Exception as e:
-            if attempt < max_retries - 1:
-                await asyncio.sleep(1 * (attempt + 1))
-            else:
-                logging.warning(
-                    "Session summarization failed after %d attempts: %s",
-                    max_retries,
-                    e,
-                    exc_info=True,
-                )
+            if isinstance(e, RuntimeError) and "No LLM provider configured" in str(e):
+                logging.warning("No auxiliary model available for session summarization")
                 return None
+
+            classified = classify_api_error(e)
+            retryable = classified.reason in _TRANSIENT_SUMMARY_ERRORS
+            logging.warning(
+                "Session summarization failed (attempt %d/%d, status=%s, category=%s, retryable=%s)",
+                attempt + 1,
+                max_retries,
+                classified.status_code,
+                classified.reason.value,
+                retryable,
+            )
+            if not retryable or attempt >= max_retries - 1:
+                return None
+            await asyncio.sleep(1 * (attempt + 1))
 
 
 # Sources that are excluded from session browsing/searching by default.

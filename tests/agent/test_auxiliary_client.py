@@ -1,7 +1,9 @@
 """Tests for agent.auxiliary_client resolution chain, provider overrides, and model overrides."""
 
+import asyncio
 import json
-from unittest.mock import patch, MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
@@ -13,6 +15,9 @@ from agent.auxiliary_client import (
     resolve_provider_client,
     auxiliary_max_tokens_param,
     call_llm,
+    async_call_llm,
+    _build_call_kwargs,
+    _call_with_parameter_recovery,
     _read_codex_access_token,
     _get_auxiliary_provider,
     _get_provider_chain,
@@ -20,6 +25,88 @@ from agent.auxiliary_client import (
     _try_payment_fallback,
     _resolve_forced_provider,
 )
+
+
+class TestAuxiliaryTemperatureCompatibility:
+    def test_openai_model_without_temperature_omits_explicit_value(self):
+        info = SimpleNamespace(temperature=False)
+        with patch("agent.models_dev.get_cached_model_info", return_value=info) as lookup:
+            kwargs = _build_call_kwargs(
+                "openai-api", "gpt-5.6-sol", [], temperature=0.1
+            )
+
+        assert "temperature" not in kwargs
+        lookup.assert_called_once_with("openai", "gpt-5.6-sol")
+
+    def test_supported_non_openai_model_preserves_temperature(self):
+        info = SimpleNamespace(temperature=True)
+        with patch("agent.models_dev.get_cached_model_info", return_value=info):
+            kwargs = _build_call_kwargs(
+                "anthropic", "claude-test", [], temperature=0.4
+            )
+
+        assert kwargs["temperature"] == 0.4
+
+    def test_missing_temperature_stays_absent(self):
+        with patch("agent.models_dev.get_cached_model_info") as lookup:
+            kwargs = _build_call_kwargs("openai-api", "gpt-test", [])
+
+        assert "temperature" not in kwargs
+        lookup.assert_not_called()
+
+    def test_unknown_model_preserves_temperature(self):
+        with patch("agent.models_dev.get_cached_model_info", return_value=None):
+            kwargs = _build_call_kwargs(
+                "openai-api", "future-model", [], temperature=0.2
+            )
+
+        assert kwargs["temperature"] == 0.2
+
+    def test_temperature_400_retries_once_without_temperature(self):
+        error = ValueError(
+            "Unsupported value: 'temperature' does not support 0.1 with this model"
+        )
+        error.status_code = 400
+        create = MagicMock(side_effect=[error, "ok"])
+        kwargs = {"model": "future-model", "temperature": 0.1, "max_tokens": 10}
+
+        assert _call_with_parameter_recovery(create, kwargs, 10) == "ok"
+        assert create.call_count == 2
+        assert create.call_args_list[0].kwargs["temperature"] == 0.1
+        assert "temperature" not in create.call_args_list[1].kwargs
+        assert "max_completion_tokens" not in create.call_args_list[1].kwargs
+
+    def test_async_unknown_model_recovers_without_cross_call_leakage(self):
+        calls = []
+
+        async def create(**kwargs):
+            calls.append(dict(kwargs))
+            if "temperature" in kwargs:
+                error = ValueError("temperature is not supported")
+                error.status_code = 400
+                raise error
+            return kwargs["model"]
+
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(side_effect=create)
+        with (
+            patch(
+                "agent.auxiliary_client._get_cached_client",
+                side_effect=lambda provider, model, **kwargs: (client, model),
+            ),
+            patch("agent.models_dev.get_cached_model_info", return_value=None),
+        ):
+            async def run_calls():
+                return await asyncio.gather(
+                    async_call_llm(provider="openai-api", model="one", messages=[], temperature=0.1),
+                    async_call_llm(provider="openai-api", model="two", messages=[], temperature=0.2),
+                )
+
+            results = asyncio.run(run_calls())
+
+        assert sorted(results) == ["one", "two"]
+        assert sorted(call["temperature"] for call in calls if "temperature" in call) == [0.1, 0.2]
+        assert sorted(call["model"] for call in calls if "temperature" not in call) == ["one", "two"]
 
 
 @pytest.fixture(autouse=True)
@@ -628,8 +715,24 @@ class TestGetTextAuxiliaryClient:
         assert call_kwargs.kwargs["base_url"] == "http://localhost:1234/v1"
 
     def test_codex_fallback_when_nothing_else(self, codex_auth_dir):
-        with patch("agent.auxiliary_client._read_nous_auth", return_value=None), \
-             patch("agent.auxiliary_client.OpenAI") as mock_openai:
+        unavailable = (None, None)
+        with patch(
+            "agent.auxiliary_client._resolve_task_provider_model",
+            return_value=("auto", None, None, None),
+        ), patch(
+            "agent.auxiliary_client._read_main_provider", return_value=""
+        ), patch(
+            "agent.auxiliary_client._read_main_model", return_value=""
+        ), patch(
+            "agent.auxiliary_client._try_openrouter", return_value=unavailable
+        ), patch(
+            "agent.auxiliary_client._try_nous", return_value=unavailable
+        ), patch(
+            "agent.auxiliary_client._try_custom_endpoint", return_value=unavailable
+        ), patch(
+            "agent.auxiliary_client._resolve_api_key_provider",
+            return_value=unavailable,
+        ), patch("agent.auxiliary_client.OpenAI") as mock_openai:
             client, model = get_text_auxiliary_client()
         assert model == "gpt-5.2-codex"
         # Returns a CodexAuxiliaryClient wrapper, not a raw OpenAI client
@@ -662,13 +765,28 @@ class TestGetTextAuxiliaryClient:
         assert isinstance(client, CodexAuxiliaryClient)
         assert model == "gpt-5.2-codex"
 
-    def test_returns_none_when_nothing_available(self, monkeypatch):
-        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-        with patch("agent.auxiliary_client._read_nous_auth", return_value=None), \
-             patch("agent.auxiliary_client._read_codex_access_token", return_value=None), \
-             patch("agent.auxiliary_client._resolve_api_key_provider", return_value=(None, None)):
+    def test_returns_none_when_nothing_available(self):
+        """No-provider behavior must not depend on the developer's auth stores."""
+        unavailable = (None, None)
+        with patch(
+            "agent.auxiliary_client._resolve_task_provider_model",
+            return_value=("auto", None, None, None),
+        ), patch(
+            "agent.auxiliary_client._read_main_provider", return_value=""
+        ), patch(
+            "agent.auxiliary_client._read_main_model", return_value=""
+        ), patch(
+            "agent.auxiliary_client._try_openrouter", return_value=unavailable
+        ), patch(
+            "agent.auxiliary_client._try_nous", return_value=unavailable
+        ), patch(
+            "agent.auxiliary_client._try_custom_endpoint", return_value=unavailable
+        ), patch(
+            "agent.auxiliary_client._try_codex", return_value=unavailable
+        ), patch(
+            "agent.auxiliary_client._resolve_api_key_provider",
+            return_value=unavailable,
+        ):
             client, model = get_text_auxiliary_client()
         assert client is None
         assert model is None
@@ -1392,6 +1510,38 @@ class TestCallLlmPaymentFallback:
                     task="compression",
                     messages=[{"role": "user", "content": "hello"}],
                 )
+
+    def test_fallback_reapplies_temperature_capability(self, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        primary_client = MagicMock()
+        primary_client.chat.completions.create.side_effect = self._make_402_error()
+        fallback_client = MagicMock()
+        fallback_client.chat.completions.create.return_value = MagicMock()
+
+        def model_info(provider, model):
+            return SimpleNamespace(temperature=model != "gpt-5.6-sol")
+
+        with (
+            patch(
+                "agent.auxiliary_client._get_cached_client",
+                return_value=(primary_client, "temperature-capable"),
+            ),
+            patch(
+                "agent.auxiliary_client._resolve_task_provider_model",
+                return_value=("openrouter", "temperature-capable", None, None),
+            ),
+            patch(
+                "agent.auxiliary_client._try_payment_fallback",
+                return_value=(fallback_client, "gpt-5.6-sol", "openai-api"),
+            ),
+            patch("agent.models_dev.get_cached_model_info", side_effect=model_info),
+        ):
+            call_llm(messages=[], temperature=0.1)
+
+        primary_kwargs = primary_client.chat.completions.create.call_args.kwargs
+        fallback_kwargs = fallback_client.chat.completions.create.call_args.kwargs
+        assert primary_kwargs["temperature"] == 0.1
+        assert "temperature" not in fallback_kwargs
 
     def test_402_with_no_fallback_reraises(self, monkeypatch):
         """When 402 hits and no fallback is available, the original error propagates."""
