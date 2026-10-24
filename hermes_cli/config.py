@@ -543,7 +543,7 @@ DEFAULT_CONFIG = {
     "logging": {
         "level": "INFO",       # Minimum level for agent.log: DEBUG, INFO, WARNING
         "max_size_mb": 5,      # Max size per log file before rotation
-        "backup_count": 3,     # Number of rotated backup files to keep
+        "backup_count": 3,     # Rotated backups to keep; 0 disables rotation
     },
     
     # X (Twitter) Search via xAI's built-in x_search Responses tool.

@@ -2,12 +2,15 @@
 
 import logging
 import os
+import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytest
 
 import hermes_logging
+from agent.redact import RedactingFormatter
+from hermes_logging_context import HermesLogContextFilter
 
 
 @pytest.fixture(autouse=True)
@@ -109,6 +112,257 @@ class TestSetupLogging:
             and "agent.log" in getattr(h, "baseFilename", "")
         ]
         assert len(agent_handlers) == 1
+
+    def test_force_updates_existing_handler_in_place(self, hermes_home):
+        hermes_logging.setup_logging(hermes_home=hermes_home)
+        handler = next(
+            h for h in logging.getLogger().handlers
+            if getattr(h, "_hermes_log_kind", None) == "agent"
+        )
+
+        hermes_logging.setup_logging(
+            hermes_home=hermes_home,
+            log_level="DEBUG",
+            max_size_mb=10,
+            backup_count=5,
+            force=True,
+        )
+
+        configured = next(
+            h for h in logging.getLogger().handlers
+            if getattr(h, "_hermes_log_kind", None) == "agent"
+        )
+        assert configured is handler
+        assert configured.level == logging.DEBUG
+        assert configured.maxBytes == 10 * 1024 * 1024
+        assert configured.backupCount == 5
+
+    def test_in_place_reconfiguration_preserves_context_filter(self, hermes_home):
+        hermes_logging.setup_logging(hermes_home=hermes_home)
+        handler = next(
+            h for h in logging.getLogger().handlers
+            if getattr(h, "_hermes_log_kind", None) == "agent"
+        )
+        context_filter = next(
+            item for item in handler.filters
+            if isinstance(item, HermesLogContextFilter)
+        )
+
+        hermes_logging.setup_logging(
+            hermes_home=hermes_home, max_size_mb=9, force=True
+        )
+
+        assert handler in logging.getLogger().handlers
+        assert context_filter in handler.filters
+        assert sum(
+            isinstance(item, HermesLogContextFilter)
+            for item in handler.filters
+        ) == 1
+
+    def test_recovers_managed_handler_removed_externally(self, hermes_home):
+        hermes_logging.setup_logging(hermes_home=hermes_home)
+        root = logging.getLogger()
+        errors = next(
+            h for h in root.handlers
+            if getattr(h, "_hermes_log_kind", None) == "errors"
+        )
+        root.removeHandler(errors)
+        errors.close()
+
+        hermes_logging.setup_logging(hermes_home=hermes_home)
+
+        assert len([
+            h for h in root.handlers
+            if getattr(h, "_hermes_log_kind", None) == "errors"
+        ]) == 1
+
+    def test_force_switches_profiles_and_closes_previous_handlers(self, tmp_path):
+        first_home = tmp_path / "first"
+        second_home = tmp_path / "second"
+        hermes_logging.setup_logging(hermes_home=first_home)
+        root = logging.getLogger()
+        old = {
+            getattr(h, "_hermes_log_kind", None): h
+            for h in root.handlers
+            if getattr(h, "_hermes_log_kind", None) in {"agent", "errors"}
+        }
+
+        result = hermes_logging.setup_logging(
+            hermes_home=second_home, force=True
+        )
+
+        assert result == second_home / "logs"
+        current = {
+            getattr(h, "_hermes_log_kind", None): h
+            for h in root.handlers
+            if getattr(h, "_hermes_log_kind", None) in {"agent", "errors"}
+        }
+        assert all(Path(h.baseFilename).parent == second_home / "logs" for h in current.values())
+        assert all(h not in root.handlers and h.stream is None for h in old.values())
+        assert all(
+            sum(isinstance(item, HermesLogContextFilter) for item in h.filters) == 1
+            for h in current.values()
+        )
+
+    def test_failed_profile_switch_keeps_previous_handlers(
+        self, tmp_path, monkeypatch
+    ):
+        first_home = tmp_path / "first"
+        second_home = tmp_path / "second"
+        hermes_logging.setup_logging(hermes_home=first_home)
+        root = logging.getLogger()
+        old = {
+            getattr(h, "_hermes_log_kind", None): h
+            for h in root.handlers
+            if getattr(h, "_hermes_log_kind", None) in {"agent", "errors"}
+        }
+        real_create = hermes_logging._create_rotating_handler
+        created = []
+
+        def fail_second(**kwargs):
+            if kwargs["managed_kind"] == "errors":
+                raise OSError("synthetic handler creation failure")
+            handler = real_create(**kwargs)
+            created.append(handler)
+            return handler
+
+        monkeypatch.setattr(hermes_logging, "_create_rotating_handler", fail_second)
+        with pytest.raises(OSError, match="synthetic handler"):
+            hermes_logging.setup_logging(hermes_home=second_home, force=True)
+
+        assert all(handler in root.handlers for handler in old.values())
+        assert all(handler.stream is not None for handler in old.values())
+        assert created and all(handler.stream is None for handler in created)
+
+    def test_attachment_failure_rolls_back_entire_profile_switch(
+        self, tmp_path, monkeypatch
+    ):
+        first_home = tmp_path / "first"
+        second_home = tmp_path / "second"
+        hermes_logging.setup_logging(hermes_home=first_home)
+        root = logging.getLogger()
+        old_handlers = [
+            h for h in root.handlers
+            if getattr(h, "_hermes_log_kind", None) in {"agent", "errors"}
+        ]
+        prepared = []
+
+        def attach_then_fail(handler):
+            prepared.append(handler)
+            root.handlers.append(handler)
+            if len(prepared) == 2:
+                raise RuntimeError("synthetic attachment failure")
+
+        monkeypatch.setattr(root, "addHandler", attach_then_fail)
+        with pytest.raises(RuntimeError, match="attachment failure"):
+            hermes_logging.setup_logging(hermes_home=second_home, force=True)
+
+        assert all(handler in root.handlers for handler in old_handlers)
+        assert all(handler.stream is not None for handler in old_handlers)
+        assert len(prepared) == 2
+        assert all(handler not in root.handlers for handler in prepared)
+        assert all(handler.stream is None for handler in prepared)
+
+    def test_recognizable_legacy_handler_is_adopted(self, hermes_home):
+        root = logging.getLogger()
+        path = hermes_home / "logs" / "agent.log"
+        path.parent.mkdir(parents=True)
+        legacy = RotatingFileHandler(
+            path, maxBytes=5 * 1024 * 1024, backupCount=3
+        )
+        root.addHandler(legacy)
+
+        hermes_logging.setup_logging(hermes_home=hermes_home)
+
+        matching = [
+            handler for handler in root.handlers
+            if isinstance(handler, RotatingFileHandler)
+            and Path(handler.baseFilename).resolve() == path.resolve()
+        ]
+        assert matching == [legacy]
+        assert legacy._hermes_managed is True
+        assert legacy._hermes_log_kind == "agent"
+        assert isinstance(legacy.formatter, RedactingFormatter)
+        assert any(isinstance(item, HermesLogContextFilter) for item in legacy.filters)
+
+    def test_ambiguous_same_path_handler_remains_untouched(self, hermes_home):
+        root = logging.getLogger()
+        path = hermes_home / "logs" / "agent.log"
+        path.parent.mkdir(parents=True)
+        formatter = logging.Formatter("ambiguous:%(message)s")
+        ambiguous = RotatingFileHandler(path, maxBytes=1234, backupCount=7)
+        ambiguous.setLevel(logging.ERROR)
+        ambiguous.setFormatter(formatter)
+        root.addHandler(ambiguous)
+
+        hermes_logging.setup_logging(hermes_home=hermes_home)
+
+        managed = next(
+            handler for handler in root.handlers
+            if getattr(handler, "_hermes_log_kind", None) == "agent"
+        )
+        assert managed is not ambiguous
+        assert ambiguous in root.handlers
+        assert not getattr(ambiguous, "_hermes_managed", False)
+        assert ambiguous.level == logging.ERROR
+        assert ambiguous.maxBytes == 1234
+        assert ambiguous.backupCount == 7
+        assert ambiguous.formatter is formatter
+
+    def test_force_preserves_unrelated_and_verbose_handlers(self, hermes_home):
+        root = logging.getLogger()
+        unrelated = logging.StreamHandler()
+        root.addHandler(unrelated)
+        hermes_logging.setup_logging(hermes_home=hermes_home)
+        hermes_logging.setup_verbose_logging()
+        verbose = next(h for h in root.handlers if getattr(h, "_hermes_verbose", False))
+
+        hermes_logging.setup_logging(
+            hermes_home=hermes_home, log_level="WARNING", force=True
+        )
+
+        assert unrelated in root.handlers
+        assert verbose in root.handlers
+        assert root.level <= logging.DEBUG
+
+    def test_setup_preserves_notset_root_for_unrelated_debug_handlers(
+        self, hermes_home
+    ):
+        root = logging.getLogger()
+        previous_level = root.level
+        root.setLevel(logging.NOTSET)
+        try:
+            hermes_logging.setup_logging(hermes_home=hermes_home)
+            assert root.level == logging.NOTSET
+        finally:
+            root.setLevel(previous_level)
+
+    def test_concurrent_initialization_creates_one_handler_per_kind(self, hermes_home):
+        workers = 6
+        barrier = threading.Barrier(workers)
+        failures = []
+
+        def initialize():
+            try:
+                barrier.wait(timeout=5)
+                hermes_logging.setup_logging(hermes_home=hermes_home, force=True)
+            except Exception as exc:
+                failures.append(exc)
+
+        threads = [threading.Thread(target=initialize) for _ in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        assert not failures
+        assert not any(thread.is_alive() for thread in threads)
+        kinds = [
+            getattr(h, "_hermes_log_kind", None)
+            for h in logging.getLogger().handlers
+        ]
+        assert kinds.count("agent") == 1
+        assert kinds.count("errors") == 1
 
     def test_custom_log_level(self, hermes_home):
         hermes_logging.setup_logging(hermes_home=hermes_home, log_level="DEBUG")
@@ -285,6 +539,95 @@ class TestSetupLogging:
         ]
         assert agent_handlers[0].level == logging.WARNING
 
+    def test_zero_backup_count_is_preserved(self, hermes_home):
+        hermes_logging.setup_logging(hermes_home=hermes_home, backup_count=0)
+        handler = next(
+            h for h in logging.getLogger().handlers
+            if getattr(h, "_hermes_log_kind", None) == "agent"
+        )
+        assert handler.backupCount == 0
+
+    @pytest.mark.parametrize(
+        ("kwargs", "error"),
+        [
+            ({"max_size_mb": 0}, ValueError),
+            ({"max_size_mb": -1}, ValueError),
+            ({"backup_count": -1}, ValueError),
+            ({"max_size_mb": True}, TypeError),
+            ({"backup_count": False}, TypeError),
+            ({"log_level": ""}, ValueError),
+            ({"log_level": "TRACE"}, ValueError),
+            ({"log_level": 10}, TypeError),
+        ],
+    )
+    def test_invalid_explicit_configuration_fails_before_mutation(
+        self, hermes_home, kwargs, error
+    ):
+        root = logging.getLogger()
+        before = list(root.handlers)
+        with pytest.raises(error):
+            hermes_logging.setup_logging(hermes_home=hermes_home, **kwargs)
+        assert root.handlers == before
+
+    def test_invalid_yaml_fields_warn_and_use_defaults(self, hermes_home, capsys):
+        import yaml
+        config = {
+            "logging": {
+                "level": "TRACE",
+                "max_size_mb": False,
+                "backup_count": -1,
+            }
+        }
+        (hermes_home / "config.yaml").write_text(yaml.dump(config))
+
+        hermes_logging.setup_logging(hermes_home=hermes_home)
+
+        handler = next(
+            h for h in logging.getLogger().handlers
+            if getattr(h, "_hermes_log_kind", None) == "agent"
+        )
+        assert handler.level == logging.INFO
+        assert handler.maxBytes == 5 * 1024 * 1024
+        assert handler.backupCount == 3
+        stderr = capsys.readouterr().err
+        assert "logging.level" in stderr
+        assert "logging.max_size_mb" in stderr
+        assert "logging.backup_count" in stderr
+        assert "TRACE" not in stderr
+
+    def test_malformed_yaml_warns_and_uses_defaults(self, hermes_home, capsys):
+        (hermes_home / "config.yaml").write_text("logging: [unterminated")
+        hermes_logging.setup_logging(hermes_home=hermes_home)
+        assert "unable to read logging configuration" in capsys.readouterr().err
+        handler = next(
+            h for h in logging.getLogger().handlers
+            if getattr(h, "_hermes_log_kind", None) == "agent"
+        )
+        assert handler.level == logging.INFO
+
+    def test_explicit_home_reads_its_own_configuration(self, tmp_path):
+        import yaml
+        first = tmp_path / "profile-one"
+        second = tmp_path / "profile-two"
+        first.mkdir()
+        second.mkdir()
+        (first / "config.yaml").write_text(yaml.dump({"logging": {"level": "DEBUG"}}))
+        (second / "config.yaml").write_text(yaml.dump({"logging": {"level": "ERROR"}}))
+
+        hermes_logging.setup_logging(hermes_home=first)
+        first_handler = next(
+            h for h in logging.getLogger().handlers
+            if getattr(h, "_hermes_log_kind", None) == "agent"
+        )
+        assert first_handler.level == logging.DEBUG
+        hermes_logging.setup_logging(hermes_home=second, force=True)
+        second_handler = next(
+            h for h in logging.getLogger().handlers
+            if getattr(h, "_hermes_log_kind", None) == "agent"
+        )
+        assert second_handler.level == logging.ERROR
+        assert Path(second_handler.baseFilename).parent == second / "logs"
+
 
 class TestSetupVerboseLogging:
     """setup_verbose_logging() adds a DEBUG-level console handler."""
@@ -365,6 +708,50 @@ class TestAddRotatingHandler:
             if isinstance(h, RotatingFileHandler):
                 logger.removeHandler(h)
                 h.close()
+
+    def test_rollover_retains_backup_and_continues_logging(self, tmp_path):
+        path = tmp_path / "rotate.log"
+        logger = logging.getLogger("_test_rollover")
+        logger.propagate = False
+        logger.setLevel(logging.INFO)
+        handler = hermes_logging._add_rotating_handler(
+            logger, path, level=logging.INFO, max_bytes=80, backup_count=1,
+            formatter=logging.Formatter("prefix:%(message)s"),
+            managed_kind="agent",
+        )
+        try:
+            logger.info("a" * 60)
+            logger.info("b" * 60)
+            logger.info("after-rollover")
+            handler.flush()
+            assert (tmp_path / "rotate.log.1").exists()
+            combined = path.read_text() + (tmp_path / "rotate.log.1").read_text()
+            assert "prefix:" in combined
+            assert "after-rollover" in combined
+        finally:
+            logger.removeHandler(handler)
+            handler.close()
+
+    def test_zero_backups_disables_rollover(self, tmp_path):
+        path = tmp_path / "no-rollover.log"
+        logger = logging.getLogger("_test_no_rollover")
+        logger.propagate = False
+        logger.setLevel(logging.INFO)
+        handler = hermes_logging._add_rotating_handler(
+            logger, path, level=logging.INFO, max_bytes=40, backup_count=0,
+            formatter=logging.Formatter("%(message)s"),
+            managed_kind="agent",
+        )
+        try:
+            logger.info("x" * 100)
+            logger.info("still-active")
+            handler.flush()
+            assert path.stat().st_size > 40
+            assert not list(tmp_path.glob("no-rollover.log.*"))
+            assert "still-active" in path.read_text()
+        finally:
+            logger.removeHandler(handler)
+            handler.close()
 
 
 class TestReadLoggingConfig:

@@ -7982,6 +7982,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         max_bytes=5 * 1024 * 1024,
         backup_count=3,
         formatter=RedactingFormatter(_LOG_FORMAT),
+        managed_kind="gateway",
+        reconfigure=True,
     )
     from hermes_logging_context import (
         GatewayLogFilter,

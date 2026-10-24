@@ -76,3 +76,60 @@ def test_handler_and_filters_are_idempotent(tmp_path):
     assert sum(isinstance(item, GatewayLogFilter) for item in first.filters) == 1
     first.close()
     logger.handlers.clear()
+
+
+def test_gateway_reconfiguration_preserves_filters_and_switches_path(tmp_path):
+    logger = logging.getLogger("test.gateway.routing.reconfigure")
+    logger.propagate = False
+    first_path = tmp_path / "first" / "gateway.log"
+    second_path = tmp_path / "second" / "gateway.log"
+    first = _add_rotating_handler(
+        logger, first_path, level=logging.INFO, max_bytes=1024,
+        backup_count=1, formatter=RedactingFormatter(_LOG_FORMAT),
+        managed_kind="gateway", reconfigure=True,
+    )
+    add_filter_once(first, HermesLogContextFilter)
+    add_filter_once(first, GatewayLogFilter)
+
+    second = _add_rotating_handler(
+        logger, second_path, level=logging.WARNING, max_bytes=2048,
+        backup_count=2, formatter=RedactingFormatter(_LOG_FORMAT),
+        managed_kind="gateway", reconfigure=True,
+    )
+
+    assert second is not first
+    assert first.stream is None
+    assert second.level == logging.WARNING
+    assert second.maxBytes == 2048
+    assert second.backupCount == 2
+    assert any(isinstance(item, HermesLogContextFilter) for item in second.filters)
+    assert any(isinstance(item, GatewayLogFilter) for item in second.filters)
+    second.close()
+    logger.handlers.clear()
+
+
+def test_gateway_in_place_reconfiguration_preserves_filter_instances(tmp_path):
+    logger = logging.getLogger("test.gateway.routing.in_place")
+    logger.propagate = False
+    path = tmp_path / "gateway.log"
+    first = _add_rotating_handler(
+        logger, path, level=logging.INFO, max_bytes=1024,
+        backup_count=1, formatter=RedactingFormatter(_LOG_FORMAT),
+        managed_kind="gateway", reconfigure=True,
+    )
+    add_filter_once(first, HermesLogContextFilter)
+    add_filter_once(first, GatewayLogFilter)
+    original_filters = tuple(first.filters)
+
+    second = _add_rotating_handler(
+        logger, path, level=logging.WARNING, max_bytes=2048,
+        backup_count=2, formatter=RedactingFormatter(_LOG_FORMAT),
+        managed_kind="gateway", reconfigure=True,
+    )
+
+    assert second is first
+    assert tuple(second.filters) == original_filters
+    assert sum(isinstance(item, HermesLogContextFilter) for item in second.filters) == 1
+    assert sum(isinstance(item, GatewayLogFilter) for item in second.filters) == 1
+    second.close()
+    logger.handlers.clear()

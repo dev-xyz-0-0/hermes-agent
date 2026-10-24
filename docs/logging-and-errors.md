@@ -23,8 +23,9 @@ Logging is initialized at process startup rather than during module import:
 | `python -m cron.scheduler` | `setup_logging(mode="cron")` in `cron/scheduler.py` |
 | Code importing `cron.scheduler.tick()` | The embedding process owns logging setup |
 
-`setup_logging()` is idempotent. Repeated calls do not attach another handler
-for the same resolved file path.
+`setup_logging()` is idempotent. Hermes marks the handlers it owns and repeated
+calls do not attach another managed handler for the same purpose. If a managed
+handler is removed externally, a later setup call repairs it.
 
 ## Log Files
 
@@ -66,6 +67,54 @@ logging:
 These settings configure the main agent log. The error log has separate
 hardcoded rotation settings. Cron mode does not create a separate `cron.log`.
 
+Configuration is resolved independently for each setting:
+
+```text
+explicit setup_logging() argument > active profile config.yaml > built-in default
+```
+
+`level` accepts `DEBUG`, `INFO`, `WARN`/`WARNING`, `ERROR`, and
+`FATAL`/`CRITICAL`. `max_size_mb` must be a positive integer and
+`backup_count` must be a nonnegative integer; booleans are not accepted as
+integers. Invalid explicit arguments raise before handlers are modified.
+Invalid profile configuration fields produce a value-free stderr warning and
+fall back to that field's default. An explicit `hermes_home` reads
+`config.yaml` from that same home rather than from another active profile.
+
+`backup_count: 0` uses the standard-library behavior: size-based rollover is
+disabled and the active `agent.log` can grow past `max_size_mb`. Use at least
+one backup when bounded disk use is required. This setting does not alter the
+independent fixed rotation policies for `errors.log` or `gateway.log`.
+
+### Reconfiguration
+
+Ordinary repeated setup preserves existing managed handlers. Calling
+`setup_logging(force=True)` reapplies the agent level and rotation properties
+in place when the profile path is unchanged. When the target profile changes,
+Hermes opens both replacement file handlers before swapping them in. Creation
+or attachment failure removes and closes every prepared replacement while the
+previous handlers remain attached and usable. Only after every replacement is
+attached are the previous managed handlers detached, flushed, and closed.
+Unrelated and verbose-console handlers are preserved, and root severity is
+never raised in a way that would disable their diagnostic records.
+
+In-place reconfiguration retains the existing P1 context-filter instances.
+Replacement `agent.log` and `errors.log` handlers receive exactly one context
+filter, while replacement gateway handlers carry forward both their context
+and gateway-ownership filters.
+
+Handlers created by older Hermes versions did not carry ownership metadata.
+Hermes adopts one only when it targets the canonical `agent.log` or
+`errors.log` path and matches that log's historical rotation shape. An
+ambiguous same-path handler remains untouched; Hermes creates a separately
+owned handler instead of changing or closing the ambiguous handler.
+
+Editing `config.yaml` does not hot-reload a running process. Application code
+must explicitly call `setup_logging(force=True)`. A separately running gateway
+normally requires restart to read configuration changes. Gateway startup owns
+and reconfigures `gateway.log` independently while retaining its P1 ownership
+and correlation filters.
+
 ## Viewing Logs
 
 Inspect the latest application events:
@@ -84,6 +133,12 @@ Watch gateway activity:
 
 ```bash
 tail -F ~/.hermes/logs/gateway.log
+```
+
+Inspect current disk use:
+
+```bash
+du -h ~/.hermes/logs/*
 ```
 
 Search for cron failures and tracebacks:
@@ -205,6 +260,10 @@ so call sites must still minimize logged data.
   processes can race and may lose or misplace records. A centralized logging
   process or multiprocess-safe handler would be required to eliminate this
   residual risk.
+- Configuration files are read at setup time; there is no automatic hot reload.
+- If an unrelated or ambiguous handler already writes to a canonical Hermes
+  path, it is preserved rather than adopted. Both handlers may then write that
+  file; remove the external handler at its owner if duplicate records appear.
 - Exception handlers outside the bounded P1 audit may still have insufficient
   visibility. See `docs/exception-handling-audit.md` for scope and backlog.
 
@@ -258,6 +317,11 @@ The logging reliability tests cover:
 - Gateway ownership filtering and repeated filter initialization.
 - Persisted redaction for messages, URL credentials, query tokens, webhook
   credentials, private keys, and nested exception chains.
+- Configuration precedence, validation, zero-backup behavior, forced
+  reconfiguration, creation/attachment rollback, and concurrent setup.
+- Recognizable legacy-handler adoption, ambiguous-handler preservation, and
+  P1 filter retention across in-place updates and replacements.
+- Deterministic rollover, backup retention, and continued formatted logging.
 - Profile-aware standalone scheduler logging and graceful process exit.
 - Low-volume concurrent appends from two processes without forcing rotation.
 - Scheduler tracebacks and preservation of job failure-status updates.
@@ -273,6 +337,7 @@ Run the focused suite from the repository root:
 ```bash
 source venv/bin/activate
 python -m pytest \
+  -n 0 \
   tests/test_logging_context.py \
   tests/test_gateway_log_filter.py \
   tests/test_hermes_logging.py \
@@ -283,8 +348,8 @@ python -m pytest \
 
 ## Remaining Work
 
-The focused P0 implementation is complete, but the following work remains for
-future reliability improvements.
+The focused P0–P2 logging reliability implementation is complete, but the
+following work remains for future reliability improvements.
 
 ### Actionable technical debt
 
@@ -323,33 +388,154 @@ These are boundaries rather than implementation defects:
 - Abrupt process termination can lose buffered records or prevent the final
   cron status update.
 
-## Operational Validation Checklist
+## Agent-Assisted Operational Validation
+
+Use an isolated Hermes profile and give your agent this prompt:
+
+```text
+Perform a read-only operational validation of Hermes logging.
+
+Safety constraints:
+
+- Do not modify source code, configuration, credentials, databases, or scheduled jobs.
+- Do not restart or stop the gateway.
+- Do not execute live cron jobs or send gateway messages.
+- Do not access another profile.
+- Do not print or copy secret values.
+- Do not force log rotation or generate excessive log volume.
+- Use the currently active HERMES_HOME/profile.
+- If a check requires mutation, synthetic exception injection, reconfiguration,
+  or service restart, mark it NOT RUN and identify the relevant automated test.
+
+Tasks:
+
+1. Resolve and report the active profile and log directory without exposing
+   credentials.
+2. Check whether these files exist and are readable:
+   - logs/agent.log
+   - logs/errors.log
+   - logs/gateway.log
+3. Report file sizes, modification times, permissions, and available disk space.
+4. Inspect recent and rotated log files for:
+   - ERROR, CRITICAL, Traceback, and exception records
+   - cron.execution.* and cron.delivery.* lifecycle events
+   - job_id, run_id, and profile correlation fields
+   - background thread, asyncio, and detached-future failures
+5. Verify from recent records that:
+   - gateway-owned records can appear in gateway.log
+   - ordinary agent and cron records do not appear in gateway.log
+   - WARNING+ records overlap into errors.log where expected
+6. Inspect config.yaml without displaying unrelated fields or values. Report only:
+   - logging.level
+   - logging.max_size_mb
+   - logging.backup_count
+   Validate their types and ranges.
+7. If backup_count is 0, explain that size-based rollover is disabled and the
+   active agent.log may exceed max_size_mb.
+8. Look for evidence of duplicate identical records caused by duplicate handlers.
+   Do not claim handler-count verification from file inspection alone.
+9. Search for obvious unredacted synthetic/test credential patterns, but never
+   reproduce suspected secret text. Report only filename, line number, pattern
+   category, and a masked fingerprint.
+10. Run only these non-networked automated tests if the repository and virtual
+    environment are available:
+
+    source venv/bin/activate
+    python -m pytest -n 0 \
+      tests/test_hermes_logging.py \
+      tests/test_gateway_log_filter.py \
+      tests/test_logging_context.py \
+      tests/test_exception_hooks.py \
+      tests/cron/test_logging_reliability.py \
+      tests/gateway/test_exception_hook_lifecycle.py -q
+
+11. Run git diff --check. Do not edit files.
+
+Return a report with:
+
+- Overall verdict: PASS, PARTIAL, or FAIL
+- Active profile and resolved log directory
+- Read-only operational findings
+- Automated test command and exact pass/fail/skip counts
+- Checklist table with PASS, FAIL, NOT RUN, or NOT APPLICABLE
+- Any suspected redaction issue with secrets masked
+- Remaining risks and recommended next actions
+
+Do not mark checks PASS without direct evidence. Clearly distinguish automated
+test evidence from observations of the running instance.
+```
+
+This prompt intentionally leaves reconfiguration rollback, concurrency, synthetic failure injection, and forced rotation to automated tests rather than experimenting on your running instance.
+
+
+## Operational and Automated Validation Checklist
 
 Use an isolated profile or test installation; do not run live jobs or alter a
 production gateway solely to complete this checklist.
 
+Items involving failure injection, forced reconfiguration, concurrency, or
+synthetic exceptions should be verified through the automated tests above, not
+against a production gateway.
+
+### Logging and configuration
+
 - [ ] An INFO record appears in the active profile's `agent.log`.
 - [ ] A WARNING record appears in both `agent.log` and `errors.log`.
+- [ ] The active profile reads logging settings from its own `config.yaml`.
+- [ ] Explicit `setup_logging()` arguments override profile configuration.
+- [ ] Invalid explicit logging settings fail without changing existing handlers.
+- [ ] Invalid YAML logging fields emit a safe warning and use documented defaults.
+- [ ] `backup_count: 0` creates no rotated backups; the active log may exceed
+  `max_size_mb`.
+- [ ] `setup_logging(force=True)` updates level and rotation settings without
+  duplicating managed handlers.
+- [ ] Reconfiguration to another profile moves managed file handlers to the new
+  profile and closes the previous handlers.
+- [ ] A simulated replacement creation or attachment failure leaves the previous
+  managed handlers attached and usable.
+- [ ] Repeated or concurrent initialization leaves exactly one managed
+  `agent.log` handler and one managed `errors.log` handler.
+- [ ] Unrelated and verbose-console handlers survive forced reconfiguration.
+- [ ] Recognizable legacy Hermes handlers are adopted.
+- [ ] Ambiguous same-path handlers remain unchanged and are not adopted.
+- [ ] Rotation retains the configured number of backups and logging continues
+  after rollover.
+
+### Gateway and routing
+
 - [ ] Gateway startup creates and writes to `gateway.log`.
+- [ ] Gateway INFO and ERROR records appear in `gateway.log`.
 - [ ] Agent, cron, root, and unmarked third-party records do not enter
   `gateway.log`.
+- [ ] Gateway WARNING and ERROR records continue to appear in `errors.log`.
+- [ ] In-place gateway reconfiguration preserves its context and ownership
+  filter instances.
+- [ ] Gateway handler replacement retains exactly one context filter and one
+  gateway-ownership filter.
+- [ ] Repeated gateway initialization does not duplicate handlers or records.
+
+### Cron and background failures
+
 - [ ] A gateway cron-ticker exception appears in `errors.log` with a traceback.
-- [ ] A standalone `python -m cron.scheduler` run writes to the active
-  profile's log directory.
+- [ ] A standalone `python -m cron.scheduler` run writes to the active profile's
+  log directory.
 - [ ] An unexpected cron execution or processing failure includes its exception
   type, traceback, and safe job ID.
 - [ ] Two attempts of the same cron job have different run IDs, stable profile
   context throughout each attempt, and no context leakage afterward.
 - [ ] Cron execution and delivery failures remain distinguishable in job state.
-- [ ] A synthetic secret in an exception message is redacted from the formatted
-  traceback.
 - [ ] An uncaught named-thread exception is persisted and retains normal Python
   exception visibility.
 - [ ] An unretrieved asyncio task or callback exception is persisted, while
   normal cancellation produces no ERROR record.
 - [ ] An intentionally detached executor future reports an unexpected failure
   exactly once.
-- [ ] Repeated logging and hook initialization does not duplicate records.
+
+### Security and operational behavior
+
+- [ ] Synthetic secrets are redacted from ordinary messages and formatted
+  tracebacks in `agent.log`, `errors.log`, and `gateway.log`.
 - [ ] Graceful process shutdown flushes expected records.
+- [ ] Configuration-file changes are not described as automatically hot-reloaded.
 - [ ] Rotation works in a single process; multiprocess rotation remains tracked
   under **Remaining Work**.
