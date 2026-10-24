@@ -1030,6 +1030,8 @@ class HolographicMemoryProvider(MemoryProvider):
         self._apply_candidates(candidates, extraction_method="rules", via="auto_capture", deadline=deadline)
 
     def _queue_hybrid_capture(self, user_content: str) -> None:
+        from hermes_exception_hooks import observe_future
+
         executor = self._capture_executor
         if executor is None:
             self._metric("hybrid_unavailable")
@@ -1037,6 +1039,7 @@ class HolographicMemoryProvider(MemoryProvider):
         self._metric("hybrid_attempts")
         future = executor.submit(self._run_hybrid_capture, user_content)
         self._capture_futures.add(future)
+        observe_future(future, component="holographic-memory-capture")
         future.add_done_callback(self._capture_futures.discard)
 
     def _run_hybrid_capture(self, user_content: str) -> None:

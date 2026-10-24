@@ -7847,8 +7847,8 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     while not stop_event.is_set():
         try:
             cron_tick(verbose=False, adapters=adapters, loop=loop)
-        except Exception as e:
-            logger.debug("Cron tick error: %s", e)
+        except Exception:
+            logger.exception("Gateway cron tick failed")
 
         tick_count += 1
 
@@ -7999,66 +7999,81 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         if _stderr_level < logging.getLogger().level:
             logging.getLogger().setLevel(_stderr_level)
 
-    runner = GatewayRunner(config)
-    
-    # Set up signal handlers
-    def signal_handler():
-        asyncio.create_task(runner.stop())
-    
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, signal_handler)
-        except NotImplementedError:
-            pass
-    
-    # Start the gateway
-    success = await runner.start()
-    if not success:
-        return False
-    if runner.should_exit_cleanly:
-        if runner.exit_reason:
-            logger.error("Gateway exiting cleanly: %s", runner.exit_reason)
-        return True
-    
-    # Write PID file so CLI can detect gateway is running
-    import atexit
-    from gateway.status import write_pid_file, remove_pid_file
-    write_pid_file()
-    atexit.register(remove_pid_file)
-    
-    # Start background cron ticker so scheduled jobs fire automatically.
-    # Pass the event loop so cron delivery can use live adapters (E2EE support).
-    cron_stop = threading.Event()
-    cron_thread = threading.Thread(
-        target=_start_cron_ticker,
-        args=(cron_stop,),
-        kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop()},
-        daemon=True,
-        name="cron-ticker",
+    from hermes_exception_hooks import (
+        install_asyncio_exception_handler,
+        install_thread_exception_hook,
+        restore_asyncio_exception_handler,
+        restore_thread_exception_hook,
     )
-    cron_thread.start()
-    
-    # Wait for shutdown
-    await runner.wait_for_shutdown()
 
-    if runner.should_exit_with_failure:
-        if runner.exit_reason:
-            logger.error("Gateway exiting with failure: %s", runner.exit_reason)
-        return False
-    
-    # Stop cron ticker cleanly
-    cron_stop.set()
-    cron_thread.join(timeout=5)
-
-    # Close MCP server connections
+    loop = asyncio.get_running_loop()
+    thread_hook_installed = install_thread_exception_hook()
+    loop_hook_installed = install_asyncio_exception_handler(loop)
     try:
-        from tools.mcp_tool import shutdown_mcp_servers
-        shutdown_mcp_servers()
-    except Exception:
-        pass
+        runner = GatewayRunner(config)
 
-    return True
+        # Set up signal handlers
+        def signal_handler():
+            asyncio.create_task(runner.stop())
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, signal_handler)
+            except NotImplementedError:
+                pass
+
+        # Start the gateway
+        success = await runner.start()
+        if not success:
+            return False
+        if runner.should_exit_cleanly:
+            if runner.exit_reason:
+                logger.error("Gateway exiting cleanly: %s", runner.exit_reason)
+            return True
+
+        # Write PID file so CLI can detect gateway is running
+        import atexit
+        from gateway.status import write_pid_file, remove_pid_file
+        write_pid_file()
+        atexit.register(remove_pid_file)
+
+        # Start background cron ticker so scheduled jobs fire automatically.
+        # Pass the event loop so cron delivery can use live adapters (E2EE support).
+        cron_stop = threading.Event()
+        cron_thread = threading.Thread(
+            target=_start_cron_ticker,
+            args=(cron_stop,),
+            kwargs={"adapters": runner.adapters, "loop": loop},
+            daemon=True,
+            name="cron-ticker",
+        )
+        cron_thread.start()
+
+        # Wait for shutdown
+        await runner.wait_for_shutdown()
+
+        if runner.should_exit_with_failure:
+            if runner.exit_reason:
+                logger.error("Gateway exiting with failure: %s", runner.exit_reason)
+            return False
+
+        # Stop cron ticker cleanly
+        cron_stop.set()
+        cron_thread.join(timeout=5)
+
+        # Close MCP server connections
+        try:
+            from tools.mcp_tool import shutdown_mcp_servers
+            shutdown_mcp_servers()
+        except Exception:
+            pass
+
+        return True
+    finally:
+        if loop_hook_installed:
+            restore_asyncio_exception_handler(loop)
+        if thread_hook_installed:
+            restore_thread_exception_hook()
 
 
 def main():

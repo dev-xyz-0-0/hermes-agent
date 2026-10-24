@@ -1076,8 +1076,14 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 executed += 1
 
             except Exception as e:
-                logger.error("Error processing job %s: %s", job['id'], e)
-                mark_job_run(job["id"], False, str(e))
+                logger.exception("Cron job processing failed: job_id=%s", job["id"])
+                try:
+                    mark_job_run(job["id"], False, str(e))
+                except Exception:
+                    logger.exception(
+                        "Failed to persist cron job failure status: job_id=%s",
+                        job["id"],
+                    )
 
         return executed
     finally:
@@ -1091,5 +1097,13 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
         lock_fd.close()
 
 
+def main() -> int:
+    """Run one standalone scheduler tick with persistent logging enabled."""
+    from hermes_logging import setup_logging
+
+    setup_logging(mode="cron")
+    return tick(verbose=True)
+
+
 if __name__ == "__main__":
-    tick(verbose=True)
+    main()

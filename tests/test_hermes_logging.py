@@ -184,6 +184,23 @@ class TestSetupLogging:
         if errors_log.exists():
             assert "info only message" not in errors_log.read_text()
 
+    def test_redacts_secret_from_exception_traceback(self, hermes_home):
+        hermes_logging.setup_logging(hermes_home=hermes_home)
+        test_logger = logging.getLogger("test_hermes_logging.redaction")
+
+        try:
+            raise RuntimeError("failed with sk-ant-api03-THIS_IS_A_SYNTHETIC_SECRET_123456")
+        except RuntimeError:
+            test_logger.exception("synthetic provider failure")
+
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+
+        content = (hermes_home / "logs" / "errors.log").read_text()
+        assert "Traceback" in content
+        assert "RuntimeError" in content
+        assert "THIS_IS_A_SYNTHETIC_SECRET" not in content
+
     def test_reads_config_yaml(self, hermes_home):
         """setup_logging reads logging.level from config.yaml."""
         import yaml
