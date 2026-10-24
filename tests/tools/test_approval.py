@@ -1,6 +1,7 @@
 """Tests for the dangerous command approval module."""
 
 import ast
+import logging
 from pathlib import Path
 from unittest.mock import patch as mock_patch
 
@@ -27,6 +28,25 @@ class TestApprovalModeParsing:
     def test_string_off_still_maps_to_off(self):
         with mock_patch("hermes_cli.config.load_config", return_value={"approvals": {"mode": "off"}}):
             assert _get_approval_mode() == "off"
+
+
+def test_approval_callback_failure_is_logged_and_fails_closed(caplog):
+    command_secret = "synthetic-command-secret"
+
+    def fail_callback(*_args, **_kwargs):
+        raise RuntimeError("callback unavailable")
+
+    with caplog.at_level(logging.ERROR, logger="tools.approval"):
+        result = prompt_dangerous_approval(
+            command_secret,
+            "sensitive description",
+            approval_callback=fail_callback,
+        )
+
+    assert result == "deny"
+    record = next(r for r in caplog.records if "Approval callback failed" in r.message)
+    assert record.exc_info[0] is RuntimeError
+    assert command_secret not in record.message
 
 
 class TestDetectDangerousRm:

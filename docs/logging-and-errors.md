@@ -34,10 +34,21 @@ for the same resolved file path.
 | `errors.log` | Warnings and errors | WARNING+ | 2 MB, 2 backups |
 | `gateway.log` | Gateway-process logging | INFO+ | 5 MB, 3 backups |
 
-The handlers overlap by severity and process context. For example, a gateway
-ERROR normally appears in `agent.log`, `errors.log`, and `gateway.log`. The
-gateway log is attached to the root logger and may contain agent and cron
-events, not just records emitted directly by `gateway.run`.
+The handlers overlap by severity and ownership. A gateway ERROR normally
+appears in `agent.log`, `errors.log`, and `gateway.log`. The gateway handler is
+attached to the root logger but accepts only `gateway`/`gateway.*` records and
+records explicitly marked as gateway-owned. Ordinary agent, cron, root, and
+third-party records do not enter `gateway.log`.
+
+Cron records created during one execution carry a prefix like:
+
+```text
+[job_id=daily-report run_id=9ad... profile=default]
+```
+
+Outside a cron execution the prefix is empty, so existing non-cron log output
+does not gain placeholder fields. The fields are execution-scoped and are not
+persisted as cron schema state.
 
 Each handler uses `RedactingFormatter`, including traceback formatting.
 
@@ -106,6 +117,13 @@ The normal lifecycle is:
 5. Attempt delivery to the configured destination.
 6. Record execution and delivery status.
 
+Each due-job attempt receives a new UUID run ID. Its job ID, run ID, and active
+profile remain bound through schedule advancement, execution, saved output,
+delivery, and status persistence, then reset even when processing raises. The
+stable event names are `cron.execution.started`, `cron.execution.succeeded`,
+`cron.execution.failed`, `cron.delivery.started`,
+`cron.delivery.succeeded`, and `cron.delivery.failed`.
+
 Cron execution exceptions are logged using `logger.exception()` inside `run_job()`.
 
 Unexpected failures at the per-job scheduler boundary also use
@@ -162,6 +180,14 @@ Exception messages and formatted traceback text pass through
 `RedactingFormatter`. Logs should still avoid prompts, model output, raw
 environment values, and complete asyncio context dictionaries.
 
+The formatter recognizes common provider credentials, authorization headers,
+secret-like environment assignments and JSON fields, database and HTTP URL
+userinfo, sensitive query parameters, Telegram/Discord-style tokens,
+Slack/Discord webhook URLs, and private-key blocks. It preserves non-sensitive
+URL components where practical. Pattern matching is defense in depth: unknown
+credential formats and arbitrary sensitive user text cannot be guaranteed safe,
+so call sites must still minimize logged data.
+
 ### Important limitations
 
 - Expected fallback, cleanup, and handled operational exceptions may be logged
@@ -179,6 +205,8 @@ environment values, and complete asyncio context dictionaries.
   processes can race and may lose or misplace records. A centralized logging
   process or multiprocess-safe handler would be required to eliminate this
   residual risk.
+- Exception handlers outside the bounded P1 audit may still have insufficient
+  visibility. See `docs/exception-handling-audit.md` for scope and backlog.
 
 ## Troubleshooting
 
@@ -225,6 +253,11 @@ Verify the active `HERMES_HOME` and resolved log directory.
 The logging reliability tests cover:
 
 - INFO and WARNING routing, idempotent setup, and traceback redaction.
+- Cron correlation uniqueness, lifecycle stability, context propagation, and
+  reset behavior.
+- Gateway ownership filtering and repeated filter initialization.
+- Persisted redaction for messages, URL credentials, query tokens, webhook
+  credentials, private keys, and nested exception chains.
 - Profile-aware standalone scheduler logging and graceful process exit.
 - Low-volume concurrent appends from two processes without forcing rotation.
 - Scheduler tracebacks and preservation of job failure-status updates.
@@ -240,6 +273,8 @@ Run the focused suite from the repository root:
 ```bash
 source venv/bin/activate
 python -m pytest \
+  tests/test_logging_context.py \
+  tests/test_gateway_log_filter.py \
   tests/test_hermes_logging.py \
   tests/test_exception_hooks.py \
   tests/cron/test_logging_reliability.py \
@@ -272,6 +307,10 @@ future reliability improvements.
 - **Earlier startup diagnostics:** Failures before `setup_logging()` cannot
   reach Hermes file handlers. Future entry-point work may add a minimal stderr
   fallback, while avoiding logging initialization during module import.
+- **Broader exception audit:** P1 reviewed the logging, cron, gateway lifecycle,
+  shared-adapter, authentication, and approval boundaries only. Platform
+  adapters, providers, tools, and agent internals remain a separately scoped
+  backlog; see `docs/exception-handling-audit.md`.
 
 ### Inherent limitations
 
@@ -292,11 +331,15 @@ production gateway solely to complete this checklist.
 - [ ] An INFO record appears in the active profile's `agent.log`.
 - [ ] A WARNING record appears in both `agent.log` and `errors.log`.
 - [ ] Gateway startup creates and writes to `gateway.log`.
+- [ ] Agent, cron, root, and unmarked third-party records do not enter
+  `gateway.log`.
 - [ ] A gateway cron-ticker exception appears in `errors.log` with a traceback.
 - [ ] A standalone `python -m cron.scheduler` run writes to the active
   profile's log directory.
 - [ ] An unexpected cron execution or processing failure includes its exception
   type, traceback, and safe job ID.
+- [ ] Two attempts of the same cron job have different run IDs, stable profile
+  context throughout each attempt, and no context leakage afterward.
 - [ ] Cron execution and delivery failures remain distinguishable in job state.
 - [ ] A synthetic secret in an exception message is redacted from the formatted
   traceback.

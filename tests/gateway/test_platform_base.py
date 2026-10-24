@@ -1,5 +1,6 @@
 """Tests for gateway/platforms/base.py — MessageEvent, media extraction, message truncation."""
 
+import logging
 import os
 from unittest.mock import patch
 
@@ -16,6 +17,42 @@ class TestSecretCaptureGuidance:
         message = GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE
         assert "local cli" in message.lower()
         assert "~/.hermes/.env" in message
+
+
+def test_runtime_status_failures_preserve_adapter_state_and_are_visible(caplog):
+    class StubAdapter(BasePlatformAdapter):
+        async def connect(self):
+            return True
+
+        async def disconnect(self):
+            return None
+
+        async def send(self, *args, **kwargs):
+            return None
+
+        async def get_chat_info(self, *args):
+            return {}
+
+    from gateway.config import Platform, PlatformConfig
+
+    adapter = StubAdapter(
+        config=PlatformConfig(enabled=True, token="test"),
+        platform=Platform.TELEGRAM,
+    )
+    with patch("gateway.status.write_runtime_status", side_effect=OSError("disk unavailable")), \
+         caplog.at_level(logging.DEBUG, logger="gateway.platforms.base"):
+        adapter._mark_connected()
+        assert adapter._running is True
+        adapter._mark_disconnected()
+        assert adapter._running is False
+        adapter._set_fatal_error("synthetic-code", "do-not-log-this-message", retryable=False)
+
+    messages = [record.message for record in caplog.records]
+    assert any("connected gateway status" in message for message in messages)
+    assert any("disconnected gateway status" in message for message in messages)
+    fatal = next(record for record in caplog.records if "fatal gateway status" in record.message)
+    assert fatal.exc_info[0] is OSError
+    assert "do-not-log-this-message" not in fatal.message
 
 
 class TestSafeUrlForLog:

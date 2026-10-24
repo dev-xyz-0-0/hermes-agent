@@ -75,6 +75,32 @@ _AUTH_HEADER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Credentials embedded in HTTP(S) URLs and sensitive query parameters.
+_URL_USERINFO_RE = re.compile(
+    r"(https?://[^\s/@:]+:)([^\s/@]+)(@)",
+    re.IGNORECASE,
+)
+_SENSITIVE_QUERY_RE = re.compile(
+    r"([?&](?:access_token|api_?key|auth|authorization|bearer|client_secret|"
+    r"password|refresh_token|secret|signature|sig|token)=)([^&#\s]+)",
+    re.IGNORECASE,
+)
+
+# Common webhook/token URL formats whose secrets live in the path.
+_DISCORD_WEBHOOK_RE = re.compile(
+    r"(https?://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/webhooks/\d+/)([A-Za-z0-9._-]+)",
+    re.IGNORECASE,
+)
+_SLACK_WEBHOOK_RE = re.compile(
+    r"(https?://hooks\.slack\.com/services/)([A-Za-z0-9/_-]+)",
+    re.IGNORECASE,
+)
+
+# Discord bot tokens use three dot-separated base64url-like segments.
+_DISCORD_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])([A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{20,})(?![A-Za-z0-9_-])"
+)
+
 # Telegram bot tokens: bot<digits>:<token> or <digits>:<token>,
 # where token part is restricted to [-A-Za-z0-9_] and length >= 30
 _TELEGRAM_RE = re.compile(
@@ -145,6 +171,16 @@ def redact_sensitive_text(text: str) -> str:
         lambda m: m.group(1) + _mask_token(m.group(2)),
         text,
     )
+
+    # URL credentials, query tokens, and webhook secrets.
+    text = _URL_USERINFO_RE.sub(lambda m: f"{m.group(1)}***{m.group(3)}", text)
+    text = _SENSITIVE_QUERY_RE.sub(
+        lambda m: m.group(1) + _mask_token(m.group(2)),
+        text,
+    )
+    text = _DISCORD_WEBHOOK_RE.sub(lambda m: f"{m.group(1)}***", text)
+    text = _SLACK_WEBHOOK_RE.sub(lambda m: f"{m.group(1)}***", text)
+    text = _DISCORD_TOKEN_RE.sub(lambda m: _mask_token(m.group(1)), text)
 
     # Telegram bot tokens
     def _redact_telegram(m):

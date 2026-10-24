@@ -25,8 +25,8 @@ from hermes_constants import get_hermes_home
 _logging_initialized = False
 
 # Default log format — includes timestamp, level, logger name, and message.
-_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
-_LOG_FORMAT_VERBOSE = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(hermes_context)s%(message)s"
+_LOG_FORMAT_VERBOSE = "%(asctime)s - %(name)s - %(levelname)s - %(hermes_context)s%(message)s"
 
 # Third-party loggers that are noisy at DEBUG/INFO level.
 _NOISY_LOGGERS = (
@@ -110,7 +110,7 @@ def setup_logging(
     root = logging.getLogger()
 
     # --- agent.log (INFO+) — the main activity log -------------------------
-    _add_rotating_handler(
+    agent_handler = _add_rotating_handler(
         root,
         log_dir / "agent.log",
         level=level,
@@ -120,7 +120,7 @@ def setup_logging(
     )
 
     # --- errors.log (WARNING+) — quick triage log --------------------------
-    _add_rotating_handler(
+    error_handler = _add_rotating_handler(
         root,
         log_dir / "errors.log",
         level=logging.WARNING,
@@ -128,6 +128,10 @@ def setup_logging(
         backup_count=2,
         formatter=RedactingFormatter(_LOG_FORMAT),
     )
+
+    from hermes_logging_context import HermesLogContextFilter, add_filter_once
+    add_filter_once(agent_handler, HermesLogContextFilter)
+    add_filter_once(error_handler, HermesLogContextFilter)
 
     # Ensure root logger level is low enough for the handlers to fire.
     if root.level == logging.NOTSET or root.level > level:
@@ -159,6 +163,8 @@ def setup_verbose_logging() -> None:
     handler = logging.StreamHandler()
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(RedactingFormatter(_LOG_FORMAT_VERBOSE, datefmt="%H:%M:%S"))
+    from hermes_logging_context import HermesLogContextFilter, add_filter_once
+    add_filter_once(handler, HermesLogContextFilter)
     handler._hermes_verbose = True  # type: ignore[attr-defined]
     root.addHandler(handler)
 
@@ -185,7 +191,7 @@ def _add_rotating_handler(
     max_bytes: int,
     backup_count: int,
     formatter: logging.Formatter,
-) -> None:
+) -> RotatingFileHandler:
     """Add a ``RotatingFileHandler`` to *logger*, skipping if one already
     exists for the same resolved file path (idempotent).
     """
@@ -195,7 +201,7 @@ def _add_rotating_handler(
             isinstance(existing, RotatingFileHandler)
             and Path(getattr(existing, "baseFilename", "")).resolve() == resolved
         ):
-            return  # already attached
+            return existing  # already attached
 
     path.parent.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
@@ -204,6 +210,7 @@ def _add_rotating_handler(
     handler.setLevel(level)
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+    return handler
 
 
 def _read_logging_config():

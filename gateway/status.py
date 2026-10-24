@@ -13,6 +13,7 @@ concurrently under distinct configurations).
 
 import hashlib
 import json
+import logging
 import os
 import sys
 from datetime import datetime, timezone
@@ -23,6 +24,7 @@ from typing import Any, Optional
 _GATEWAY_KIND = "hermes-gateway"
 _RUNTIME_STATUS_FILE = "gateway_state.json"
 _LOCKS_DIRNAME = "gateway-locks"
+logger = logging.getLogger(__name__)
 
 
 def _get_pid_path() -> Path:
@@ -231,7 +233,7 @@ def remove_pid_file() -> None:
     try:
         _get_pid_path().unlink(missing_ok=True)
     except Exception:
-        pass
+        logger.debug("Failed to remove gateway PID file", exc_info=True)
 
 
 def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, Any]] = None) -> tuple[bool, Optional[dict[str, Any]]]:

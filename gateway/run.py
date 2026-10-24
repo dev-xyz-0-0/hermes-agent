@@ -7943,7 +7943,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 if _released:
                     logger.info("Released %d stale scoped lock(s) from old gateway.", _released)
             except Exception:
-                pass
+                logger.debug("Failed to release stale gateway locks", exc_info=True)
         else:
             hermes_home = str(get_hermes_home())
             logger.error(
@@ -7964,7 +7964,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         from tools.skills_sync import sync_skills
         sync_skills(quiet=True)
     except Exception:
-        pass
+        logger.debug("Bundled skill synchronization failed", exc_info=True)
 
     # Centralized logging — agent.log (INFO+) and errors.log (WARNING+).
     # Idempotent, so repeated calls from AIAgent.__init__ won't duplicate.
@@ -7974,15 +7974,22 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Gateway-specific rotating log — captures all gateway-level messages
     # (session management, platform adapters, slash commands, etc.).
     from agent.redact import RedactingFormatter
-    from hermes_logging import _add_rotating_handler
-    _add_rotating_handler(
+    from hermes_logging import _add_rotating_handler, _LOG_FORMAT
+    gateway_handler = _add_rotating_handler(
         logging.getLogger(),
         log_dir / 'gateway.log',
         level=logging.INFO,
         max_bytes=5 * 1024 * 1024,
         backup_count=3,
-        formatter=RedactingFormatter('%(asctime)s %(levelname)s %(name)s: %(message)s'),
+        formatter=RedactingFormatter(_LOG_FORMAT),
     )
+    from hermes_logging_context import (
+        GatewayLogFilter,
+        HermesLogContextFilter,
+        add_filter_once,
+    )
+    add_filter_once(gateway_handler, HermesLogContextFilter)
+    add_filter_once(gateway_handler, GatewayLogFilter)
 
     # Optional stderr handler — level driven by -v/-q flags on the CLI.
     # verbosity=None (-q/--quiet): no stderr output
@@ -7993,7 +8000,10 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         _stderr_level = {0: logging.WARNING, 1: logging.INFO}.get(verbosity, logging.DEBUG)
         _stderr_handler = logging.StreamHandler()
         _stderr_handler.setLevel(_stderr_level)
-        _stderr_handler.setFormatter(RedactingFormatter('%(levelname)s %(name)s: %(message)s'))
+        _stderr_handler.setFormatter(
+            RedactingFormatter('%(levelname)s %(name)s: %(hermes_context)s%(message)s')
+        )
+        add_filter_once(_stderr_handler, HermesLogContextFilter)
         logging.getLogger().addHandler(_stderr_handler)
         # Lower root logger level if needed so DEBUG records can reach the handler
         if _stderr_level < logging.getLogger().level:
@@ -8066,7 +8076,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             from tools.mcp_tool import shutdown_mcp_servers
             shutdown_mcp_servers()
         except Exception:
-            pass
+            logger.debug("MCP server shutdown failed", exc_info=True)
 
         return True
     finally:

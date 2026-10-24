@@ -8,6 +8,7 @@ from concurrent.futures import Future
 import pytest
 
 import hermes_exception_hooks as hooks
+from agent.redact import RedactingFormatter
 
 
 @pytest.fixture(autouse=True)
@@ -38,6 +39,48 @@ def test_thread_exception_logged_once_and_previous_hook_called(caplog):
     assert "p0-test-thread" in matching[0].message
     assert matching[0].exc_info[0] is RuntimeError
     assert len(previous_calls) == 1
+
+
+def test_background_exception_tracebacks_are_redacted_in_persisted_output(tmp_path):
+    path = tmp_path / "background-errors.log"
+    handler = logging.FileHandler(path)
+    handler.setFormatter(RedactingFormatter("%(levelname)s %(message)s"))
+    hook_logger = logging.getLogger("hermes_exception_hooks")
+    hook_logger.addHandler(handler)
+    previous = threading.excepthook
+    threading.excepthook = lambda _args: None
+    loop = asyncio.new_event_loop()
+    try:
+        hooks.install_thread_exception_hook()
+
+        def fail_thread():
+            raise RuntimeError("SERVICE_TOKEN=thread-secret-value")
+
+        thread = threading.Thread(target=fail_thread, name="redaction-thread")
+        thread.start()
+        thread.join()
+
+        hooks.install_asyncio_exception_handler(loop)
+        try:
+            raise ValueError("https://example.test/?access_token=async-secret-value")
+        except ValueError as exc:
+            loop.call_exception_handler(
+                {"message": "synthetic detached task failure", "exception": exc}
+            )
+
+        handler.flush()
+        content = path.read_text()
+        assert "RuntimeError" in content
+        assert "ValueError" in content
+        assert "thread-secret-value" not in content
+        assert "async-secret-value" not in content
+    finally:
+        hooks.restore_asyncio_exception_handler(loop)
+        loop.close()
+        hooks.restore_thread_exception_hook()
+        threading.excepthook = previous
+        hook_logger.removeHandler(handler)
+        handler.close()
 
 
 def test_thread_system_exit_is_not_logged(caplog):

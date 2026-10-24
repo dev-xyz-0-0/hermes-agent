@@ -7,7 +7,9 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+from agent.redact import RedactingFormatter
 from cron import scheduler
+from hermes_logging_context import HermesLogContextFilter
 
 
 def test_standalone_scheduler_initializes_profile_logging(tmp_path):
@@ -60,6 +62,7 @@ def test_two_processes_can_append_without_rotation(tmp_path):
 
 def test_scheduler_processing_failure_logs_traceback_and_preserves_status(caplog, tmp_path):
     job = {"id": "safe-job-id", "name": "Synthetic job"}
+    caplog.handler.addFilter(HermesLogContextFilter())
 
     with patch.object(scheduler, "_LOCK_DIR", tmp_path), \
          patch.object(scheduler, "_LOCK_FILE", tmp_path / ".tick.lock"), \
@@ -69,9 +72,10 @@ def test_scheduler_processing_failure_logs_traceback_and_preserves_status(caplog
         with caplog.at_level(logging.ERROR, logger="cron.scheduler"):
             assert scheduler.tick(verbose=False) == 0
 
-    record = next(r for r in caplog.records if "Cron job processing failed" in r.message)
-    assert "safe-job-id" in record.message
+    record = next(r for r in caplog.records if r.message == "cron.execution.failed")
     assert record.exc_info[0] is ValueError
+    assert record.job_id == "safe-job-id"
+    assert record.run_id
     mark.assert_called_once_with("safe-job-id", False, "synthetic processing failure")
 
 
@@ -90,3 +94,38 @@ def test_status_persistence_failure_does_not_hide_original_traceback(caplog, tmp
     records = [r for r in caplog.records if r.exc_info]
     assert any(r.exc_info[0] is RuntimeError for r in records)
     assert any(r.exc_info[0] is OSError for r in records)
+
+
+def test_correlated_cron_traceback_redacts_secret_in_persisted_output(tmp_path):
+    path = tmp_path / "cron-errors.log"
+    handler = logging.FileHandler(path)
+    handler.setLevel(logging.ERROR)
+    handler.setFormatter(
+        RedactingFormatter("%(levelname)s %(hermes_context)s%(message)s")
+    )
+    handler.addFilter(HermesLogContextFilter())
+    cron_logger = logging.getLogger("cron.scheduler")
+    cron_logger.addHandler(handler)
+    job = {"id": "redaction-job", "name": "Synthetic job"}
+    try:
+        with patch.object(scheduler, "_LOCK_DIR", tmp_path), \
+             patch.object(scheduler, "_LOCK_FILE", tmp_path / ".tick.lock"), \
+             patch.object(scheduler, "get_due_jobs", return_value=[job]), \
+             patch.object(
+                 scheduler,
+                 "advance_next_run",
+                 side_effect=RuntimeError(
+                     "https://example.test/?token=cron-secret-value"
+                 ),
+             ), \
+             patch.object(scheduler, "mark_job_run"):
+            scheduler.tick(verbose=False)
+        handler.flush()
+        content = path.read_text()
+        assert "Traceback" in content
+        assert "RuntimeError" in content
+        assert "job_id=redaction-job" in content
+        assert "cron-secret-value" not in content
+    finally:
+        cron_logger.removeHandler(handler)
+        handler.close()

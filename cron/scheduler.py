@@ -16,6 +16,7 @@ import logging
 import os
 import subprocess
 import sys
+from uuid import uuid4
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
 try:
@@ -37,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from hermes_constants import get_hermes_home
 from hermes_cli.config import load_config
 from hermes_time import now as _hermes_now
+from hermes_logging_context import cron_log_context
 
 logger = logging.getLogger(__name__)
 
@@ -728,7 +730,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
 
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
-    logger.info("Prompt: %s", prompt[:100])
+    logger.debug("Cron prompt prepared: chars=%d", len(prompt))
 
     try:
         # Inject origin context so the agent's send_message tool knows the chat.
@@ -1040,50 +1042,67 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
         if verbose:
             logger.info("%s - %s job(s) due", _hermes_now().strftime('%H:%M:%S'), len(due_jobs))
 
+        from hermes_cli.profiles import get_active_profile_name
+
+        profile = get_active_profile_name()
         executed = 0
         for job in due_jobs:
-            try:
-                # For recurring jobs (cron/interval), advance next_run_at to the
-                # next future occurrence BEFORE execution.  This way, if the
-                # process crashes mid-run, the job won't re-fire on restart.
-                # One-shot jobs are left alone so they can retry on restart.
-                advance_next_run(job["id"])
-
-                success, output, final_response, error = run_job(job)
-
-                output_file = save_job_output(job["id"], output)
-                if verbose:
-                    logger.info("Output saved to: %s", output_file)
-
-                # Deliver the final response to the origin/target chat.
-                # If the agent responded with [SILENT], skip delivery (but
-                # output is already saved above).  Failed jobs always deliver.
-                deliver_content = final_response if success else f"⚠️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
-                should_deliver = bool(deliver_content)
-                if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
-                    logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
-                    should_deliver = False
-
-                delivery_error = None
-                if should_deliver:
-                    try:
-                        delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
-                    except Exception as de:
-                        delivery_error = str(de)
-                        logger.error("Delivery failed for job %s: %s", job["id"], de)
-
-                mark_job_run(job["id"], success, error, delivery_error=delivery_error)
-                executed += 1
-
-            except Exception as e:
-                logger.exception("Cron job processing failed: job_id=%s", job["id"])
+            run_id = uuid4().hex
+            with cron_log_context(job_id=job["id"], run_id=run_id, profile=profile):
+                logger.info("cron.execution.started")
                 try:
-                    mark_job_run(job["id"], False, str(e))
-                except Exception:
-                    logger.exception(
-                        "Failed to persist cron job failure status: job_id=%s",
-                        job["id"],
-                    )
+                    # For recurring jobs (cron/interval), advance next_run_at to the
+                    # next future occurrence BEFORE execution.  This way, if the
+                    # process crashes mid-run, the job won't re-fire on restart.
+                    # One-shot jobs are left alone so they can retry on restart.
+                    advance_next_run(job["id"])
+
+                    success, output, final_response, error = run_job(job)
+                    if success:
+                        logger.info("cron.execution.succeeded")
+                    else:
+                        # Expected job failures already own their detailed logging
+                        # inside run_job(); retain one correlation event here.
+                        logger.warning("cron.execution.failed")
+
+                    output_file = save_job_output(job["id"], output)
+                    if verbose:
+                        logger.info("Output saved to: %s", output_file)
+
+                    # Deliver the final response to the origin/target chat.
+                    # If the agent responded with [SILENT], skip delivery (but
+                    # output is already saved above).  Failed jobs always deliver.
+                    deliver_content = final_response if success else f"⚠️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
+                    should_deliver = bool(deliver_content)
+                    if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
+                        logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
+                        should_deliver = False
+
+                    delivery_error = None
+                    if should_deliver:
+                        logger.info("cron.delivery.started")
+                        delivery_raised = False
+                        try:
+                            delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
+                        except Exception as de:
+                            delivery_error = str(de)
+                            delivery_raised = True
+                            logger.exception("cron.delivery.failed")
+                        if delivery_error:
+                            if not delivery_raised:
+                                logger.warning("cron.delivery.failed: %s", delivery_error)
+                        else:
+                            logger.info("cron.delivery.succeeded")
+
+                    mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+                    executed += 1
+
+                except Exception as e:
+                    logger.exception("cron.execution.failed")
+                    try:
+                        mark_job_run(job["id"], False, str(e))
+                    except Exception:
+                        logger.exception("Failed to persist cron job failure status")
 
         return executed
     finally:

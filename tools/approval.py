@@ -645,6 +645,9 @@ def prompt_dangerous_approval(command: str, description: str,
             return approval_callback(command, description,
                                      allow_permanent=allow_permanent)
         except Exception:
+            # Preserve fail-closed behavior without logging the command or its
+            # description, either of which may contain user-provided secrets.
+            logger.exception("Approval callback failed; denying request")
             return "deny"
 
     os.environ["HERMES_SPINNER_PAUSE"] = "1"

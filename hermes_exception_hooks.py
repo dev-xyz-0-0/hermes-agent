@@ -46,6 +46,7 @@ def install_thread_exception_hook() -> bool:
                         "Unhandled exception in thread '%s'",
                         thread_name,
                         exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+                        extra={"hermes_component": "gateway"},
                     )
             except Exception:
                 # Exception reporting must never replace the original failure.
@@ -107,6 +108,7 @@ def install_asyncio_exception_handler(loop: asyncio.AbstractEventLoop) -> bool:
                 task_name or "unknown",
                 callback_text or "none",
                 exc_info=(type(exc), exc, exc.__traceback__) if exc is not None else None,
+                extra={"hermes_component": "gateway"},
             )
         except Exception:
             # Fall back to the loop's normal reporting if logging itself fails.
@@ -120,7 +122,10 @@ def install_asyncio_exception_handler(loop: asyncio.AbstractEventLoop) -> bool:
             try:
                 previous(active_loop, context)
             except Exception:
-                logger.exception("Existing asyncio exception handler failed")
+                logger.exception(
+                    "Existing asyncio exception handler failed",
+                    extra={"hermes_component": "gateway"},
+                )
 
     _loop_handlers[loop] = previous
     loop.set_exception_handler(_asyncio_handler)

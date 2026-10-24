@@ -201,6 +201,56 @@ class TestSetupLogging:
         assert "RuntimeError" in content
         assert "THIS_IS_A_SYNTHETIC_SECRET" not in content
 
+    @pytest.mark.parametrize(
+        ("message", "secret"),
+        [
+            ("Authorization: Bearer bearer-secret-value", "bearer-secret-value"),
+            ("SERVICE_API_KEY=environment-secret-value", "environment-secret-value"),
+            ('{"token": "json-secret-value"}', "json-secret-value"),
+            ("postgresql://user:database-secret@example.test/db", "database-secret"),
+            ("https://user:userinfo-secret@example.test/path", "userinfo-secret"),
+            ("https://example.test/path?token=query-secret&safe=visible", "query-secret"),
+            (
+                "https://discord.com/api/webhooks/123456789/discord-webhook-secret",
+                "discord-webhook-secret",
+            ),
+            (
+                "https://hooks.slack.com/services/T000/B000/slack-webhook-secret",
+                "slack-webhook-secret",
+            ),
+            (
+                "-----BEGIN PRIVATE KEY-----\nprivate-secret\n-----END PRIVATE KEY-----",
+                "private-secret",
+            ),
+        ],
+    )
+    def test_persisted_messages_redact_sensitive_formats(
+        self, hermes_home, message, secret
+    ):
+        hermes_logging.setup_logging(hermes_home=hermes_home)
+        logging.getLogger("test_hermes_logging.redaction_formats").warning(message)
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+        content = (hermes_home / "logs" / "errors.log").read_text()
+        assert secret not in content
+
+    def test_nested_exception_chain_is_redacted_after_formatting(self, hermes_home):
+        hermes_logging.setup_logging(hermes_home=hermes_home)
+        test_logger = logging.getLogger("test_hermes_logging.nested_redaction")
+        try:
+            try:
+                raise ValueError("https://example.test/?access_token=nested-secret")
+            except ValueError as cause:
+                raise RuntimeError("outer synthetic failure") from cause
+        except RuntimeError:
+            test_logger.exception("nested exception")
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+        content = (hermes_home / "logs" / "errors.log").read_text()
+        assert "ValueError" in content
+        assert "RuntimeError" in content
+        assert "nested-secret" not in content
+
     def test_reads_config_yaml(self, hermes_home):
         """setup_logging reads logging.level from config.yaml."""
         import yaml

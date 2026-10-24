@@ -535,7 +535,11 @@ class BasePlatformAdapter(ABC):
             from gateway.status import write_runtime_status
             write_runtime_status(platform=self.platform.value, platform_state="connected", error_code=None, error_message=None)
         except Exception:
-            pass
+            logger.debug(
+                "Failed to persist connected gateway status: platform=%s",
+                self.platform.value,
+                exc_info=True,
+            )
 
     def _mark_disconnected(self) -> None:
         self._running = False
@@ -545,7 +549,11 @@ class BasePlatformAdapter(ABC):
             from gateway.status import write_runtime_status
             write_runtime_status(platform=self.platform.value, platform_state="disconnected", error_code=None, error_message=None)
         except Exception:
-            pass
+            logger.debug(
+                "Failed to persist disconnected gateway status: platform=%s",
+                self.platform.value,
+                exc_info=True,
+            )
 
     def _set_fatal_error(self, code: str, message: str, *, retryable: bool) -> None:
         self._running = False
@@ -561,7 +569,14 @@ class BasePlatformAdapter(ABC):
                 error_message=message,
             )
         except Exception:
-            pass
+            # The in-memory fatal state remains authoritative. Avoid logging
+            # ``message`` because adapter errors may contain credential text.
+            logger.warning(
+                "Failed to persist fatal gateway status: platform=%s code=%s",
+                self.platform.value,
+                code,
+                exc_info=True,
+            )
 
     async def _notify_fatal_error(self) -> None:
         handler = self._fatal_error_handler
