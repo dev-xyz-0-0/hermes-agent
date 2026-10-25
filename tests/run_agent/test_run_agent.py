@@ -136,6 +136,46 @@ def test_aiagent_reuses_existing_errors_log_handler():
             root_logger.addHandler(handler)
 
 
+def test_quiet_agent_does_not_suppress_cron_lifecycle_logger(tmp_path):
+    """Quiet agents may silence noisy internals, but cron is operational."""
+    names = (
+        "cron",
+        "cron.scheduler",
+        "tools",
+        "run_agent",
+        "trajectory_compressor",
+        "hermes_cli",
+    )
+    original_levels = {name: logging.getLogger(name).level for name in names}
+    original_root_level = logging.getLogger().level
+    try:
+        for name in names:
+            logging.getLogger(name).setLevel(logging.NOTSET)
+        logging.getLogger().setLevel(logging.INFO)
+
+        with (
+            patch.object(run_agent, "_hermes_home", tmp_path / "hermes-home"),
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            AIAgent(
+                api_key="test-key-1234567890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        assert logging.getLogger("cron").level == logging.NOTSET
+        assert logging.getLogger("cron.scheduler").getEffectiveLevel() <= logging.INFO
+        for name in ("tools", "run_agent", "trajectory_compressor", "hermes_cli"):
+            assert logging.getLogger(name).level == logging.ERROR
+    finally:
+        logging.getLogger().setLevel(original_root_level)
+        for name, level in original_levels.items():
+            logging.getLogger(name).setLevel(level)
+
+
 # ---------------------------------------------------------------------------
 # Helper to build mock assistant messages (API response objects)
 # ---------------------------------------------------------------------------

@@ -5511,7 +5511,10 @@ class HermesCLI:
                 logging.getLogger(noisy).setLevel(logging.WARNING)
         else:
             logging.getLogger().setLevel(logging.INFO)
-            for quiet_logger in ('tools', 'run_agent', 'trajectory_compressor', 'cron', 'hermes_cli'):
+            # Named logger levels are process-global. Do not suppress the cron
+            # namespace: scheduler lifecycle records must continue reaching
+            # file handlers after a non-verbose usage report.
+            for quiet_logger in ('tools', 'run_agent', 'trajectory_compressor', 'hermes_cli'):
                 logging.getLogger(quiet_logger).setLevel(logging.ERROR)
 
     def _show_insights(self, command: str = "/insights"):

@@ -179,6 +179,13 @@ stable event names are `cron.execution.started`, `cron.execution.succeeded`,
 `cron.execution.failed`, `cron.delivery.started`,
 `cron.delivery.succeeded`, and `cron.delivery.failed`.
 
+Quiet agents and non-verbose CLI usage reports intentionally leave the
+process-global `cron` logger namespace enabled. Raising that namespace to ERROR
+would suppress INFO/WARNING lifecycle records before file handlers, correlation
+filters, and redaction can process them. A gateway that was started with an
+older affected version must be restarted normally after upgrading; logging
+reconfiguration alone does not reset named logger levels.
+
 Cron execution exceptions are logged using `logger.exception()` inside `run_job()`.
 
 Unexpected failures at the per-job scheduler boundary also use
@@ -307,6 +314,14 @@ rotation across processes.
 
 Verify the active `HERMES_HOME` and resolved log directory.
 
+### Cron jobs run but lifecycle events disappear
+
+Check the effective levels of the `cron` and `cron.scheduler` loggers. They
+must permit INFO for start/success events and WARNING for expected failures.
+If the gateway was running before the lifecycle-visibility fix was deployed,
+restart it through the normal service workflow so the process-global logger
+state is recreated.
+
 ## Automated Coverage
 
 The logging reliability tests cover:
@@ -323,6 +338,8 @@ The logging reliability tests cover:
   P1 filter retention across in-place updates and replacements.
 - Deterministic rollover, backup retention, and continued formatted logging.
 - Profile-aware standalone scheduler logging and graceful process exit.
+- Lifecycle visibility across quiet agent construction, non-verbose CLI usage
+  reports, and forced logging reconfiguration.
 - Low-volume concurrent appends from two processes without forcing rotation.
 - Scheduler tracebacks and preservation of job failure-status updates.
 - Gateway cron-ticker tracebacks.

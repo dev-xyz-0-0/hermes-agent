@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -231,6 +232,48 @@ class TestCLIUsageReport:
         assert "0.064" in output
         assert "Session duration:" in output
         assert "Compressions:" in output
+
+    def test_non_verbose_usage_report_does_not_suppress_cron(self, capsys):
+        cli_obj = _attach_agent(
+            _make_cli(),
+            prompt_tokens=100,
+            completion_tokens=20,
+            total_tokens=120,
+            api_calls=1,
+            context_tokens=120,
+            context_length=10_000,
+        )
+        cli_obj.verbose = False
+        names = (
+            "cron",
+            "cron.scheduler",
+            "tools",
+            "run_agent",
+            "trajectory_compressor",
+            "hermes_cli",
+        )
+        original_root_level = logging.getLogger().level
+        original_levels = {name: logging.getLogger(name).level for name in names}
+        try:
+            logging.getLogger("cron").setLevel(logging.NOTSET)
+            logging.getLogger("cron.scheduler").setLevel(logging.NOTSET)
+            with patch(
+                "cli.estimate_usage_cost",
+                return_value=SimpleNamespace(
+                    status="estimated", amount_usd=0.01, source="test"
+                ),
+            ):
+                cli_obj._show_usage()
+            capsys.readouterr()
+
+            assert logging.getLogger("cron").level == logging.NOTSET
+            assert logging.getLogger("cron.scheduler").getEffectiveLevel() <= logging.INFO
+            for name in ("tools", "run_agent", "trajectory_compressor", "hermes_cli"):
+                assert logging.getLogger(name).level == logging.ERROR
+        finally:
+            logging.getLogger().setLevel(original_root_level)
+            for name, level in original_levels.items():
+                logging.getLogger(name).setLevel(level)
 
     def test_show_usage_marks_unknown_pricing(self, capsys):
         cli_obj = _attach_agent(

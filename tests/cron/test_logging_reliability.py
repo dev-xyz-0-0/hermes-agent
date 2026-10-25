@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from agent.redact import RedactingFormatter
 from cron import scheduler
@@ -129,3 +129,179 @@ def test_correlated_cron_traceback_redacts_secret_in_persisted_output(tmp_path):
     finally:
         cron_logger.removeHandler(handler)
         handler.close()
+
+
+def test_lifecycle_logging_survives_agent_backed_run_and_reconfiguration(
+    caplog, tmp_path
+):
+    """A quiet cron agent must not disable lifecycle logs for later ticks."""
+    import hermes_logging
+    import run_agent
+    from run_agent import AIAgent
+
+    hermes_home = tmp_path / "profile-home"
+    root = logging.getLogger()
+    original_handlers = list(root.handlers)
+    original_root_level = root.level
+    original_initialized = hermes_logging._logging_initialized
+    logger_names = (
+        "cron",
+        "cron.scheduler",
+        "tools",
+        "run_agent",
+        "trajectory_compressor",
+        "hermes_cli",
+    )
+    original_levels = {
+        name: logging.getLogger(name).level for name in logger_names
+    }
+    context_filter = HermesLogContextFilter()
+    caplog.handler.addFilter(context_filter)
+
+    # Temporarily detach any managed file handlers without closing them. This
+    # prevents forced profile switching from closing handlers owned by another
+    # test or by pytest's process-level logging setup.
+    detached_handlers = [
+        handler for handler in original_handlers
+        if getattr(handler, "_hermes_managed", False)
+        and getattr(handler, "_hermes_log_kind", None) in {"agent", "errors"}
+    ]
+    for handler in detached_handlers:
+        root.removeHandler(handler)
+
+    jobs = [
+        {"id": "script-before", "name": "script-before"},
+        {"id": "agent-middle", "name": "agent-middle", "prompt": "synthetic"},
+        {"id": "script-after", "name": "script-after"},
+    ]
+    real_run_job = scheduler.run_job
+
+    def run_synthetic_job(job):
+        if job["id"] != "agent-middle":
+            return True, "# synthetic", "", None
+
+        runtime = {
+            "api_key": "synthetic-key",
+            "base_url": "https://example.invalid/v1",
+            "provider": "openrouter",
+            "api_mode": "chat_completions",
+            "command": None,
+            "args": [],
+        }
+        route = {"model": "test/model", "runtime": runtime}
+        with patch.object(run_agent, "_hermes_home", hermes_home), \
+             patch.object(scheduler, "_hermes_home", hermes_home), \
+             patch("run_agent.get_tool_definitions", return_value=[]), \
+             patch("run_agent.check_toolset_requirements", return_value={}), \
+             patch("run_agent.OpenAI"), \
+             patch.object(
+                 AIAgent,
+                 "run_conversation",
+                 return_value={"final_response": "ok"},
+             ), \
+             patch("hermes_state.SessionDB", return_value=MagicMock()), \
+             patch("dotenv.load_dotenv"), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value=runtime,
+             ), \
+             patch(
+                 "agent.smart_model_routing.resolve_turn_route",
+                 return_value=route,
+             ):
+            return real_run_job(job)
+
+    try:
+        hermes_logging._logging_initialized = False
+        for name in logger_names:
+            logging.getLogger(name).setLevel(logging.NOTSET)
+        root.setLevel(logging.INFO)
+        caplog.handler.setLevel(logging.INFO)
+        hermes_logging.setup_logging(
+            hermes_home=hermes_home,
+            mode="gateway",
+            force=True,
+        )
+
+        with patch.dict(
+                 os.environ,
+                 {"HOME": str(tmp_path), "HERMES_HOME": str(hermes_home)},
+             ), \
+             patch.object(scheduler, "_LOCK_DIR", hermes_home / "cron"), \
+             patch.object(
+                 scheduler,
+                 "_LOCK_FILE",
+                 hermes_home / "cron" / ".tick.lock",
+             ), \
+             patch.object(
+                 scheduler,
+                 "get_due_jobs",
+                 side_effect=[[jobs[0]], [jobs[1]], [jobs[2]]],
+             ), \
+             patch.object(scheduler, "advance_next_run"), \
+             patch.object(scheduler, "run_job", side_effect=run_synthetic_job), \
+             patch.object(
+                 scheduler,
+                 "save_job_output",
+                 return_value=hermes_home / "out.md",
+             ), \
+             patch.object(scheduler, "_deliver_result", return_value=None), \
+             patch.object(scheduler, "mark_job_run"), \
+             patch(
+                 "hermes_cli.profiles.get_active_profile_name",
+                 return_value="isolated",
+             ):
+            assert scheduler.tick(verbose=False) == 1
+            hermes_logging.setup_logging(hermes_home=hermes_home, force=True)
+            assert scheduler.tick(verbose=False) == 1
+            assert scheduler.tick(verbose=False) == 1
+
+        lifecycle = [
+            record for record in caplog.records
+            if record.message in {
+                "cron.execution.started",
+                "cron.execution.succeeded",
+                "cron.execution.failed",
+            }
+        ]
+        assert [record.message for record in lifecycle].count(
+            "cron.execution.started"
+        ) == 3
+        assert [record.message for record in lifecycle].count(
+            "cron.execution.succeeded"
+        ) == 3
+        assert {record.profile for record in lifecycle} == {"isolated"}
+
+        by_run = {}
+        for record in lifecycle:
+            by_run.setdefault(record.run_id, []).append(record)
+        assert len(by_run) == 3
+        assert all(
+            [record.message for record in records]
+            == ["cron.execution.started", "cron.execution.succeeded"]
+            for records in by_run.values()
+        )
+        assert all(
+            len({record.job_id for record in records}) == 1
+            and len({record.profile for record in records}) == 1
+            for records in by_run.values()
+        )
+
+        for handler in root.handlers:
+            handler.flush()
+        content = (hermes_home / "logs" / "agent.log").read_text()
+        assert content.count("cron.execution.started") == 3
+        assert content.count("cron.execution.succeeded") == 3
+    finally:
+        caplog.handler.removeFilter(context_filter)
+        for handler in list(root.handlers):
+            if handler not in original_handlers:
+                root.removeHandler(handler)
+                handler.close()
+        for handler in detached_handlers:
+            if handler not in root.handlers:
+                root.addHandler(handler)
+        root.setLevel(original_root_level)
+        for name, level in original_levels.items():
+            logging.getLogger(name).setLevel(level)
+        hermes_logging._logging_initialized = original_initialized

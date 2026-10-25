@@ -694,15 +694,14 @@ class AIAgent:
             logger.info("Verbose logging enabled (third-party library logs suppressed)")
         else:
             if self.quiet_mode:
-                # In quiet mode (CLI default), suppress all tool/infra log
-                # noise on the *console*. The TUI has its own rich display
-                # for status; logger INFO/WARNING messages just clutter it.
-                # File handlers (agent.log, errors.log) still capture everything.
+                # Named logger levels are process-global and affect every
+                # handler, not only the console. Keep operational namespaces
+                # such as ``cron`` out of this list so lifecycle records remain
+                # visible when quiet agents share a gateway process.
                 for quiet_logger in [
                     'tools',               # all tools.* (terminal, browser, web, file, etc.)
                     'run_agent',            # agent runner internals
                     'trajectory_compressor',
-                    'cron',                 # scheduler (only relevant in daemon mode)
                     'hermes_cli',           # CLI helpers
                 ]:
                     logging.getLogger(quiet_logger).setLevel(logging.ERROR)
