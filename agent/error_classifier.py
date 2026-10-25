@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
@@ -257,7 +258,7 @@ def classify_api_error(
     Returns:
         ClassifiedError with reason and recovery action hints.
     """
-    status_code = _extract_status_code(error)
+    status_code = extract_status_code(error)
     error_type = type(error).__name__
     body = _extract_error_body(error)
     error_code = _extract_error_code(body)
@@ -723,7 +724,7 @@ def _classify_by_message(
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 
-def _extract_status_code(error: Exception) -> Optional[int]:
+def extract_status_code(error: Exception) -> Optional[int]:
     """Walk the error and its cause chain to find an HTTP status code."""
     current = error
     for _ in range(5):  # Max depth to prevent infinite loops
@@ -739,7 +740,22 @@ def _extract_status_code(error: Exception) -> Optional[int]:
         if cause is None or cause is current:
             break
         current = cause
+
+    # Some compatible SDK/proxy wrappers discard the typed response while
+    # preserving the HTTP status in the exception text.  Without this fallback
+    # deterministic 4xx failures are mistakenly retried as transient errors.
+    match = re.search(
+        r"(?:http(?: status)?|error code)\s*[:=]?\s*([45]\d{2})\b",
+        str(error),
+        re.IGNORECASE,
+    )
+    if match:
+        return int(match.group(1))
     return None
+
+
+# Backwards-compatible private alias for existing imports/tests.
+_extract_status_code = extract_status_code
 
 
 def _extract_error_body(error: Exception) -> dict:

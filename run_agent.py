@@ -5656,6 +5656,21 @@ class AIAgent:
         if self.tools:
             api_kwargs["tools"] = self.tools
 
+        # OpenAI's Chat Completions route rejects GPT-5 reasoning together
+        # with function tools. Native OpenAI normally uses Responses, but a
+        # persisted chat_completions mode or custom OpenAI base URL can still
+        # select this compatibility path. Preserve tools and explicitly turn
+        # reasoning off for that request. Other compatible providers are not
+        # affected.
+        if self.provider == "openai-api" and _model_lower.startswith("gpt-5"):
+            configured_effort = "medium"
+            if isinstance(self.reasoning_config, dict):
+                if self.reasoning_config.get("enabled") is False:
+                    configured_effort = "none"
+                elif self.reasoning_config.get("effort"):
+                    configured_effort = str(self.reasoning_config["effort"])
+            api_kwargs["reasoning_effort"] = "none" if self.tools else configured_effort
+
         if self.max_tokens is not None:
             api_kwargs.update(self._max_tokens_param(self.max_tokens))
         elif self._is_openrouter_url() and "claude" in (self.model or "").lower():
@@ -8106,6 +8121,8 @@ class AIAgent:
                     break
 
                 except Exception as api_error:
+                    from agent.error_classifier import classify_api_error
+
                     # Stop spinner before printing error messages
                     if thinking_spinner:
                         thinking_spinner.stop("(╥_╥) error, retrying...")
@@ -8131,7 +8148,15 @@ class AIAgent:
                         # Surrogates weren't in messages — might be in system
                         # prompt or prefill.  Fall through to normal error path.
 
-                    status_code = getattr(api_error, "status_code", None)
+                    _classified_error = classify_api_error(
+                        api_error,
+                        provider=self.provider,
+                        model=self.model,
+                        approx_tokens=approx_tokens,
+                        context_length=getattr(self.context_compressor, "context_length", 200000),
+                        num_messages=len(api_messages),
+                    )
+                    status_code = _classified_error.status_code
                     error_context = self._extract_api_error_context(api_error)
                     recovered_with_pool, has_retried_429 = self._recover_with_credential_pool(
                         status_code=status_code,
@@ -8224,10 +8249,24 @@ class AIAgent:
                     error_msg = str(api_error).lower()
                     _error_summary = self._summarize_api_error(api_error)
                     logger.warning(
-                        "API call failed (attempt %s/%s) error_type=%s %s summary=%s",
+                        "API call failed (attempt %s/%s) error_type=%s error_category=%s "
+                        "api_endpoint=%s reasoning_effort=%s tools_enabled=%s "
+                        "message_count=%s estimated_tokens=%s session_id=%s "
+                        "request_origin=%s %s summary=%s",
                         retry_count,
                         max_retries,
                         error_type,
+                        _classified_error.reason.value,
+                        "/responses" if self.api_mode == "codex_responses" else "/chat/completions",
+                        (api_kwargs.get("reasoning_effort")
+                         or (api_kwargs.get("reasoning") or {}).get("effort")
+                         or (api_kwargs.get("extra_body") or {}).get("reasoning", {}).get("effort")
+                         or "none"),
+                        bool(api_kwargs.get("tools")),
+                        len(api_messages),
+                        approx_tokens,
+                        self.session_id or "none",
+                        self.platform or "agent",
                         self._client_log_context(),
                         _error_summary,
                     )
@@ -8263,7 +8302,7 @@ class AIAgent:
                     # Check for 413 payload-too-large BEFORE generic 4xx handler.
                     # A 413 is a payload-size error — the correct response is to
                     # compress history and retry, not abort immediately.
-                    status_code = getattr(api_error, "status_code", None)
+                    status_code = _classified_error.status_code
 
                     # ── Anthropic Sonnet long-context tier gate ───────────
                     # Anthropic returns HTTP 429 "Extra usage is required for
@@ -8544,7 +8583,7 @@ class AIAgent:
                     _err_message = (_err_body.get("error", {}).get("message", "") if isinstance(_err_body, dict) else "")
                     _is_generic_400 = (status_code == 400 and _err_message.strip().lower() in ("error", ""))
                     is_client_status_error = isinstance(status_code, int) and 400 <= status_code < 500 and status_code not in _RETRYABLE_STATUS_CODES and not _is_generic_400
-                    is_client_error = (is_local_validation_error or is_client_status_error or any(phrase in error_msg for phrase in [
+                    is_client_error = (is_local_validation_error or is_client_status_error or not _classified_error.retryable or any(phrase in error_msg for phrase in [
                         'error code: 401', 'error code: 403',
                         'error code: 404', 'error code: 422',
                         'is not a valid model', 'invalid model', 'model not found',
