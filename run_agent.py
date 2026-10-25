@@ -696,7 +696,7 @@ class AIAgent:
         # ``quiet_mode`` controls presentation through the output guards below.
         # It must not mutate logger levels: those are process-global and would
         # suppress records before persistent handlers can receive them.
-        
+
         # Internal stream callback (set during streaming TTS).
         # Initialized here so _vprint can reference it before run_conversation.
         self._stream_callback = None

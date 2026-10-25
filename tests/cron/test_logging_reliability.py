@@ -12,6 +12,14 @@ from cron import scheduler
 from hermes_logging_context import HermesLogContextFilter
 
 
+def _install_context_filter(caplog, request):
+    context_filter = HermesLogContextFilter()
+    caplog.handler.addFilter(context_filter)
+    request.addfinalizer(
+        lambda: caplog.handler.removeFilter(context_filter)
+    )
+
+
 def test_standalone_scheduler_initializes_profile_logging(tmp_path):
     hermes_home = tmp_path / "profile-home"
     env = dict(os.environ, HERMES_HOME=str(hermes_home))
@@ -60,9 +68,11 @@ def test_two_processes_can_append_without_rotation(tmp_path):
     assert "concurrent-record-two" in content
 
 
-def test_scheduler_processing_failure_logs_traceback_and_preserves_status(caplog, tmp_path):
+def test_scheduler_processing_failure_logs_traceback_and_preserves_status(
+    caplog, request, tmp_path
+):
     job = {"id": "safe-job-id", "name": "Synthetic job"}
-    caplog.handler.addFilter(HermesLogContextFilter())
+    _install_context_filter(caplog, request)
 
     with patch.object(scheduler, "_LOCK_DIR", tmp_path), \
          patch.object(scheduler, "_LOCK_FILE", tmp_path / ".tick.lock"), \
@@ -97,10 +107,10 @@ def test_status_persistence_failure_does_not_hide_original_traceback(caplog, tmp
 
 
 def test_post_execution_persistence_failure_does_not_duplicate_terminal_event(
-    caplog, tmp_path
+    caplog, request, tmp_path
 ):
     job = {"id": "post-processing-job", "name": "Synthetic job"}
-    caplog.handler.addFilter(HermesLogContextFilter())
+    _install_context_filter(caplog, request)
 
     with patch.object(scheduler, "_LOCK_DIR", tmp_path), \
          patch.object(scheduler, "_LOCK_FILE", tmp_path / ".tick.lock"), \
@@ -132,12 +142,14 @@ def test_post_execution_persistence_failure_does_not_duplicate_terminal_event(
     assert processing.exc_info[0] is OSError
 
 
-def test_delivery_lifecycle_uses_exact_terminal_event_names(caplog, tmp_path):
+def test_delivery_lifecycle_uses_exact_terminal_event_names(
+    caplog, request, tmp_path
+):
     jobs = [
         {"id": "returned-delivery-error", "name": "Returned error"},
         {"id": "raised-delivery-error", "name": "Raised error"},
     ]
-    caplog.handler.addFilter(HermesLogContextFilter())
+    _install_context_filter(caplog, request)
 
     def deliver(job, *_args, **_kwargs):
         if job["id"] == "returned-delivery-error":

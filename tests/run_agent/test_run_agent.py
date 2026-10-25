@@ -140,6 +140,8 @@ def test_quiet_agent_does_not_change_process_logging_levels(
     caplog, capsys, tmp_path
 ):
     """Quiet presentation must not mutate process-global logging policy."""
+    import hermes_logging
+
     names = (
         "cron",
         "cron.scheduler",
@@ -149,11 +151,22 @@ def test_quiet_agent_does_not_change_process_logging_levels(
         "hermes_cli",
     )
     original_levels = {name: logging.getLogger(name).level for name in names}
-    original_root_level = logging.getLogger().level
+    root = logging.getLogger()
+    original_root_level = root.level
+    original_handlers = list(root.handlers)
+    original_initialized = hermes_logging._logging_initialized
+    detached_handlers = [
+        handler for handler in original_handlers
+        if getattr(handler, "_hermes_managed", False)
+        and getattr(handler, "_hermes_log_kind", None) in {"agent", "errors"}
+    ]
+    for handler in detached_handlers:
+        root.removeHandler(handler)
     try:
+        hermes_logging._logging_initialized = False
         for name in names:
             logging.getLogger(name).setLevel(logging.NOTSET)
-        logging.getLogger().setLevel(logging.INFO)
+        root.setLevel(logging.INFO)
 
         with (
             patch.object(run_agent, "_hermes_home", tmp_path / "hermes-home"),
@@ -173,7 +186,7 @@ def test_quiet_agent_does_not_change_process_logging_levels(
                 skip_memory=True,
             )
 
-        assert logging.getLogger().level == logging.INFO
+        assert root.level == logging.INFO
         assert all(logging.getLogger(name).level == logging.NOTSET for name in names)
         with caplog.at_level(logging.INFO):
             logging.getLogger("tools.synthetic").info("persistent tool info")
@@ -184,9 +197,17 @@ def test_quiet_agent_does_not_change_process_logging_levels(
         assert "persistent CLI warning" in caplog.messages
         assert capsys.readouterr().out == ""
     finally:
-        logging.getLogger().setLevel(original_root_level)
+        for handler in list(root.handlers):
+            if handler not in original_handlers:
+                root.removeHandler(handler)
+                handler.close()
+        for handler in detached_handlers:
+            if handler not in root.handlers:
+                root.addHandler(handler)
+        root.setLevel(original_root_level)
         for name, level in original_levels.items():
             logging.getLogger(name).setLevel(level)
+        hermes_logging._logging_initialized = original_initialized
 
 
 # ---------------------------------------------------------------------------
