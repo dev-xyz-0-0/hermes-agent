@@ -4,6 +4,8 @@ import logging
 import os
 from unittest.mock import patch
 
+import pytest
+
 from gateway.platforms.base import (
     BasePlatformAdapter,
     GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE,
@@ -354,6 +356,61 @@ class TestExtractMedia:
         assert media == [("/tmp/my image.png", False)]
         assert "Here" in cleaned
         assert "After" in cleaned
+
+    @pytest.mark.parametrize(
+        ("content", "expected"),
+        [
+            ("MEDIA:/tmp/cron-voice.mp3\\", "/tmp/cron-voice.mp3"),
+            ("MEDIA:/tmp/chart.png\\", "/tmp/chart.png"),
+            ("MEDIA:/tmp/voice.ogg\\", "/tmp/voice.ogg"),
+        ],
+    )
+    def test_unquoted_trailing_markdown_escape_is_not_part_of_path(self, content, expected):
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == [(expected, False)]
+        assert cleaned == ""
+
+    def test_lone_markdown_escape_is_not_a_media_path(self):
+        media, cleaned = BasePlatformAdapter.extract_media("MEDIA:\\")
+        assert media == []
+        assert cleaned == "MEDIA:\\"
+
+    def test_quoted_trailing_backslash_is_preserved_as_literal_filename(self):
+        media, cleaned = BasePlatformAdapter.extract_media("MEDIA:'/tmp/literal.png\\'")
+        assert media == [("/tmp/literal.png\\", False)]
+        assert cleaned == ""
+
+    def test_backslashes_inside_filename_are_preserved(self):
+        media, _ = BasePlatformAdapter.extract_media(r"MEDIA:/tmp/name\\part.png")
+        assert media == [(r"/tmp/name\\part.png", False)]
+
+    def test_multiple_escaped_and_regular_media_references(self):
+        content = "MEDIA:/tmp/a.png\\\nMEDIA:'/tmp/space ü.ogg'\nMEDIA:/tmp/b.mp3"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == [
+            ("/tmp/a.png", False),
+            ("/tmp/space ü.ogg", False),
+            ("/tmp/b.mp3", False),
+        ]
+        assert cleaned == ""
+
+    def test_media_examples_in_fenced_code_are_plain_text(self):
+        content = "Example:\n```text\nMEDIA:/tmp/chart.png\\\nMEDIA:\\\n```"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == []
+        assert cleaned == content
+
+    def test_media_reference_in_inline_code_is_plain_text(self):
+        content = "Do not send `MEDIA:/tmp/example.png`."
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == []
+        assert cleaned == content
+
+    def test_rejected_reference_is_preserved_beside_valid_reference(self):
+        content = "MEDIA:\\\nMEDIA:/tmp/valid.png"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == [("/tmp/valid.png", False)]
+        assert cleaned == "MEDIA:\\"
 
 
 # ---------------------------------------------------------------------------

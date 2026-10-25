@@ -884,25 +884,78 @@ class BasePlatformAdapter(ABC):
         
         # Check for [[audio_as_voice]] directive
         has_voice_tag = "[[audio_as_voice]]" in content
-        cleaned = cleaned.replace("[[audio_as_voice]]", "")
         
         # Extract MEDIA:<path> tags, allowing optional whitespace after the colon
         # and quoted/backticked paths for LLM-formatted outputs.
         media_pattern = re.compile(
             r'''[`"']?MEDIA:\s*(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|(?:~/|/)\S+(?:[^\S\n]+\S+)*?\.(?:png|jpe?g|gif|webp|mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a)(?=[\s`"',;:)\]}]|$)|\S+)[`"']?'''
         )
+
+        # MEDIA examples in code are documentation, not delivery directives.
+        # Keep path-only backtick wrappers working by testing the start of the
+        # whole match rather than the captured path.
+        code_spans = [
+            (m.start(), m.end())
+            for m in re.finditer(r'```[^\n]*\n.*?```', content, re.DOTALL)
+        ]
+        code_spans.extend(
+            (m.start(), m.end()) for m in re.finditer(r'`[^`\n]+`', content)
+        )
+
+        accepted_spans = []
         for match in media_pattern.finditer(content):
-            path = match.group("path").strip()
-            if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
+            if any(start <= match.start() < end for start, end in code_spans):
+                continue
+            raw_path = match.group("path").strip()
+            was_quoted = (
+                len(raw_path) >= 2
+                and raw_path[0] == raw_path[-1]
+                and raw_path[0] in "`\"'"
+            )
+            path = raw_path
+            if was_quoted:
                 path = path[1:-1].strip()
             path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
+
+            # A single trailing backslash on an *unquoted* MEDIA reference is
+            # Markdown's escaped-line-break syntax, not part of the path.  It
+            # commonly appears when an agent escapes a generated MEDIA line.
+            # Limit normalization to paths whose preceding text ends in a
+            # supported media extension so quoted/literal backslashes and
+            # backslashes within filenames remain untouched.
+            if not was_quoted and path.endswith("\\"):
+                without_escape = path[:-1]
+                if re.search(
+                    r"\.(?:png|jpe?g|gif|webp|mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a)$",
+                    without_escape,
+                    re.IGNORECASE,
+                ):
+                    path = without_escape
+
+            # The permissive fallback in the pattern exists for document
+            # attachments, but must not turn a lone Markdown escape into a
+            # filesystem reference.
+            if path == "\\":
+                continue
             if path:
                 media.append((path, has_voice_tag))
+                accepted_spans.append(match.span())
 
         # Remove MEDIA tags from content (including surrounding quote/backtick wrappers)
         if media:
-            cleaned = media_pattern.sub('', cleaned)
+            # Remove only references accepted above.  A blanket regex
+            # substitution would also erase malformed references and examples
+            # inside code blocks when another valid reference is present.
+            parts = []
+            cursor = 0
+            for start, end in accepted_spans:
+                parts.append(cleaned[cursor:start])
+                cursor = end
+            parts.append(cleaned[cursor:])
+            cleaned = ''.join(parts)
             cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+
+        cleaned = cleaned.replace("[[audio_as_voice]]", "")
         
         return media, cleaned
 

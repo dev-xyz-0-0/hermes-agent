@@ -108,6 +108,19 @@ def _strip_mdv2(text: str) -> str:
     return cleaned
 
 
+def _validate_local_media_path(path: str, kind: str) -> Optional[str]:
+    """Return a specific validation error for a local Telegram attachment."""
+    if not path or not path.strip():
+        return f"Malformed {kind} reference: empty path"
+    if not os.path.exists(path):
+        return f"{kind.capitalize()} file not found: {path}"
+    if not os.path.isfile(path):
+        return f"{kind.capitalize()} path is not a regular file: {path}"
+    if not os.access(path, os.R_OK):
+        return f"{kind.capitalize()} file is not readable: {path}"
+    return None
+
+
 class TelegramAdapter(BasePlatformAdapter):
     """
     Telegram bot adapter.
@@ -1629,9 +1642,9 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
         
         try:
-            import os
-            if not os.path.exists(audio_path):
-                return SendResult(success=False, error=f"Audio file not found: {audio_path}")
+            validation_error = _validate_local_media_path(audio_path, "audio")
+            if validation_error:
+                return SendResult(success=False, error=validation_error)
             
             with open(audio_path, "rb") as audio_file:
                 # .ogg files -> send as voice (round playable bubble)
@@ -1678,9 +1691,9 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
-            import os
-            if not os.path.exists(image_path):
-                return SendResult(success=False, error=f"Image file not found: {image_path}")
+            validation_error = _validate_local_media_path(image_path, "image")
+            if validation_error:
+                return SendResult(success=False, error=validation_error)
 
             _thread = metadata.get("thread_id") if metadata else None
             with open(image_path, "rb") as image_file:
@@ -1716,8 +1729,9 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
-            if not os.path.exists(file_path):
-                return SendResult(success=False, error=f"File not found: {file_path}")
+            validation_error = _validate_local_media_path(file_path, "document")
+            if validation_error:
+                return SendResult(success=False, error=validation_error)
 
             display_name = file_name or os.path.basename(file_path)
             _thread = metadata.get("thread_id") if metadata else None
@@ -1750,8 +1764,9 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
-            if not os.path.exists(video_path):
-                return SendResult(success=False, error=f"Video file not found: {video_path}")
+            validation_error = _validate_local_media_path(video_path, "video")
+            if validation_error:
+                return SendResult(success=False, error=validation_error)
 
             _thread = metadata.get("thread_id") if metadata else None
             with open(video_path, "rb") as f:
