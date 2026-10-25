@@ -1050,6 +1050,7 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
             run_id = uuid4().hex
             with cron_log_context(job_id=job["id"], run_id=run_id, profile=profile):
                 logger.info("cron.execution.started")
+                execution_terminal_emitted = False
                 try:
                     # For recurring jobs (cron/interval), advance next_run_at to the
                     # next future occurrence BEFORE execution.  This way, if the
@@ -1064,6 +1065,7 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                         # Expected job failures already own their detailed logging
                         # inside run_job(); retain one correlation event here.
                         logger.warning("cron.execution.failed")
+                    execution_terminal_emitted = True
 
                     output_file = save_job_output(job["id"], output)
                     if verbose:
@@ -1090,7 +1092,10 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                             logger.exception("cron.delivery.failed")
                         if delivery_error:
                             if not delivery_raised:
-                                logger.warning("cron.delivery.failed: %s", delivery_error)
+                                logger.warning(
+                                    "cron.delivery.failed",
+                                    extra={"delivery_failure_kind": "returned"},
+                                )
                         else:
                             logger.info("cron.delivery.succeeded")
 
@@ -1098,7 +1103,10 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     executed += 1
 
                 except Exception as e:
-                    logger.exception("cron.execution.failed")
+                    if execution_terminal_emitted:
+                        logger.exception("Cron job post-processing failed")
+                    else:
+                        logger.exception("cron.execution.failed")
                     try:
                         mark_job_run(job["id"], False, str(e))
                     except Exception:

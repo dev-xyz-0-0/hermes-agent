@@ -233,7 +233,7 @@ class TestCLIUsageReport:
         assert "Session duration:" in output
         assert "Compressions:" in output
 
-    def test_non_verbose_usage_report_does_not_suppress_cron(self, capsys):
+    def test_non_verbose_usage_report_does_not_change_logging_levels(self, capsys):
         cli_obj = _attach_agent(
             _make_cli(),
             prompt_tokens=100,
@@ -255,8 +255,9 @@ class TestCLIUsageReport:
         original_root_level = logging.getLogger().level
         original_levels = {name: logging.getLogger(name).level for name in names}
         try:
-            logging.getLogger("cron").setLevel(logging.NOTSET)
-            logging.getLogger("cron.scheduler").setLevel(logging.NOTSET)
+            logging.getLogger().setLevel(logging.WARNING)
+            for name in names:
+                logging.getLogger(name).setLevel(logging.NOTSET)
             with patch(
                 "cli.estimate_usage_cost",
                 return_value=SimpleNamespace(
@@ -266,10 +267,8 @@ class TestCLIUsageReport:
                 cli_obj._show_usage()
             capsys.readouterr()
 
-            assert logging.getLogger("cron").level == logging.NOTSET
-            assert logging.getLogger("cron.scheduler").getEffectiveLevel() <= logging.INFO
-            for name in ("tools", "run_agent", "trajectory_compressor", "hermes_cli"):
-                assert logging.getLogger(name).level == logging.ERROR
+            assert logging.getLogger().level == logging.WARNING
+            assert all(logging.getLogger(name).level == logging.NOTSET for name in names)
         finally:
             logging.getLogger().setLevel(original_root_level)
             for name, level in original_levels.items():

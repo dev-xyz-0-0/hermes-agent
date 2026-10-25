@@ -136,8 +136,10 @@ def test_aiagent_reuses_existing_errors_log_handler():
             root_logger.addHandler(handler)
 
 
-def test_quiet_agent_does_not_suppress_cron_lifecycle_logger(tmp_path):
-    """Quiet agents may silence noisy internals, but cron is operational."""
+def test_quiet_agent_does_not_change_process_logging_levels(
+    caplog, capsys, tmp_path
+):
+    """Quiet presentation must not mutate process-global logging policy."""
     names = (
         "cron",
         "cron.scheduler",
@@ -157,6 +159,11 @@ def test_quiet_agent_does_not_suppress_cron_lifecycle_logger(tmp_path):
             patch.object(run_agent, "_hermes_home", tmp_path / "hermes-home"),
             patch("run_agent.get_tool_definitions", return_value=[]),
             patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.fetch_model_metadata", return_value={}),
+            patch(
+                "agent.context_compressor.get_model_context_length",
+                return_value=128_000,
+            ),
             patch("run_agent.OpenAI"),
         ):
             AIAgent(
@@ -166,10 +173,16 @@ def test_quiet_agent_does_not_suppress_cron_lifecycle_logger(tmp_path):
                 skip_memory=True,
             )
 
-        assert logging.getLogger("cron").level == logging.NOTSET
-        assert logging.getLogger("cron.scheduler").getEffectiveLevel() <= logging.INFO
-        for name in ("tools", "run_agent", "trajectory_compressor", "hermes_cli"):
-            assert logging.getLogger(name).level == logging.ERROR
+        assert logging.getLogger().level == logging.INFO
+        assert all(logging.getLogger(name).level == logging.NOTSET for name in names)
+        with caplog.at_level(logging.INFO):
+            logging.getLogger("tools.synthetic").info("persistent tool info")
+            logging.getLogger("hermes_cli.synthetic").warning(
+                "persistent CLI warning"
+            )
+        assert "persistent tool info" in caplog.messages
+        assert "persistent CLI warning" in caplog.messages
+        assert capsys.readouterr().out == ""
     finally:
         logging.getLogger().setLevel(original_root_level)
         for name, level in original_levels.items():

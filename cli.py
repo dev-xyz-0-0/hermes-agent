@@ -5505,17 +5505,8 @@ class HermesCLI:
         if cost_result.status == "unknown":
             print(f"  Note:             Pricing unknown for {agent.model}")
 
-        if self.verbose:
-            logging.getLogger().setLevel(logging.DEBUG)
-            for noisy in ('openai', 'openai._base_client', 'httpx', 'httpcore', 'asyncio', 'hpack', 'grpc', 'modal'):
-                logging.getLogger(noisy).setLevel(logging.WARNING)
-        else:
-            logging.getLogger().setLevel(logging.INFO)
-            # Named logger levels are process-global. Do not suppress the cron
-            # namespace: scheduler lifecycle records must continue reaching
-            # file handlers after a non-verbose usage report.
-            for quiet_logger in ('tools', 'run_agent', 'trajectory_compressor', 'hermes_cli'):
-                logging.getLogger(quiet_logger).setLevel(logging.ERROR)
+        # Displaying usage must not reconfigure logging. Root and named logger
+        # levels are process-global; startup owns verbosity and handler policy.
 
     def _show_insights(self, command: str = "/insights"):
         """Show usage insights and analytics from session history."""

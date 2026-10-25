@@ -96,6 +96,84 @@ def test_status_persistence_failure_does_not_hide_original_traceback(caplog, tmp
     assert any(r.exc_info[0] is OSError for r in records)
 
 
+def test_post_execution_persistence_failure_does_not_duplicate_terminal_event(
+    caplog, tmp_path
+):
+    job = {"id": "post-processing-job", "name": "Synthetic job"}
+    caplog.handler.addFilter(HermesLogContextFilter())
+
+    with patch.object(scheduler, "_LOCK_DIR", tmp_path), \
+         patch.object(scheduler, "_LOCK_FILE", tmp_path / ".tick.lock"), \
+         patch.object(scheduler, "get_due_jobs", return_value=[job]), \
+         patch.object(scheduler, "advance_next_run"), \
+         patch.object(
+             scheduler,
+             "run_job",
+             return_value=(True, "output", "", None),
+         ), \
+         patch.object(
+             scheduler,
+             "save_job_output",
+             side_effect=OSError("output write failed"),
+         ), \
+         patch.object(scheduler, "mark_job_run"):
+        with caplog.at_level(logging.INFO, logger="cron.scheduler"):
+            assert scheduler.tick(verbose=False) == 0
+
+    lifecycle = [
+        record.message for record in caplog.records
+        if record.message.startswith("cron.execution.")
+    ]
+    assert lifecycle == ["cron.execution.started", "cron.execution.succeeded"]
+    processing = next(
+        record for record in caplog.records
+        if record.message == "Cron job post-processing failed"
+    )
+    assert processing.exc_info[0] is OSError
+
+
+def test_delivery_lifecycle_uses_exact_terminal_event_names(caplog, tmp_path):
+    jobs = [
+        {"id": "returned-delivery-error", "name": "Returned error"},
+        {"id": "raised-delivery-error", "name": "Raised error"},
+    ]
+    caplog.handler.addFilter(HermesLogContextFilter())
+
+    def deliver(job, *_args, **_kwargs):
+        if job["id"] == "returned-delivery-error":
+            return "synthetic returned error"
+        raise RuntimeError("synthetic raised error")
+
+    with patch.object(scheduler, "_LOCK_DIR", tmp_path), \
+         patch.object(scheduler, "_LOCK_FILE", tmp_path / ".tick.lock"), \
+         patch.object(scheduler, "get_due_jobs", return_value=jobs), \
+         patch.object(scheduler, "advance_next_run"), \
+         patch.object(
+             scheduler,
+             "run_job",
+             return_value=(True, "output", "deliver me", None),
+         ), \
+         patch.object(scheduler, "save_job_output", return_value=tmp_path / "out"), \
+         patch.object(scheduler, "_deliver_result", side_effect=deliver), \
+         patch.object(scheduler, "mark_job_run"), \
+         patch(
+             "hermes_cli.profiles.get_active_profile_name",
+             return_value="isolated",
+         ):
+        with caplog.at_level(logging.INFO, logger="cron.scheduler"):
+            assert scheduler.tick(verbose=False) == 2
+
+    by_run = {}
+    for record in caplog.records:
+        if record.message.startswith("cron.delivery."):
+            by_run.setdefault(record.run_id, []).append(record.message)
+    assert len(by_run) == 2
+    assert all(
+        messages == ["cron.delivery.started", "cron.delivery.failed"]
+        for messages in by_run.values()
+    )
+
+
 def test_correlated_cron_traceback_redacts_secret_in_persisted_output(tmp_path):
     path = tmp_path / "cron-errors.log"
     handler = logging.FileHandler(path)
@@ -173,10 +251,17 @@ def test_lifecycle_logging_survives_agent_backed_run_and_reconfiguration(
         {"id": "script-before", "name": "script-before"},
         {"id": "agent-middle", "name": "agent-middle", "prompt": "synthetic"},
         {"id": "script-after", "name": "script-after"},
+        {"id": "execution-failed", "name": "execution-failed"},
+        {"id": "delivery-success", "name": "delivery-success"},
+        {"id": "delivery-failed", "name": "delivery-failed"},
     ]
     real_run_job = scheduler.run_job
 
     def run_synthetic_job(job):
+        if job["id"] == "execution-failed":
+            return False, "# failed", "", "synthetic execution failure"
+        if job["id"].startswith("delivery-"):
+            return True, "# synthetic", "deliver me", None
         if job["id"] != "agent-middle":
             return True, "# synthetic", "", None
 
@@ -193,11 +278,16 @@ def test_lifecycle_logging_survives_agent_backed_run_and_reconfiguration(
              patch.object(scheduler, "_hermes_home", hermes_home), \
              patch("run_agent.get_tool_definitions", return_value=[]), \
              patch("run_agent.check_toolset_requirements", return_value={}), \
+             patch("run_agent.fetch_model_metadata", return_value={}), \
+             patch(
+                 "agent.context_compressor.get_model_context_length",
+                 return_value=128_000,
+             ), \
              patch("run_agent.OpenAI"), \
              patch.object(
                  AIAgent,
                  "run_conversation",
-                 return_value={"final_response": "ok"},
+                 return_value={"final_response": ""},
              ), \
              patch("hermes_state.SessionDB", return_value=MagicMock()), \
              patch("dotenv.load_dotenv"), \
@@ -222,6 +312,27 @@ def test_lifecycle_logging_survives_agent_backed_run_and_reconfiguration(
             mode="gateway",
             force=True,
         )
+        from agent.redact import RedactingFormatter
+        from hermes_logging import _LOG_FORMAT, _add_rotating_handler
+        from hermes_logging_context import GatewayLogFilter, add_filter_once
+
+        gateway_handler = _add_rotating_handler(
+            root,
+            hermes_home / "logs" / "gateway.log",
+            level=logging.INFO,
+            max_bytes=1024 * 1024,
+            backup_count=1,
+            formatter=RedactingFormatter(_LOG_FORMAT),
+            managed_kind="gateway",
+            reconfigure=True,
+        )
+        add_filter_once(gateway_handler, HermesLogContextFilter)
+        add_filter_once(gateway_handler, GatewayLogFilter)
+
+        def deliver(job, *_args, **_kwargs):
+            if job["id"] == "delivery-failed":
+                return "synthetic delivery failure"
+            return None
 
         with patch.dict(
                  os.environ,
@@ -236,7 +347,7 @@ def test_lifecycle_logging_survives_agent_backed_run_and_reconfiguration(
              patch.object(
                  scheduler,
                  "get_due_jobs",
-                 side_effect=[[jobs[0]], [jobs[1]], [jobs[2]]],
+                 side_effect=[[job] for job in jobs],
              ), \
              patch.object(scheduler, "advance_next_run"), \
              patch.object(scheduler, "run_job", side_effect=run_synthetic_job), \
@@ -245,16 +356,19 @@ def test_lifecycle_logging_survives_agent_backed_run_and_reconfiguration(
                  "save_job_output",
                  return_value=hermes_home / "out.md",
              ), \
-             patch.object(scheduler, "_deliver_result", return_value=None), \
+             patch.object(scheduler, "_deliver_result", side_effect=deliver), \
              patch.object(scheduler, "mark_job_run"), \
              patch(
                  "hermes_cli.profiles.get_active_profile_name",
                  return_value="isolated",
              ):
-            assert scheduler.tick(verbose=False) == 1
-            hermes_logging.setup_logging(hermes_home=hermes_home, force=True)
-            assert scheduler.tick(verbose=False) == 1
-            assert scheduler.tick(verbose=False) == 1
+            for index in range(len(jobs)):
+                assert scheduler.tick(verbose=False) == 1
+                if index == 1:
+                    hermes_logging.setup_logging(
+                        hermes_home=hermes_home,
+                        force=True,
+                    )
 
         lifecycle = [
             record for record in caplog.records
@@ -266,19 +380,24 @@ def test_lifecycle_logging_survives_agent_backed_run_and_reconfiguration(
         ]
         assert [record.message for record in lifecycle].count(
             "cron.execution.started"
-        ) == 3
+        ) == 6
         assert [record.message for record in lifecycle].count(
             "cron.execution.succeeded"
-        ) == 3
+        ) == 5
+        assert [record.message for record in lifecycle].count(
+            "cron.execution.failed"
+        ) == 1
         assert {record.profile for record in lifecycle} == {"isolated"}
 
         by_run = {}
         for record in lifecycle:
             by_run.setdefault(record.run_id, []).append(record)
-        assert len(by_run) == 3
+        assert len(by_run) == 6
         assert all(
-            [record.message for record in records]
-            == ["cron.execution.started", "cron.execution.succeeded"]
+            len(records) == 2
+            and records[0].message == "cron.execution.started"
+            and records[1].message
+            in {"cron.execution.succeeded", "cron.execution.failed"}
             for records in by_run.values()
         )
         assert all(
@@ -286,12 +405,36 @@ def test_lifecycle_logging_survives_agent_backed_run_and_reconfiguration(
             and len({record.profile for record in records}) == 1
             for records in by_run.values()
         )
+        delivery_by_run = {}
+        for record in caplog.records:
+            if record.message.startswith("cron.delivery."):
+                delivery_by_run.setdefault(record.run_id, []).append(record)
+        assert len(delivery_by_run) == 3
+        assert all(
+            len(records) == 2
+            and records[0].message == "cron.delivery.started"
+            and records[1].message
+            in {"cron.delivery.succeeded", "cron.delivery.failed"}
+            and len({record.job_id for record in records}) == 1
+            and len({record.profile for record in records}) == 1
+            for records in delivery_by_run.values()
+        )
 
         for handler in root.handlers:
             handler.flush()
         content = (hermes_home / "logs" / "agent.log").read_text()
-        assert content.count("cron.execution.started") == 3
-        assert content.count("cron.execution.succeeded") == 3
+        assert content.count("cron.execution.started") == 6
+        assert content.count("cron.execution.succeeded") == 5
+        assert content.count("cron.execution.failed") == 1
+        assert content.count("cron.delivery.started") == 3
+        assert content.count("cron.delivery.succeeded") == 2
+        assert content.count("cron.delivery.failed") == 1
+        errors_content = (hermes_home / "logs" / "errors.log").read_text()
+        assert "cron.execution.failed" in errors_content
+        assert "cron.delivery.failed" in errors_content
+        assert "cron.execution." not in (
+            hermes_home / "logs" / "gateway.log"
+        ).read_text()
     finally:
         caplog.handler.removeFilter(context_filter)
         for handler in list(root.handlers):

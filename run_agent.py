@@ -692,19 +692,10 @@ class AIAgent:
         if self.verbose_logging:
             setup_verbose_logging()
             logger.info("Verbose logging enabled (third-party library logs suppressed)")
-        else:
-            if self.quiet_mode:
-                # Named logger levels are process-global and affect every
-                # handler, not only the console. Keep operational namespaces
-                # such as ``cron`` out of this list so lifecycle records remain
-                # visible when quiet agents share a gateway process.
-                for quiet_logger in [
-                    'tools',               # all tools.* (terminal, browser, web, file, etc.)
-                    'run_agent',            # agent runner internals
-                    'trajectory_compressor',
-                    'hermes_cli',           # CLI helpers
-                ]:
-                    logging.getLogger(quiet_logger).setLevel(logging.ERROR)
+
+        # ``quiet_mode`` controls presentation through the output guards below.
+        # It must not mutate logger levels: those are process-global and would
+        # suppress records before persistent handlers can receive them.
         
         # Internal stream callback (set during streaming TTS).
         # Initialized here so _vprint can reference it before run_conversation.

@@ -180,11 +180,21 @@ stable event names are `cron.execution.started`, `cron.execution.succeeded`,
 `cron.delivery.succeeded`, and `cron.delivery.failed`.
 
 Quiet agents and non-verbose CLI usage reports intentionally leave the
-process-global `cron` logger namespace enabled. Raising that namespace to ERROR
-would suppress INFO/WARNING lifecycle records before file handlers, correlation
-filters, and redaction can process them. A gateway that was started with an
-older affected version must be restarted normally after upgrading; logging
-reconfiguration alone does not reset named logger levels.
+process-global root and Hermes logger levels unchanged. Quietness is a
+presentation concern implemented by TUI/output guards and console-handler
+policy. Logger levels decide whether a record exists at all; handler levels and
+filters decide whether an existing record is displayed or persisted. Raising a
+Hermes namespace to ERROR would suppress INFO/WARNING records before file
+handlers, correlation filters, and redaction can process them. A gateway that
+was started with an older affected version must be restarted normally after
+upgrading; logging reconfiguration alone does not reset named logger levels.
+
+Each execution emits exactly one start and one terminal execution event. Each
+attempted delivery likewise emits exactly one start and one terminal delivery
+event. All events in a run carry the same job ID, run ID, and profile. A failure
+after the execution terminal has been emitted, such as an output or status
+persistence error, is logged as a post-processing failure with a traceback; it
+does not create a second execution terminal event.
 
 Cron execution exceptions are logged using `logger.exception()` inside `run_job()`.
 
@@ -339,7 +349,9 @@ The logging reliability tests cover:
 - Deterministic rollover, backup retention, and continued formatted logging.
 - Profile-aware standalone scheduler logging and graceful process exit.
 - Lifecycle visibility across quiet agent construction, non-verbose CLI usage
-  reports, and forced logging reconfiguration.
+  reports, forced logging reconfiguration, later failures, and delivery.
+- Exact execution and delivery lifecycle cardinality, including failures after
+  execution has already reached a terminal state.
 - Low-volume concurrent appends from two processes without forcing rotation.
 - Scheduler tracebacks and preservation of job failure-status updates.
 - Gateway cron-ticker tracebacks.
@@ -369,6 +381,12 @@ The focused P0–P2 logging reliability implementation is complete, but the
 following work remains for future reliability improvements.
 
 ### Actionable technical debt
+
+- **Lifecycle invariant monitoring:** The logging layer now emits deterministic
+  correlated events, but it does not yet maintain a durable monitoring ledger
+  or alert on missing terminals, overdue jobs, unmatched outputs, consecutive
+  failures, or stale scheduler activity. The implementation design is in
+  `docs/plans/cron-lifecycle-monitoring.md`.
 
 - **Multiprocess-safe rotation:** Gateway and standalone cron processes can
   append low-volume records concurrently, but simultaneous rotation by
