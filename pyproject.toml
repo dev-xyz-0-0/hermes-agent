@@ -144,6 +144,18 @@ markers = [
 ]
 addopts = "-m 'not integration' -n auto"
 asyncio_mode = "auto"
+# Narrow, specific filters only -- never a blanket ignore of a warning
+# category. Each entry below targets one known third-party incompatibility
+# that we can't fix without an internal-API-dependent dependency bump
+# (lark_oapi 1.5.5's Feishu websocket client pins to websockets' removed
+# legacy API; see CLAUDE.md's "Dependency Compatibility" notes). Production
+# code that relies on lark_oapi's own private attributes (gateway/platforms/
+# feishu.py's _run_official_feishu_ws_client) makes bumping lark_oapi risky
+# without full integration coverage, so the warning is filtered instead.
+filterwarnings = [
+    "ignore:websockets.InvalidStatusCode is deprecated:DeprecationWarning:lark_oapi\\.ws\\.client",
+    "ignore:websockets\\.legacy is deprecated.*:DeprecationWarning:websockets\\.legacy",
+]
 
 [dependency-groups]
 dev = [

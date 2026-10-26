@@ -20,6 +20,7 @@ import logging
 import os
 import shutil
 import shlex
+import ssl
 import stat
 import base64
 import hashlib
@@ -1304,12 +1305,24 @@ def resolve_codex_runtime_credentials(
 # TLS verification helper
 # =============================================================================
 
+def _ca_bundle_to_ssl_context(ca_bundle: str) -> ssl.SSLContext:
+    """Build an SSLContext from a CA bundle path.
+
+    httpx deprecated passing ``verify=<str>`` directly (it now wants an
+    ``ssl.SSLContext``), so any path-based CA bundle must be wrapped here
+    before being handed to ``httpx.Client(verify=...)``.
+    """
+    if os.path.isdir(ca_bundle):
+        return ssl.create_default_context(capath=ca_bundle)
+    return ssl.create_default_context(cafile=ca_bundle)
+
+
 def _resolve_verify(
     *,
     insecure: Optional[bool] = None,
     ca_bundle: Optional[str] = None,
     auth_state: Optional[Dict[str, Any]] = None,
-) -> bool | str:
+) -> bool | ssl.SSLContext:
     tls_state = auth_state.get("tls") if isinstance(auth_state, dict) else {}
     tls_state = tls_state if isinstance(tls_state, dict) else {}
 
@@ -1327,7 +1340,7 @@ def _resolve_verify(
     if effective_insecure:
         return False
     if effective_ca:
-        return str(effective_ca)
+        return _ca_bundle_to_ssl_context(str(effective_ca))
     return True
 
 
@@ -1488,7 +1501,7 @@ def fetch_nous_models(
     inference_base_url: str,
     api_key: str,
     timeout_seconds: float = 15.0,
-    verify: bool | str = True,
+    verify: bool | ssl.SSLContext = True,
 ) -> List[str]:
     """Fetch available model IDs from the Nous inference API."""
     timeout = httpx.Timeout(timeout_seconds)
@@ -2769,7 +2782,13 @@ def _nous_device_code_login(
     client_id = client_id or pconfig.client_id
     scope = scope or pconfig.scope
     timeout = httpx.Timeout(timeout_seconds)
-    verify: bool | str = False if insecure else (ca_bundle if ca_bundle else True)
+    verify: bool | ssl.SSLContext
+    if insecure:
+        verify = False
+    elif ca_bundle:
+        verify = _ca_bundle_to_ssl_context(ca_bundle)
+    else:
+        verify = True
 
     if _is_remote_session():
         open_browser = False

@@ -72,7 +72,7 @@ self = <tests.cli.test_quick_commands.TestCLIQuickCommands object at 0x767ee0200
         cli.process_command("/empty")
 >       cli.console.print.assert_called_once()
 
-tests/cli/test_quick_commands.py:46: 
+tests/cli/test_quick_commands.py:46:
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <MagicMock name='mock.print' id='130287254552064'>
@@ -105,7 +105,7 @@ tmp_path = PosixPath('/tmp/pytest-of-bc-dev/pytest-1/popen-gw1/test_main_resolve
         from agent.auxiliary_client import _normalize_vision_provider
 >       assert _normalize_vision_provider("main") == "custom:beans"
 E       AssertionError: assert 'beans' == 'custom:beans'
-E         
+E
 E         - custom:beans
 E         + beans
 
@@ -120,7 +120,7 @@ self = <tests.cli.test_quick_commands.TestCLIQuickCommands object at 0x767ee0098
         cli.process_command("/broken")
 >       cli.console.print.assert_called_once()
 
-tests/cli/test_quick_commands.py:68: 
+tests/cli/test_quick_commands.py:68:
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <MagicMock name='mock.print' id='130287242249280'>
@@ -149,7 +149,7 @@ self = <tests.cli.test_quick_commands.TestCLIQuickCommands object at 0x767ee0098
         cli.process_command("/bad")
 >       cli.console.print.assert_called_once()
 
-tests/cli/test_quick_commands.py:75: 
+tests/cli/test_quick_commands.py:75:
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <MagicMock name='mock.print' id='130287242251632'>
@@ -178,7 +178,7 @@ self = <tests.cli.test_quick_commands.TestCLIQuickCommands object at 0x767ee0301
         cli.process_command("/oops")
 >       cli.console.print.assert_called_once()
 
-tests/cli/test_quick_commands.py:82: 
+tests/cli/test_quick_commands.py:82:
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <MagicMock name='mock.print' id='130287242248608'>
@@ -208,7 +208,7 @@ self = <tests.cli.test_quick_commands.TestCLIQuickCommands object at 0x767ee013e
             cli.process_command("/slow")
 >       cli.console.print.assert_called_once()
 
-tests/cli/test_quick_commands.py:107: 
+tests/cli/test_quick_commands.py:107:
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <MagicMock name='mock.print' id='130287242254320'>
@@ -227,7 +227,7 @@ E           AssertionError: Expected 'print' to have been called once. Called 0 
 /usr/lib/python3.13/unittest/mock.py:958: AssertionError
 -------------------------------------- Captured stdout call ---------------------------------------
 Quick command timed out (30s)
-__________________ TestHuggingFaceModels.test_model_metadata_has_context_lengths __________________
+__________________________ TestHuggingFaceModels.test_model_metadata_has_context_lengths __________________
 [gw2] linux -- Python 3.13.3 /home/bc-dev/Documents/github/current/hermes-agent/.venv/bin/python3
 
 self = <tests.hermes_cli.test_api_key_providers.TestHuggingFaceModels object at 0x7e0ba2447820>
@@ -253,17 +253,17 @@ monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x764c351dbe70>
     def test_execute_uses_hermes_dotenv_for_allowlisted_env(monkeypatch):
         env = _make_execute_only_env(["GITHUB_TOKEN"])
         popen_calls = []
-    
+
         def _fake_popen(cmd, **kwargs):
             popen_calls.append(cmd)
             return _FakePopen(cmd, **kwargs)
-    
+
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)
         monkeypatch.setattr(docker_env, "_load_hermes_env_vars", lambda: {"GITHUB_TOKEN": "value_from_dotenv"})
         monkeypatch.setattr(docker_env.subprocess, "Popen", _fake_popen)
-    
+
         result = env.execute("echo hi")
-    
+
         assert result["returncode"] == 0
 >       assert "GITHUB_TOKEN=value_from_dotenv" in popen_calls[0]
 E       AssertionError: assert 'GITHUB_TOKEN=value_from_dotenv' in ['/usr/bin/docker', 'exec', '-w', '/root', 'test-container', 'bash', ...]
@@ -277,17 +277,17 @@ monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x764c3522ac10>
     def test_execute_prefers_shell_env_over_hermes_dotenv(monkeypatch):
         env = _make_execute_only_env(["GITHUB_TOKEN"])
         popen_calls = []
-    
+
         def _fake_popen(cmd, **kwargs):
             popen_calls.append(cmd)
             return _FakePopen(cmd, **kwargs)
-    
+
         monkeypatch.setenv("GITHUB_TOKEN", "value_from_shell")
         monkeypatch.setattr(docker_env, "_load_hermes_env_vars", lambda: {"GITHUB_TOKEN": "value_from_dotenv"})
         monkeypatch.setattr(docker_env.subprocess, "Popen", _fake_popen)
-    
+
         env.execute("echo hi")
-    
+
 >       assert "GITHUB_TOKEN=value_from_shell" in popen_calls[0]
 E       AssertionError: assert 'GITHUB_TOKEN=value_from_shell' in ['/usr/bin/docker', 'exec', '-w', '/root', 'test-container', 'bash', ...]
 
@@ -301,22 +301,22 @@ tmp_path = PosixPath('/tmp/pytest-of-bc-dev/pytest-1/popen-gw6/test_successful_t
     def test_successful_transcription(self, tmp_path):
         audio_file = tmp_path / "test.ogg"
         audio_file.write_bytes(b"fake audio")
-    
+
         mock_segment = MagicMock()
         mock_segment.text = "Hello world"
         mock_info = MagicMock()
         mock_info.language = "en"
         mock_info.duration = 2.5
-    
+
         mock_model = MagicMock()
         mock_model.transcribe.return_value = ([mock_segment], mock_info)
-    
+
         with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
 >            patch("faster_whisper.WhisperModel", return_value=mock_model), \
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
              patch("tools.transcription_tools._local_model", None):
 
-tests/tools/test_transcription.py:139: 
+tests/tools/test_transcription.py:139:
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /usr/lib/python3.13/unittest/mock.py:1481: in __enter__
     self.target = self.getter()
@@ -349,24 +349,24 @@ tmp_path = PosixPath('/tmp/pytest-of-bc-dev/pytest-1/popen-gw7/test_model_reuse_
         """Second call with same model should NOT reload the model."""
         audio = tmp_path / "test.ogg"
         audio.write_bytes(b"fake")
-    
+
         mock_segment = MagicMock()
         mock_segment.text = "hi"
         mock_info = MagicMock()
         mock_info.language = "en"
         mock_info.duration = 1.0
-    
+
         mock_model = MagicMock()
         mock_model.transcribe.return_value = ([mock_segment], mock_info)
         mock_whisper_cls = MagicMock(return_value=mock_model)
-    
+
         with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
 >            patch("faster_whisper.WhisperModel", mock_whisper_cls), \
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
              patch("tools.transcription_tools._local_model", None), \
              patch("tools.transcription_tools._local_model_name", None):
 
-tests/tools/test_transcription_tools.py:433: 
+tests/tools/test_transcription_tools.py:433:
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /usr/lib/python3.13/unittest/mock.py:1481: in __enter__
     self.target = self.getter()
@@ -399,24 +399,24 @@ tmp_path = PosixPath('/tmp/pytest-of-bc-dev/pytest-1/popen-gw7/test_model_reload
         """Switching model name should reload the model."""
         audio = tmp_path / "test.ogg"
         audio.write_bytes(b"fake")
-    
+
         mock_segment = MagicMock()
         mock_segment.text = "hi"
         mock_info = MagicMock()
         mock_info.language = "en"
         mock_info.duration = 1.0
-    
+
         mock_model = MagicMock()
         mock_model.transcribe.return_value = ([mock_segment], mock_info)
         mock_whisper_cls = MagicMock(return_value=mock_model)
-    
+
         with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
 >            patch("faster_whisper.WhisperModel", mock_whisper_cls), \
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
              patch("tools.transcription_tools._local_model", None), \
              patch("tools.transcription_tools._local_model_name", None):
 
-tests/tools/test_transcription_tools.py:459: 
+tests/tools/test_transcription_tools.py:459:
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /usr/lib/python3.13/unittest/mock.py:1481: in __enter__
     self.target = self.getter()
@@ -439,7 +439,7 @@ name = 'faster_whisper', import_ = <function _gcd_import at 0x74ba87fc44a0>
 E   ModuleNotFoundError: No module named 'faster_whisper'
 
 <frozen importlib._bootstrap>:1324: ModuleNotFoundError
-___________________ TestTranscribeLocalExtended.test_exception_returns_failure ____________________
+____________________ TestTranscribeLocalExtended.test_exception_returns_failure ____________________
 [gw7] linux -- Python 3.13.3 /home/bc-dev/Documents/github/current/hermes-agent/.venv/bin/python3
 
 self = <tests.tools.test_transcription_tools.TestTranscribeLocalExtended object at 0x74ba79edd5b0>
@@ -448,15 +448,15 @@ tmp_path = PosixPath('/tmp/pytest-of-bc-dev/pytest-1/popen-gw7/test_exception_re
     def test_exception_returns_failure(self, tmp_path):
         audio = tmp_path / "test.ogg"
         audio.write_bytes(b"fake")
-    
+
         mock_whisper_cls = MagicMock(side_effect=RuntimeError("CUDA out of memory"))
-    
+
         with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
 >            patch("faster_whisper.WhisperModel", mock_whisper_cls), \
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
              patch("tools.transcription_tools._local_model", None):
 
-tests/tools/test_transcription_tools.py:475: 
+tests/tools/test_transcription_tools.py:475:
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /usr/lib/python3.13/unittest/mock.py:1481: in __enter__
     self.target = self.getter()
@@ -488,7 +488,7 @@ tmp_path = PosixPath('/tmp/pytest-of-bc-dev/pytest-1/popen-gw7/test_multiple_seg
     def test_multiple_segments_joined(self, tmp_path):
         audio = tmp_path / "test.ogg"
         audio.write_bytes(b"fake")
-    
+
         seg1 = MagicMock()
         seg1.text = "Hello"
         seg2 = MagicMock()
@@ -496,16 +496,16 @@ tmp_path = PosixPath('/tmp/pytest-of-bc-dev/pytest-1/popen-gw7/test_multiple_seg
         mock_info = MagicMock()
         mock_info.language = "en"
         mock_info.duration = 3.0
-    
+
         mock_model = MagicMock()
         mock_model.transcribe.return_value = ([seg1, seg2], mock_info)
-    
+
         with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
 >            patch("faster_whisper.WhisperModel", return_value=mock_model), \
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
              patch("tools.transcription_tools._local_model", None):
 
-tests/tools/test_transcription_tools.py:499: 
+tests/tools/test_transcription_tools.py:499:
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /usr/lib/python3.13/unittest/mock.py:1481: in __enter__
     self.target = self.getter()
@@ -545,7 +545,7 @@ tmp_path = PosixPath('/tmp/pytest-of-bc-dev/pytest-1/popen-gw6/test_check_requir
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("AUXILIARY_VISION_PROVIDER", raising=False)
         monkeypatch.delenv("CONTEXT_VISION_PROVIDER", raising=False)
-    
+
 >       assert check_vision_requirements() is True
 E       assert False is True
 E        +  where False = check_vision_requirements()
@@ -579,7 +579,7 @@ tests/cli/test_reasoning_command.py::TestHandleReasoningCommand::test_no_args_sh
 
 tests/cli/test_reasoning_command.py::TestHandleReasoningCommand::test_no_args_shows_status
   /home/bc-dev/Documents/github/current/hermes-agent/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x767ee8afc400>
-  
+
   Traceback (most recent call last):
     File "/usr/lib/python3.13/asyncio/base_subprocess.py", line 130, in __del__
       self.close()
@@ -599,7 +599,7 @@ tests/cli/test_reasoning_command.py::TestHandleReasoningCommand::test_no_args_sh
     File "/usr/lib/python3.13/asyncio/base_events.py", line 550, in _check_closed
       raise RuntimeError('Event loop is closed')
   RuntimeError: Event loop is closed
-  
+
   Enable tracemalloc to get traceback where the object was allocated.
   See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
     warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))

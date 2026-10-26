@@ -177,6 +177,27 @@ class TestCheckFunction:
             _servers.pop("test_server", None)
 
 
+class TestRunOnMcpLoop:
+    """_run_on_mcp_loop must not leak the coroutine it was handed."""
+
+    def test_loop_not_running_closes_coroutine(self):
+        """If the MCP loop isn't running, the coroutine must be closed, not leaked."""
+        from tools import mcp_tool
+
+        async def _never_runs():
+            pass
+
+        coro = _never_runs()
+        with patch.object(mcp_tool, "_mcp_loop", None):
+            with pytest.raises(RuntimeError, match="MCP event loop is not running"):
+                mcp_tool._run_on_mcp_loop(coro)
+
+        # A closed coroutine raises RuntimeError (not emits a warning) if
+        # awaited again -- this proves it was closed rather than abandoned.
+        with pytest.raises(RuntimeError):
+            coro.send(None)
+
+
 # ---------------------------------------------------------------------------
 # Tool handler
 # ---------------------------------------------------------------------------
@@ -1318,14 +1339,23 @@ class TestConfigurableTimeouts:
 
         try:
             handler = _make_tool_handler("test_srv", "my_tool", 180)
-            with patch("tools.mcp_tool._run_on_mcp_loop") as mock_run:
-                mock_run.return_value = json.dumps({"result": "ok"})
+            captured_timeout = {}
+
+            def fake_run(coro, timeout=30):
+                # Run the coroutine for real (via a scratch loop) instead of
+                # leaving it unconsumed, which would leak an unawaited
+                # coroutine when _run_on_mcp_loop is mocked out wholesale.
+                captured_timeout["value"] = timeout
+                loop = asyncio.new_event_loop()
+                try:
+                    return loop.run_until_complete(coro)
+                finally:
+                    loop.close()
+
+            with patch("tools.mcp_tool._run_on_mcp_loop", side_effect=fake_run):
                 handler({})
-                # Verify timeout=180 was passed
-                call_kwargs = mock_run.call_args
-                assert call_kwargs.kwargs.get("timeout") == 180 or \
-                       (len(call_kwargs.args) > 1 and call_kwargs.args[1] == 180) or \
-                       call_kwargs[1].get("timeout") == 180
+
+            assert captured_timeout["value"] == 180
         finally:
             _servers.pop("test_srv", None)
 

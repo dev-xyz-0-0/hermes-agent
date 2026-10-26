@@ -32,6 +32,23 @@ def event_loop_fixture():
     loop.close()
 
 
+def _fake_run_coroutine_threadsafe(future):
+    """Build a run_coroutine_threadsafe stand-in for patching.
+
+    The real ``_send_update`` creates the ``conn.session_update(...)`` coroutine
+    eagerly (as required by ``run_coroutine_threadsafe``'s API) before handing it
+    off. Since these tests patch out ``run_coroutine_threadsafe`` itself, nothing
+    would otherwise run or close that coroutine, leaking an "never awaited"
+    warning. Closing it here keeps the mock faithful without executing it.
+    """
+
+    def _fake(coro, loop):
+        coro.close()
+        return future
+
+    return _fake
+
+
 # ---------------------------------------------------------------------------
 # Tool progress callback
 # ---------------------------------------------------------------------------
@@ -49,7 +66,7 @@ class TestToolProgressCallback:
         with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe") as mock_rcts:
             future = MagicMock(spec=Future)
             future.result.return_value = None
-            mock_rcts.return_value = future
+            mock_rcts.side_effect = _fake_run_coroutine_threadsafe(future)
 
             cb("tool.started", "terminal", "$ ls -la", {"command": "ls -la"})
 
@@ -72,7 +89,7 @@ class TestToolProgressCallback:
         with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe") as mock_rcts:
             future = MagicMock(spec=Future)
             future.result.return_value = None
-            mock_rcts.return_value = future
+            mock_rcts.side_effect = _fake_run_coroutine_threadsafe(future)
 
             cb("tool.started", "read_file", "Reading /etc/hosts", '{"path": "/etc/hosts"}')
 
@@ -88,7 +105,7 @@ class TestToolProgressCallback:
         with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe") as mock_rcts:
             future = MagicMock(spec=Future)
             future.result.return_value = None
-            mock_rcts.return_value = future
+            mock_rcts.side_effect = _fake_run_coroutine_threadsafe(future)
 
             cb("tool.started", "terminal", "$ echo hi", None)
 
@@ -105,7 +122,7 @@ class TestToolProgressCallback:
         with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe") as mock_rcts:
             future = MagicMock(spec=Future)
             future.result.return_value = None
-            mock_rcts.return_value = future
+            mock_rcts.side_effect = _fake_run_coroutine_threadsafe(future)
 
             progress_cb("tool.started", "terminal", "$ ls", {"command": "ls"})
             progress_cb("tool.started", "terminal", "$ pwd", {"command": "pwd"})
@@ -133,7 +150,7 @@ class TestThinkingCallback:
         with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe") as mock_rcts:
             future = MagicMock(spec=Future)
             future.result.return_value = None
-            mock_rcts.return_value = future
+            mock_rcts.side_effect = _fake_run_coroutine_threadsafe(future)
 
             cb("Analyzing the code...")
 
@@ -167,7 +184,7 @@ class TestStepCallback:
         with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe") as mock_rcts:
             future = MagicMock(spec=Future)
             future.result.return_value = None
-            mock_rcts.return_value = future
+            mock_rcts.side_effect = _fake_run_coroutine_threadsafe(future)
 
             cb(1, [{"name": "terminal", "result": "success"}])
 
@@ -197,7 +214,7 @@ class TestStepCallback:
         with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe") as mock_rcts:
             future = MagicMock(spec=Future)
             future.result.return_value = None
-            mock_rcts.return_value = future
+            mock_rcts.side_effect = _fake_run_coroutine_threadsafe(future)
 
             cb(2, ["read_file"])
 
@@ -217,7 +234,7 @@ class TestStepCallback:
              patch("acp_adapter.events.build_tool_complete") as mock_btc:
             future = MagicMock(spec=Future)
             future.result.return_value = None
-            mock_rcts.return_value = future
+            mock_rcts.side_effect = _fake_run_coroutine_threadsafe(future)
 
             # Provide a result string in the tool info dict
             cb(1, [{"name": "terminal", "result": '{"output": "hello"}'}])
@@ -239,7 +256,7 @@ class TestStepCallback:
              patch("acp_adapter.events.build_tool_complete") as mock_btc:
             future = MagicMock(spec=Future)
             future.result.return_value = None
-            mock_rcts.return_value = future
+            mock_rcts.side_effect = _fake_run_coroutine_threadsafe(future)
 
             cb(1, [{"name": "web_search", "result": None}])
 
@@ -261,7 +278,7 @@ class TestMessageCallback:
         with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe") as mock_rcts:
             future = MagicMock(spec=Future)
             future.result.return_value = None
-            mock_rcts.return_value = future
+            mock_rcts.side_effect = _fake_run_coroutine_threadsafe(future)
 
             cb("Here is your answer.")
 

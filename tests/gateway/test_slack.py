@@ -70,6 +70,11 @@ def adapter():
     # Mock the Slack app client
     a._app = MagicMock()
     a._app.client = AsyncMock()
+    # Default responses so dict access in slack.py (._resolve_user_name,
+    # .send) doesn't hit an unconfigured AsyncMock's auto-generated (and
+    # itself-async) attrs, which leaks an unawaited coroutine.
+    a._app.client.users_info = AsyncMock(return_value={"user": {}})
+    a._app.client.chat_postMessage = AsyncMock(return_value={"ok": True, "ts": "1111.1111"})
     a._bot_user_id = "U_BOT"
     a._running = True
     # Capture events instead of processing them
@@ -721,6 +726,8 @@ class TestThreadReplyHandling:
         a = SlackAdapter(config)
         a._app = MagicMock()
         a._app.client = AsyncMock()
+        a._app.client.users_info = AsyncMock(return_value={"user": {}})
+        a._app.client.chat_postMessage = AsyncMock(return_value={"ok": True, "ts": "1111.1111"})
         a._bot_user_id = "U_BOT"
         a._team_bot_user_ids = {"T_TEAM": "U_BOT"}
         a._running = True

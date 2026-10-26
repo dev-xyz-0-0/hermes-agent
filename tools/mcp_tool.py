@@ -1239,6 +1239,7 @@ def _run_on_mcp_loop(coro, timeout: float = 30):
     with _lock:
         loop = _mcp_loop
     if loop is None or not loop.is_running():
+        coro.close()  # caller already created it; avoid an unawaited-coroutine leak
         raise RuntimeError("MCP event loop is not running")
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     return future.result(timeout=timeout)
