@@ -48,18 +48,21 @@ jobs:
 
       - name: Run tests
         run: |
-          uv run pytest tests/ -q \
+          uv run python -X tracemalloc=10 -m pytest tests/ -q \
             --ignore=tests/integration \
             --ignore=tests/e2e \
-            --tb=short -n auto
+            --tb=short -n auto \
+            -W always::RuntimeWarning
         env:
+          PYTHONASYNCIODEBUG: "1"
+          PYTHONWARNINGS: "default"
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
 
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout code
