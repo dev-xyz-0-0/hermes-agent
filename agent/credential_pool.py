@@ -1925,7 +1925,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> Tup
         tokens = state.get("tokens") if isinstance(state, dict) else None
         if isinstance(tokens, dict) and tokens.get("access_token"):
             active_sources.add("loopback_pkce")
-            from hermes_cli.auth import DEFAULT_XAI_OAUTH_BASE_URL
+            from hermes_cli.auth_xai import DEFAULT_XAI_OAUTH_BASE_URL
 
             base_url = DEFAULT_XAI_OAUTH_BASE_URL
             changed |= _upsert_entry(
