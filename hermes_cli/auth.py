@@ -3031,12 +3031,32 @@ def _is_terminal_codex_oauth_refresh_error(exc: Exception) -> bool:
         and bool(exc.relogin_required)
     )
 
+def _is_terminal_xai_oauth_refresh_error(exc: Exception) -> bool:
+    """True when retrying the same xAI OAuth refresh token cannot succeed.
+
+    ``xai_refresh_failed`` covers HTTP 400/401 from the token endpoint (dead
+    or revoked refresh token); ``xai_auth_missing_refresh_token`` means the
+    pool entry has no refresh token at all. Both carry
+    ``relogin_required=True``; transient failures (403 tier-denied, 5xx) do
+    not.
+    """
+    return (
+        isinstance(exc, AuthError)
+        and exc.provider == "xai-oauth"
+        and exc.code in {
+            "xai_refresh_failed",
+            "xai_auth_missing_refresh_token",
+        }
+        and bool(exc.relogin_required)
+    )
+
 # =============================================================================
 # xAI Grok OAuth backport
 # =============================================================================
 # Imported at the end intentionally. auth_xai lazily imports this module's auth-store
 # primitives, avoiding a circular import while keeping the public surface compatible.
 from hermes_cli.auth_xai import (  # noqa: E402,F401
+    XAI_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
     _login_xai_oauth,
     _read_xai_oauth_tokens,
     _save_xai_oauth_tokens,
