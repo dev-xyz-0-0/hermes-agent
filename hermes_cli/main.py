@@ -1375,6 +1375,8 @@ def _model_flow_xai_oauth(config, current_model=""):
         _update_config_for_provider,
         _login_xai_oauth,
         PROVIDER_REGISTRY,
+        AuthError,
+        format_auth_error,
     )
 
     from hermes_cli.auth_xai import DEFAULT_XAI_OAUTH_BASE_URL
@@ -1437,9 +1439,26 @@ def _model_flow_xai_oauth(config, current_model=""):
 
     except Exception as exc:
 
-        print(
-            f"Unable to resolve xAI OAuth credentials: {exc}"
-        )
+        relogin = isinstance(exc, AuthError) and exc.relogin_required
+        msg = format_auth_error(exc) if isinstance(exc, AuthError) else str(exc)
+
+        if relogin:
+            print(f"Session expired: {msg}")
+            print("Re-authenticating with xAI Grok OAuth...\n")
+            try:
+                mock_args = argparse.Namespace(
+                    timeout=20.0,
+                    no_browser=False,
+                )
+                _login_xai_oauth(
+                    mock_args,
+                    PROVIDER_REGISTRY["xai-oauth"],
+                )
+            except Exception as login_exc:
+                print(f"Re-login failed: {login_exc}")
+            return
+
+        print(f"Could not resolve xAI OAuth credentials: {msg}")
 
         return
 
