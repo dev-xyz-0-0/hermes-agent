@@ -589,12 +589,89 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
 
 
 # =============================================================================
+# Draft actions (Phase 2 — see agent/skill_creation/)
+# =============================================================================
+
+def _manifest_summary(manifest) -> Dict[str, Any]:
+    """JSON-serializable summary of a DraftManifest, without the full report."""
+    return {
+        "draft_id": manifest.draft_id,
+        "name": manifest.name,
+        "category": manifest.category,
+        "state": manifest.state.value,
+        "destination": manifest.destination,
+        "content_hash": manifest.content_hash,
+        "created_at": manifest.created_at,
+        "updated_at": manifest.updated_at,
+    }
+
+
+def _draft_skill(name: str, content: str, category: str = None) -> Dict[str, Any]:
+    """Stage a new, unpublished draft for later validation."""
+    from agent.skill_creation import create_draft
+
+    creator = {"platform": os.getenv("HERMES_PLATFORM") or os.getenv("HERMES_SESSION_PLATFORM") or "cli"}
+    ok, result = create_draft(name, content, category, creator=creator)
+    if not ok:
+        return {"success": False, "error": result}
+    summary = _manifest_summary(result)
+    summary["success"] = True
+    summary["message"] = f"Draft '{name}' created. Not discoverable until validated and published."
+    summary["hint"] = "Use skill_manage(action='validate', draft_id=...) next."
+    return summary
+
+
+def _validate_draft_action(draft_id: str) -> Dict[str, Any]:
+    """Run the validation pipeline against a draft and persist the report."""
+    from agent.skill_creation import validate_draft
+
+    ok, result = validate_draft(draft_id)
+    if not ok:
+        return {"success": False, "error": result}
+    summary = _manifest_summary(result)
+    summary["success"] = True
+    summary["report"] = result.validation.to_dict() if result.validation else None
+    return summary
+
+
+def _preview_draft_action(draft_id: str) -> Dict[str, Any]:
+    """Return a draft's metadata, SKILL.md content, and validation staleness."""
+    from agent.skill_creation import preview_draft
+
+    ok, result = preview_draft(draft_id)
+    if not ok:
+        return {"success": False, "error": result}
+    manifest = result["manifest"]
+    summary = _manifest_summary(manifest)
+    summary["success"] = True
+    summary["content"] = result["content"]
+    summary["validation_stale"] = result["validation_stale"]
+    summary["report"] = manifest.validation.to_dict() if manifest.validation else None
+    return summary
+
+
+def _discard_draft_action(draft_id: str) -> Dict[str, Any]:
+    """Remove a draft entirely."""
+    from agent.skill_creation import discard_draft
+
+    ok, message = discard_draft(draft_id)
+    return {"success": ok, "message" if ok else "error": message}
+
+
+def _drafts_list_action() -> Dict[str, Any]:
+    """List draft summaries for the current profile — never leaks other profiles."""
+    from agent.skill_creation import list_draft_summaries
+
+    return {"success": True, "drafts": list_draft_summaries()}
+
+
+# =============================================================================
 # Main entry point
 # =============================================================================
 
 def skill_manage(
     action: str,
-    name: str,
+    name: str = None,
     content: str = None,
     category: str = None,
     file_path: str = None,
@@ -602,13 +679,37 @@ def skill_manage(
     old_string: str = None,
     new_string: str = None,
     replace_all: bool = False,
+    draft_id: str = None,
 ) -> str:
     """
     Manage user-created skills. Dispatches to the appropriate action handler.
 
     Returns JSON string with results.
     """
-    if action == "create":
+    if action == "draft":
+        if not content:
+            return tool_error("content is required for 'draft'. Provide the full SKILL.md text (frontmatter + body).", success=False)
+        result = _draft_skill(name, content, category)
+
+    elif action == "validate":
+        if not draft_id:
+            return tool_error("draft_id is required for 'validate'.", success=False)
+        result = _validate_draft_action(draft_id)
+
+    elif action == "preview":
+        if not draft_id:
+            return tool_error("draft_id is required for 'preview'.", success=False)
+        result = _preview_draft_action(draft_id)
+
+    elif action == "discard":
+        if not draft_id:
+            return tool_error("draft_id is required for 'discard'.", success=False)
+        result = _discard_draft_action(draft_id)
+
+    elif action == "drafts_list":
+        result = _drafts_list_action()
+
+    elif action == "create":
         if not content:
             return tool_error("content is required for 'create'. Provide the full SKILL.md text (frontmatter + body).", success=False)
         result = _create_skill(name, content, category)
@@ -641,9 +742,17 @@ def skill_manage(
         result = _remove_file(name, file_path)
 
     else:
-        result = {"success": False, "error": f"Unknown action '{action}'. Use: create, edit, patch, delete, write_file, remove_file"}
+        result = {"success": False, "error": (
+            f"Unknown action '{action}'. Use: create, edit, patch, delete, write_file, "
+            "remove_file, draft, validate, preview, discard, drafts_list"
+        )}
 
-    if result.get("success"):
+    # Drafts never touch a published skill or the system prompt's skill
+    # index -- clearing the prompt cache for draft/validate/preview/discard/
+    # drafts_list would break prompt caching for no reason (see AGENTS.md:
+    # "do NOT ... reload ... or rebuild system prompts mid-conversation").
+    _PUBLISHED_SKILL_ACTIONS = {"create", "edit", "patch", "delete", "write_file", "remove_file"}
+    if result.get("success") and action in _PUBLISHED_SKILL_ACTIONS:
         try:
             from agent.prompt_builder import clear_skills_system_prompt_cache
             clear_skills_system_prompt_cache(clear_snapshot=True)
@@ -667,6 +776,15 @@ SKILL_MANAGE_SCHEMA = {
         "patch (old_string/new_string — preferred for fixes), "
         "edit (full SKILL.md rewrite — major overhauls only), "
         "delete, write_file, remove_file.\n\n"
+        "Draft actions (for staging and validating a candidate skill before "
+        "committing to it — never discoverable or runnable until published): "
+        "draft (stage a candidate, like create but isolated), "
+        "validate (run structure/destination/security/dependency/duplicate checks "
+        "against a draft_id and persist the report), "
+        "preview (view a draft's content + last validation report), "
+        "discard (remove a draft), "
+        "drafts_list (list this profile's drafts). "
+        "Publishing a validated draft is not yet supported.\n\n"
         "Create when: complex task succeeded (5+ calls), errors overcome, "
         "user-corrected approach worked, non-trivial workflow discovered, "
         "or user asks you to remember a procedure.\n"
@@ -683,14 +801,26 @@ SKILL_MANAGE_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["create", "patch", "edit", "delete", "write_file", "remove_file"],
+                "enum": [
+                    "create", "patch", "edit", "delete", "write_file", "remove_file",
+                    "draft", "validate", "preview", "discard", "drafts_list",
+                ],
                 "description": "The action to perform."
             },
             "name": {
                 "type": "string",
                 "description": (
                     "Skill name (lowercase, hyphens/underscores, max 64 chars). "
-                    "Must match an existing skill for patch/edit/delete/write_file/remove_file."
+                    "Must match an existing skill for patch/edit/delete/write_file/remove_file. "
+                    "Required for 'create' and 'draft'. Not used by validate/preview/"
+                    "discard/drafts_list — those use draft_id instead."
+                )
+            },
+            "draft_id": {
+                "type": "string",
+                "description": (
+                    "Identifies a draft created via 'draft'. Required for "
+                    "validate/preview/discard. Not used by other actions."
                 )
             },
             "content": {
@@ -742,7 +872,7 @@ SKILL_MANAGE_SCHEMA = {
                 "description": "Content for the file. Required for 'write_file'."
             },
         },
-        "required": ["action", "name"],
+        "required": ["action"],
     },
 }
 
@@ -763,6 +893,7 @@ registry.register(
         file_content=args.get("file_content"),
         old_string=args.get("old_string"),
         new_string=args.get("new_string"),
-        replace_all=args.get("replace_all", False)),
+        replace_all=args.get("replace_all", False),
+        draft_id=args.get("draft_id")),
     emoji="📝",
 )

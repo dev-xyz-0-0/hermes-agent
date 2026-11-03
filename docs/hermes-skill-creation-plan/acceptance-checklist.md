@@ -1,19 +1,19 @@
 # Phase acceptance checklist
 
 ## Phase 1
-- [ ] Configurable create_dir resolves correctly
-- [ ] Legacy fallback works
-- [ ] Discovery/reload works
-- [ ] Collisions and unsafe paths rejected
-- [ ] Focused and regression tests pass
+- [x] Configurable create_dir resolves correctly
+- [x] Legacy fallback works
+- [x] Discovery/reload works
+- [x] Collisions and unsafe paths rejected
+- [x] Focused and regression tests pass
 - [ ] Review approved
 
 ## Phase 2
-- [ ] Drafts persisted but undiscoverable
-- [ ] Validations pass/fail closed
-- [ ] No unapproved code execution
-- [ ] Content digest invalidation works
-- [ ] Focused and regression tests pass
+- [x] Drafts persisted but undiscoverable
+- [x] Validations pass/fail closed
+- [x] No unapproved code execution
+- [x] Content digest invalidation works
+- [x] Focused and regression tests pass
 - [ ] Review approved
 
 ## Phase 3

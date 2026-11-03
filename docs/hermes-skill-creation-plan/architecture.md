@@ -38,3 +38,4 @@ Task completion / explicit request -> candidate detector (optional) -> draft cre
 ## Security
 
 Canonical path checks and symlink protection; no traversal; no automatic execution of generated code; protect secrets; no unauthenticated gateway approvals; validate content immediately before publish; concurrency lock on destination; no recursive overwrite of existing skills.
+skill_paths
