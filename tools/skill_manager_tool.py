@@ -190,10 +190,14 @@ def _validate_content_size(content: str, label: str = "SKILL.md") -> Optional[st
 
 
 def _resolve_skill_dir(name: str, category: str = None) -> Path:
-    """Build the directory path for a new skill, optionally under a category."""
-    if category:
-        return SKILLS_DIR / category / name
-    return SKILLS_DIR / name
+    """Build the directory path for a new skill, optionally under a category.
+
+    Resolves ``skills.create_dir`` fresh on every call (falls back to
+    ``SKILLS_DIR`` when unset) so a config edit takes effect immediately,
+    without a stale import-time path.
+    """
+    from agent.skill_paths import resolve_new_skill_path
+    return resolve_new_skill_path(name, category, legacy_default=SKILLS_DIR)
 
 
 def _find_skill(name: str) -> Optional[Dict[str, Any]]:
@@ -305,12 +309,26 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
         }
 
     # Create the skill directory
+    from agent.skill_paths import get_skill_create_dir, validate_skill_destination
+    create_dir = get_skill_create_dir(legacy_default=SKILLS_DIR)
     skill_dir = _resolve_skill_dir(name, category)
-    skill_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write SKILL.md atomically
-    skill_md = skill_dir / "SKILL.md"
-    _atomic_write_text(skill_md, content)
+    dest_error = validate_skill_destination(create_dir, skill_dir)
+    if dest_error:
+        return {"success": False, "error": dest_error}
+
+    # Track whether we created the leaf directory ourselves so a failure
+    # (e.g. a read-only destination) doesn't leave a partial, empty dir behind.
+    created_leaf = not skill_dir.exists()
+    try:
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        # Write SKILL.md atomically
+        skill_md = skill_dir / "SKILL.md"
+        _atomic_write_text(skill_md, content)
+    except OSError as e:
+        if created_leaf:
+            shutil.rmtree(skill_dir, ignore_errors=True)
+        return {"success": False, "error": f"Could not create skill at {skill_dir}: {e}"}
 
     # Security scan — roll back on block
     scan_error = _security_scan_skill(skill_dir)
@@ -318,10 +336,15 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
         shutil.rmtree(skill_dir, ignore_errors=True)
         return {"success": False, "error": scan_error}
 
+    try:
+        rel_path = str(skill_dir.relative_to(create_dir))
+    except ValueError:
+        rel_path = str(skill_dir)
+
     result = {
         "success": True,
         "message": f"Skill '{name}' created.",
-        "path": str(skill_dir.relative_to(SKILLS_DIR)),
+        "path": rel_path,
         "skill_md": str(skill_md),
     }
     if category:
@@ -461,9 +484,12 @@ def _delete_skill(name: str) -> Dict[str, Any]:
     skill_dir = existing["path"]
     shutil.rmtree(skill_dir)
 
-    # Clean up empty category directories (don't remove SKILLS_DIR itself)
+    # Clean up empty category directories (don't remove SKILLS_DIR or the
+    # configured create_dir root itself).
+    from agent.skill_paths import get_skill_create_dir
+    protected_roots = {SKILLS_DIR, get_skill_create_dir(legacy_default=SKILLS_DIR)}
     parent = skill_dir.parent
-    if parent != SKILLS_DIR and parent.exists() and not any(parent.iterdir()):
+    if parent not in protected_roots and parent.exists() and not any(parent.iterdir()):
         parent.rmdir()
 
     return {

@@ -1,0 +1,26 @@
+# TARGET CONFIGURATION — proposed; not supported until phases are implemented.
+skills:
+  external_dirs:
+    - /home/ubuntu/skills-pack/skills
+  create_dir: /home/ubuntu/skills-pack/skills
+  auto_create:
+    enabled: true
+    mode: suggest
+    min_repetitions: 3
+    min_score: 0.70
+    deduplicate: true
+    max_suggestions_per_day: 3
+    max_suggestions_per_session: 1
+  validation:
+    enabled: true
+    require_skill_md: true
+    check_dependencies: true
+    security_scan: true
+    fail_closed: true
+    smoke_test: false
+  publishing:
+    require_approval: true
+    git_enabled: true
+    auto_commit: false
+    auto_push: false
+    require_clean_target: true

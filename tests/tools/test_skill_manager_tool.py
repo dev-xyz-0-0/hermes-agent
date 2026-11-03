@@ -1,8 +1,12 @@
 """Tests for tools/skill_manager_tool.py — skill creation, editing, and deletion."""
 
 import json
+import os
+import stat
 from contextlib import contextmanager
 from unittest.mock import patch
+
+from hermes_constants import get_hermes_home
 
 from tools.skill_manager_tool import (
     _validate_name,
@@ -418,3 +422,91 @@ class TestSkillManageDispatcher:
             raw = skill_manage(action="create", name="test-skill", content=VALID_SKILL_CONTENT)
         result = json.loads(raw)
         assert result["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# skills.create_dir (Phase 1 — configurable creation directory)
+# ---------------------------------------------------------------------------
+
+
+def _write_create_dir_config(create_dir) -> None:
+    """Write skills.create_dir into the isolated test HERMES_HOME's config.yaml."""
+    config_path = get_hermes_home() / "config.yaml"
+    config_path.write_text(f"skills:\n  create_dir: {create_dir}\n")
+
+
+class TestCreateDirConfig:
+    def test_create_honors_configured_create_dir(self, tmp_path):
+        create_dir = tmp_path / "skills-pack" / "skills"
+        create_dir.mkdir(parents=True)
+        _write_create_dir_config(create_dir)
+
+        result = _create_skill("my-skill", VALID_SKILL_CONTENT)
+
+        assert result["success"] is True
+        assert (create_dir / "my-skill" / "SKILL.md").exists()
+        # Must NOT also land in the legacy default location.
+        assert not (get_hermes_home() / "skills" / "my-skill").exists()
+
+    def test_create_with_category_under_create_dir(self, tmp_path):
+        create_dir = tmp_path / "skills-pack" / "skills"
+        create_dir.mkdir(parents=True)
+        _write_create_dir_config(create_dir)
+
+        result = _create_skill("my-skill", VALID_SKILL_CONTENT, category="crypto")
+
+        assert result["success"] is True
+        assert (create_dir / "crypto" / "my-skill" / "SKILL.md").exists()
+        assert result["category"] == "crypto"
+
+    def test_legacy_fallback_when_create_dir_unset(self, tmp_path):
+        # No config.yaml written at all -- default legacy location is used.
+        # SKILLS_DIR is a module-level constant computed at import time, so
+        # it must be patched to match the current (per-test) HERMES_HOME --
+        # the same reason every other legacy-location test uses _skill_dir().
+        legacy_dir = get_hermes_home() / "skills"
+        with patch("tools.skill_manager_tool.SKILLS_DIR", legacy_dir):
+            result = _create_skill("my-skill", VALID_SKILL_CONTENT)
+
+        assert result["success"] is True
+        assert (legacy_dir / "my-skill" / "SKILL.md").exists()
+
+    def test_collision_against_skill_in_create_dir_rejected(self, tmp_path):
+        create_dir = tmp_path / "skills-pack" / "skills"
+        create_dir.mkdir(parents=True)
+        _write_create_dir_config(create_dir)
+
+        _create_skill("my-skill", VALID_SKILL_CONTENT)
+        result = _create_skill("my-skill", VALID_SKILL_CONTENT)
+
+        assert result["success"] is False
+        assert "already exists" in result["error"]
+
+    def test_read_only_destination_fails_without_partial_files(self, tmp_path):
+        parent = tmp_path / "skills-pack"
+        parent.mkdir(parents=True)
+        create_dir = parent / "skills"
+        create_dir.mkdir()
+        _write_create_dir_config(create_dir)
+
+        # Make the create_dir read-only so mkdir() for a new skill fails.
+        create_dir.chmod(stat.S_IRUSR | stat.S_IXUSR)
+        try:
+            result = _create_skill("my-skill", VALID_SKILL_CONTENT)
+        finally:
+            create_dir.chmod(stat.S_IRWXU)
+
+        assert result["success"] is False
+        assert not (create_dir / "my-skill").exists()
+
+    def test_delete_does_not_remove_create_dir_root(self, tmp_path):
+        create_dir = tmp_path / "skills-pack" / "skills"
+        create_dir.mkdir(parents=True)
+        _write_create_dir_config(create_dir)
+
+        _create_skill("my-skill", VALID_SKILL_CONTENT, category="crypto")
+        result = _delete_skill("my-skill")
+
+        assert result["success"] is True
+        assert not (create_dir / "crypto").exists()
+        assert create_dir.exists()

@@ -50,16 +50,15 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
 
     try:
         from tools.skills_tool import SKILLS_DIR, skill_view
-        from agent.skill_utils import get_external_skills_dirs
+        from agent.skill_paths import get_skill_discovery_dirs
 
         identifier_path = Path(raw_identifier).expanduser()
         if identifier_path.is_absolute():
             normalized = None
-            trusted_roots = [SKILLS_DIR]
             try:
-               trusted_roots.extend(get_external_skills_dirs()) 
+                trusted_roots = get_skill_discovery_dirs(SKILLS_DIR)
             except Exception:
-                pass
+                trusted_roots = [SKILLS_DIR]
 
             # Prefer the lexical path under a trusted skill root before
             # resolving symlinks.  Slash-command discovery can legitimately
@@ -229,15 +228,12 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
     _skill_commands = {}
     try:
         from tools.skills_tool import SKILLS_DIR, _parse_frontmatter, skill_matches_platform, _get_disabled_skill_names
-        from agent.skill_utils import get_external_skills_dirs
+        from agent.skill_paths import get_skill_discovery_dirs
         disabled = _get_disabled_skill_names()
         seen_names: set = set()
 
-        # Scan local dir first, then external dirs
-        dirs_to_scan = []
-        if SKILLS_DIR.exists():
-            dirs_to_scan.append(SKILLS_DIR)
-        dirs_to_scan.extend(get_external_skills_dirs())
+        # Scan local dir first, then create_dir and external dirs
+        dirs_to_scan = [d for d in get_skill_discovery_dirs(SKILLS_DIR) if d.exists()]
 
         for scan_dir in dirs_to_scan:
             for skill_md in scan_dir.rglob("SKILL.md"):

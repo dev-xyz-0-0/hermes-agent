@@ -158,3 +158,24 @@ class TestReloadSkillsHelper:
             "prompt cache snapshot should be preserved — skills don't live "
             "in the system prompt so there's no reason to invalidate it"
         )
+
+class TestCreateDirReload:
+    """``skills.create_dir`` skills must be discoverable via reload_skills /
+    scan_skill_commands, not just via skill_manager_tool's own collision check."""
+
+    def test_skill_in_create_dir_detected_on_reload(self, hermes_home, tmp_path):
+        from agent.skill_commands import reload_skills, get_skill_commands
+
+        create_dir = tmp_path / "skills-pack" / "skills"
+        create_dir.mkdir(parents=True)
+        (hermes_home / "config.yaml").write_text(f"skills:\n  create_dir: {create_dir}\n")
+
+        get_skill_commands()  # prime with no create_dir skills yet
+
+        _write_skill(create_dir, "custom-dir-skill", "lives in create_dir")
+        result = reload_skills()
+
+        assert result["added"] == [
+            {"name": "custom-dir-skill", "description": "lives in create_dir"}
+        ]
+        assert "/custom-dir-skill" in get_skill_commands()

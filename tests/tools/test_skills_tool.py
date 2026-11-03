@@ -1046,3 +1046,33 @@ Do the legacy thing.
         assert result["setup_needed"] is False
         assert result["missing_required_environment_variables"] == []
         assert result["readiness_status"] == "available"
+
+
+# ---------------------------------------------------------------------------
+# skills.create_dir discovery (Phase 1)
+# ---------------------------------------------------------------------------
+
+
+class TestCreateDirDiscovery:
+    def test_skill_in_create_dir_listed_and_viewable(self, tmp_path):
+        local_skills = tmp_path / "local-skills"
+        local_skills.mkdir()
+        create_dir = tmp_path / "skills-pack" / "skills"
+        create_dir.mkdir(parents=True)
+        _make_skill(create_dir, "custom-dir-skill")
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(f"skills:\n  create_dir: {create_dir}\n")
+
+        with (
+            patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}),
+            patch("tools.skills_tool.SKILLS_DIR", local_skills),
+        ):
+            names = [s["name"] for s in _find_all_skills()]
+            assert "custom-dir-skill" in names
+
+            raw = skill_view("custom-dir-skill")
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert "Do the thing." in result["content"]

@@ -224,14 +224,22 @@ def get_external_skills_dirs() -> List[Path]:
 
 
 def get_all_skills_dirs() -> List[Path]:
-    """Return all skill directories: local ``~/.hermes/skills/`` first, then external.
+    """Return all skill directories: local ``~/.hermes/skills/`` first, then
+    a configured ``skills.create_dir`` (if set and distinct), then external.
 
     The local dir is always first (and always included even if it doesn't exist
-    yet — callers handle that).  External dirs follow in config order.
+    yet — callers handle that).  ``create_dir`` and external dirs follow in
+    that order, deduplicated against the local dir and each other.
     """
-    dirs = [get_hermes_home() / "skills"]
-    dirs.extend(get_external_skills_dirs())
-    return dirs
+    local = get_hermes_home() / "skills"
+    try:
+        from agent.skill_paths import get_skill_discovery_dirs
+        return get_skill_discovery_dirs(local)
+    except Exception:
+        logger.debug("Falling back to external-dirs-only skill discovery", exc_info=True)
+        dirs = [local]
+        dirs.extend(get_external_skills_dirs())
+        return dirs
 
 
 # ── Condition extraction ──────────────────────────────────────────────────
