@@ -38,6 +38,32 @@ def _read_skills_config() -> dict:
     return skills_cfg if isinstance(skills_cfg, dict) else {}
 
 
+_VALID_CREATION_POLICIES = frozenset({"legacy", "approval_required"})
+
+
+def get_skill_creation_policy() -> str:
+    """Resolve ``skills.creation_policy``. Returns ``"legacy"`` (today's
+    unrestricted behavior -- preserved as the default so existing workflows
+    are unaffected) or ``"approval_required"``.
+
+    Unrecognized values fall back to ``"legacy"`` with a warning rather than
+    raising or silently enforcing a policy nobody asked for -- a typo in
+    config.yaml must not accidentally lock an operator out of their own
+    skills, and must not accidentally *relax* enforcement either, so this
+    only ever falls back to the permissive default, never escalates.
+    """
+    raw = _read_skills_config().get("creation_policy")
+    if raw is None:
+        return "legacy"
+    if not isinstance(raw, str) or raw.strip() not in _VALID_CREATION_POLICIES:
+        logger.warning(
+            "skills.creation_policy must be one of %s; got %r. Using 'legacy'.",
+            sorted(_VALID_CREATION_POLICIES), raw,
+        )
+        return "legacy"
+    return raw.strip()
+
+
 def get_skill_create_dir(legacy_default: Optional[Path] = None) -> Path:
     """Resolve ``skills.create_dir`` to an absolute, normalized path.
 

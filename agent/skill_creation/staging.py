@@ -90,7 +90,14 @@ def update_draft_file(draft_id: str, rel_path: str, content: str) -> Optional[st
     new_hash = compute_content_hash(skill_dir)
     if new_hash != manifest.content_hash:
         manifest.content_hash = new_hash
-        if manifest.state in (DraftState.VALIDATED, DraftState.FAILED):
+        if manifest.state in (DraftState.VALIDATED, DraftState.FAILED, DraftState.AWAITING_APPROVAL):
+            # Content changed after validation (or even after approval) --
+            # neither the validation report nor any approval still reflects
+            # what's on disk. Drop the stale approval explicitly rather than
+            # leaving it around with a content_hash that no longer matches
+            # (publish_draft's own hash check would catch it too, but there's
+            # no reason to leave a dangling, already-invalid approval record).
+            manifest.approval = None
             manifest.record_transition(DraftState.DRAFT)
         else:
             manifest.updated_at = datetime.now(timezone.utc).isoformat()

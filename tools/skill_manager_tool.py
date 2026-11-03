@@ -651,8 +651,25 @@ def _preview_draft_action(draft_id: str) -> Dict[str, Any]:
 
 
 def _discard_draft_action(draft_id: str) -> Dict[str, Any]:
-    """Remove a draft entirely."""
-    from agent.skill_creation import discard_draft
+    """Remove a draft entirely.
+
+    Refuses on an already-PUBLISHED draft -- the draft registry and the
+    published skill are different things once publish() has run; removing
+    the published skill itself is skill_manage(action='delete', ...).
+    """
+    from agent.skill_creation import registry, discard_draft
+    from agent.skill_creation.models import DraftState
+
+    manifest = registry.load_manifest(draft_id)
+    if manifest is not None and manifest.state == DraftState.PUBLISHED:
+        return {
+            "success": False,
+            "error": (
+                f"Draft '{draft_id}' is already published at "
+                f"{manifest.publication.get('published_path') if manifest.publication else '?'}. "
+                "Use skill_manage(action='delete', name=...) to remove the published skill instead."
+            ),
+        }
 
     ok, message = discard_draft(draft_id)
     return {"success": ok, "message" if ok else "error": message}
@@ -663,6 +680,51 @@ def _drafts_list_action() -> Dict[str, Any]:
     from agent.skill_creation import list_draft_summaries
 
     return {"success": True, "drafts": list_draft_summaries()}
+
+
+# =============================================================================
+# Draft actions (Phase 3 — approval, publication, Git)
+# =============================================================================
+
+def _approve_draft_action(draft_id: str, ttl_seconds: int = 900) -> Dict[str, Any]:
+    """Bind an authorization to a validated draft's content + destination."""
+    from agent.skill_creation import approve_draft
+
+    approved_by = os.getenv("HERMES_PLATFORM") or os.getenv("HERMES_SESSION_PLATFORM") or "cli"
+    ok, result = approve_draft(draft_id, approved_by=approved_by, ttl_seconds=ttl_seconds)
+    if not ok:
+        return {"success": False, "error": result}
+    summary = _manifest_summary(result)
+    summary["success"] = True
+    summary["approval"] = result.approval
+    return summary
+
+
+def _publish_draft_action(draft_id: str) -> Dict[str, Any]:
+    """Re-validate the approval against current reality, then atomically publish."""
+    from agent.skill_creation import publish_draft
+
+    ok, result = publish_draft(draft_id)
+    if not ok:
+        return {"success": False, "error": result}
+    summary = _manifest_summary(result)
+    summary["success"] = True
+    summary["publication"] = result.publication
+    summary["message"] = f"Skill '{result.name}' published to {result.publication['published_path']}."
+    return summary
+
+
+def _publish_git_draft_action(draft_id: str, push: bool = False) -> Dict[str, Any]:
+    """Commit (and optionally push) an already-published draft. Retryable on failure."""
+    from agent.skill_creation import publish_git_draft
+
+    ok, result = publish_git_draft(draft_id, push=push)
+    if not ok:
+        return {"success": False, "error": result}
+    summary = _manifest_summary(result)
+    summary["success"] = True
+    summary["git"] = result.publication.get("git") if result.publication else None
+    return summary
 
 
 # =============================================================================
@@ -680,12 +742,33 @@ def skill_manage(
     new_string: str = None,
     replace_all: bool = False,
     draft_id: str = None,
+    ttl_seconds: int = 900,
+    push: bool = False,
 ) -> str:
     """
     Manage user-created skills. Dispatches to the appropriate action handler.
 
     Returns JSON string with results.
     """
+    # Enforcement boundary for skills.creation_policy: when set to
+    # "approval_required", the five direct-write actions are blocked
+    # entirely -- an agent cannot reach _create_skill/_edit_skill/etc. at
+    # all, regardless of arguments, so there is no bypass via content,
+    # category, or destination choice. The policy itself can only be
+    # changed by editing config.yaml directly; no skill_manage action
+    # reads or writes it, so an agent has no path to disable it via
+    # "ordinary skill-management actions."
+    _GATED_LEGACY_ACTIONS = {"create", "edit", "patch", "write_file", "remove_file"}
+    if action in _GATED_LEGACY_ACTIONS:
+        from agent.skill_paths import get_skill_creation_policy
+        if get_skill_creation_policy() == "approval_required":
+            return tool_error(
+                f"skills.creation_policy is 'approval_required' -- action "
+                f"'{action}' is disabled. Use the draft lifecycle instead: "
+                "draft -> validate -> approve -> publish.",
+                success=False,
+            )
+
     if action == "draft":
         if not content:
             return tool_error("content is required for 'draft'. Provide the full SKILL.md text (frontmatter + body).", success=False)
@@ -708,6 +791,21 @@ def skill_manage(
 
     elif action == "drafts_list":
         result = _drafts_list_action()
+
+    elif action == "approve":
+        if not draft_id:
+            return tool_error("draft_id is required for 'approve'.", success=False)
+        result = _approve_draft_action(draft_id, ttl_seconds=ttl_seconds)
+
+    elif action == "publish":
+        if not draft_id:
+            return tool_error("draft_id is required for 'publish'.", success=False)
+        result = _publish_draft_action(draft_id)
+
+    elif action == "publish_git":
+        if not draft_id:
+            return tool_error("draft_id is required for 'publish_git'.", success=False)
+        result = _publish_git_draft_action(draft_id, push=push)
 
     elif action == "create":
         if not content:
@@ -744,13 +842,19 @@ def skill_manage(
     else:
         result = {"success": False, "error": (
             f"Unknown action '{action}'. Use: create, edit, patch, delete, write_file, "
-            "remove_file, draft, validate, preview, discard, drafts_list"
+            "remove_file, draft, validate, preview, discard, drafts_list, "
+            "approve, publish, publish_git"
         )}
 
     # Drafts never touch a published skill or the system prompt's skill
     # index -- clearing the prompt cache for draft/validate/preview/discard/
-    # drafts_list would break prompt caching for no reason (see AGENTS.md:
-    # "do NOT ... reload ... or rebuild system prompts mid-conversation").
+    # drafts_list/approve/publish_git would break prompt caching for no
+    # reason (see AGENTS.md: "do NOT ... reload ... or rebuild system
+    # prompts mid-conversation"). 'publish' is the one draft action that
+    # DOES create a real, discoverable skill -- but publish_draft() already
+    # clears the cache itself (it's also a standalone public API other
+    # callers can use directly, not just this dispatcher), so it's
+    # deliberately left out of this set to avoid a redundant double-clear.
     _PUBLISHED_SKILL_ACTIONS = {"create", "edit", "patch", "delete", "write_file", "remove_file"}
     if result.get("success") and action in _PUBLISHED_SKILL_ACTIONS:
         try:
@@ -776,15 +880,24 @@ SKILL_MANAGE_SCHEMA = {
         "patch (old_string/new_string — preferred for fixes), "
         "edit (full SKILL.md rewrite — major overhauls only), "
         "delete, write_file, remove_file.\n\n"
-        "Draft actions (for staging and validating a candidate skill before "
-        "committing to it — never discoverable or runnable until published): "
+        "Draft actions (for staging, validating, approving and publishing a "
+        "candidate skill — never discoverable or runnable until published): "
         "draft (stage a candidate, like create but isolated), "
         "validate (run structure/destination/security/dependency/duplicate checks "
         "against a draft_id and persist the report), "
         "preview (view a draft's content + last validation report), "
-        "discard (remove a draft), "
-        "drafts_list (list this profile's drafts). "
-        "Publishing a validated draft is not yet supported.\n\n"
+        "discard (remove a draft; refuses once published — use delete for that), "
+        "drafts_list (list this profile's drafts), "
+        "approve (bind an authorization to a validated draft's exact content "
+        "and destination, expires after ttl_seconds — confirm with the user "
+        "before approving, this authorizes publication), "
+        "publish (re-checks the approval is still valid against current "
+        "config/filesystem state, then atomically publishes — fails closed "
+        "if anything changed since approval), "
+        "publish_git (commit the published skill in its Git repo if one "
+        "exists and skills.publishing.auto_commit allows it; retry this on "
+        "failure without re-publishing; set push=true only with explicit "
+        "user authorization and skills.publishing.auto_push enabled).\n\n"
         "Create when: complex task succeeded (5+ calls), errors overcome, "
         "user-corrected approach worked, non-trivial workflow discovered, "
         "or user asks you to remember a procedure.\n"
@@ -804,6 +917,7 @@ SKILL_MANAGE_SCHEMA = {
                 "enum": [
                     "create", "patch", "edit", "delete", "write_file", "remove_file",
                     "draft", "validate", "preview", "discard", "drafts_list",
+                    "approve", "publish", "publish_git",
                 ],
                 "description": "The action to perform."
             },
@@ -813,14 +927,32 @@ SKILL_MANAGE_SCHEMA = {
                     "Skill name (lowercase, hyphens/underscores, max 64 chars). "
                     "Must match an existing skill for patch/edit/delete/write_file/remove_file. "
                     "Required for 'create' and 'draft'. Not used by validate/preview/"
-                    "discard/drafts_list — those use draft_id instead."
+                    "discard/drafts_list/approve/publish/publish_git — those use draft_id instead."
                 )
             },
             "draft_id": {
                 "type": "string",
                 "description": (
                     "Identifies a draft created via 'draft'. Required for "
-                    "validate/preview/discard. Not used by other actions."
+                    "validate/preview/discard/approve/publish/publish_git. "
+                    "Not used by other actions."
+                )
+            },
+            "ttl_seconds": {
+                "type": "integer",
+                "description": (
+                    "How long an 'approve' authorization stays valid, in seconds "
+                    "(default 900 = 15 minutes). Only used by 'approve'. If "
+                    "'publish' isn't called before this expires, approve again."
+                )
+            },
+            "push": {
+                "type": "boolean",
+                "description": (
+                    "Only used by 'publish_git'. Push the new commit after "
+                    "committing it. Requires skills.publishing.auto_push=true "
+                    "in config as a second, independent authorization — this "
+                    "flag alone is not enough. Default false."
                 )
             },
             "content": {
@@ -894,6 +1026,8 @@ registry.register(
         old_string=args.get("old_string"),
         new_string=args.get("new_string"),
         replace_all=args.get("replace_all", False),
-        draft_id=args.get("draft_id")),
+        draft_id=args.get("draft_id"),
+        ttl_seconds=args.get("ttl_seconds", 900),
+        push=args.get("push", False)),
     emoji="📝",
 )

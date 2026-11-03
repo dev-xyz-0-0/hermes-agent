@@ -477,6 +477,21 @@ DEFAULT_CONFIG = {
         # ~/${VAR} expansion supported. Empty (default) keeps the legacy
         # ~/.hermes/skills/ location. e.g. "/shared/skills-pack/skills"
         "create_dir": "",
+        # Enforcement policy for agent-initiated skill writes.
+        # "legacy" (default): create/edit/patch/write_file/remove_file work
+        #   as before -- unrestricted, no draft/approval lifecycle required.
+        # "approval_required": those five actions are blocked; agent-created
+        #   skills must go through draft -> validate -> approve -> publish.
+        #   delete is intentionally NOT gated -- removing a skill isn't
+        #   introducing untrusted content.
+        "creation_policy": "legacy",
+        # Draft publication (skill_manage approve/publish/publish_git actions).
+        "publishing": {
+            "git_enabled": True,    # if false, publish_git is a no-op
+            "auto_commit": False,   # publish_git only commits when true
+            "auto_push": False,     # publish_git only pushes when true AND
+                                     # the tool call itself passes push=True
+        },
     },
 
     # Honcho AI-native memory -- reads ~/.honcho/config.json as single source of truth.

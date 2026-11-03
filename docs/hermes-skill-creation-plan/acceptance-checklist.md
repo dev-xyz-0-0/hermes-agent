@@ -17,11 +17,19 @@
 - [ ] Review approved
 
 ## Phase 3
-- [ ] Approval bound to exact content/destination
-- [ ] Atomic publish and concurrency tested
-- [ ] Git stages only intended files
-- [ ] Failures accurately reported and recoverable
-- [ ] Reload works
+- [x] Approval bound to exact content/destination
+- [x] Atomic publish and concurrency tested
+- [x] Git stages only intended files
+- [x] Failures accurately reported and recoverable
+- [x] Reload works
+- [ ] Review approved
+
+## Phase 3.1 — Security & reliability hardening
+- [x] Approval requires independent human authority (not just a tool call)
+- [x] `skills.creation_policy` enforcement (approval_required / legacy)
+- [x] Git index contradiction resolved (temp-index commit + narrow real-index sync, with a pre-commit dirty-target-path guard)
+- [x] Lock nested-acquisition bug fixed (explicit rejection, not silent reentrancy)
+- [x] Test filesystem isolation root-caused and fixed globally (conftest.py)
 - [ ] Review approved
 
 ## Phase 4

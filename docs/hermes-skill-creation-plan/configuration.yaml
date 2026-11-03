@@ -3,6 +3,13 @@ skills:
   external_dirs:
     - /home/ubuntu/skills-pack/skills
   create_dir: /home/ubuntu/skills-pack/skills
+  # IMPLEMENTED (Phase 3.1). "legacy" (default) leaves create/edit/patch/
+  # write_file/remove_file unrestricted. "approval_required" disables those
+  # five actions entirely -- agent-initiated skills must go through
+  # draft -> validate -> approve -> publish, where approve() blocks on a
+  # real human via tools.approval.request_explicit_approval() (CLI input()
+  # or the gateway's /approve command). delete is never gated.
+  creation_policy: legacy
   auto_create:
     enabled: true
     mode: suggest
@@ -19,8 +26,12 @@ skills:
     fail_closed: true
     smoke_test: false
   publishing:
-    require_approval: true
-    git_enabled: true
-    auto_commit: false
-    auto_push: false
-    require_clean_target: true
+    # IMPLEMENTED (Phase 3). require_approval and require_clean_target are
+    # NOT configurable keys in the actual implementation -- the
+    # approve -> publish split and the destination-collision/dirty-target
+    # checks are always enforced unconditionally, not gated by a toggle.
+    # Only these three are real config keys (see hermes_cli/config.py):
+    git_enabled: true     # if false, publish_git is a no-op
+    auto_commit: false    # publish_git only commits when true
+    auto_push: false      # publish_git only pushes when true AND the
+                           # publish_git tool call itself passes push=true

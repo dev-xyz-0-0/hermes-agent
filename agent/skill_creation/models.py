@@ -15,10 +15,9 @@ from typing import Any, Dict, List, Optional
 class DraftState(str, Enum):
     """Lifecycle states for a skill draft.
 
-    ``AWAITING_APPROVAL``, ``REJECTED``, and ``PUBLISHED`` are defined here
-    for forward compatibility with Phase 3 (approval + publication) but are
-    never set by Phase 2's own actions (``draft``, ``validate``, ``preview``,
-    ``discard``, ``drafts_list``).
+    ``REJECTED`` is defined for a future multi-reviewer workflow but is not
+    driven by any action through Phase 3 (which uses ``CANCELLED`` for all
+    operator-initiated removal, approved or not).
     """
 
     DRAFT = "draft"
@@ -31,14 +30,20 @@ class DraftState(str, Enum):
     PUBLISHED = "published"
 
 
-# States Phase 2's own transitions may move a draft into or out of.
-# (AWAITING_APPROVAL / REJECTED / PUBLISHED are Phase 3's responsibility.)
+# States Phase 1-3 actions may move a draft into or out of.
 _VALID_TRANSITIONS: Dict[DraftState, set] = {
     DraftState.DRAFT: {DraftState.VALIDATING, DraftState.CANCELLED},
     DraftState.VALIDATING: {DraftState.VALIDATED, DraftState.FAILED, DraftState.CANCELLED},
-    DraftState.VALIDATED: {DraftState.VALIDATING, DraftState.DRAFT, DraftState.CANCELLED},
+    DraftState.VALIDATED: {
+        DraftState.VALIDATING, DraftState.DRAFT, DraftState.AWAITING_APPROVAL, DraftState.CANCELLED,
+    },
     DraftState.FAILED: {DraftState.VALIDATING, DraftState.DRAFT, DraftState.CANCELLED},
+    DraftState.AWAITING_APPROVAL: {
+        DraftState.VALIDATED, DraftState.DRAFT, DraftState.FAILED,
+        DraftState.PUBLISHED, DraftState.CANCELLED,
+    },
     DraftState.CANCELLED: set(),
+    DraftState.PUBLISHED: set(),  # terminal in Phase 3 -- no un-publish/rollback here
 }
 
 
@@ -100,6 +105,8 @@ class DraftManifest:
     destination: Dict[str, Any] = field(default_factory=dict)
     state_history: List[Dict[str, str]] = field(default_factory=list)
     validation: Optional[ValidationReport] = None
+    approval: Optional[Dict[str, Any]] = None
+    publication: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -114,6 +121,8 @@ class DraftManifest:
             "destination": self.destination,
             "state_history": self.state_history,
             "validation": self.validation.to_dict() if self.validation else None,
+            "approval": self.approval,
+            "publication": self.publication,
         }
 
     @classmethod
@@ -131,6 +140,8 @@ class DraftManifest:
             destination=data.get("destination", {}),
             state_history=data.get("state_history", []),
             validation=ValidationReport.from_dict(validation) if validation else None,
+            approval=data.get("approval"),
+            publication=data.get("publication"),
         )
 
     def record_transition(self, new_state: DraftState, now: Optional[str] = None) -> None:

@@ -29,6 +29,26 @@ def _isolate_hermes_home(tmp_path, monkeypatch):
         monkeypatch.setattr(_plugins_mod, "_plugin_manager", None)
     except Exception:
         pass
+    # Several tools/*.py modules cache `SKILLS_DIR = get_hermes_home() / "skills"`
+    # as a module-level constant at *import* time -- computed once per worker
+    # process, not per test. Setting HERMES_HOME above (after that import
+    # already happened) does NOT change an already-imported module's
+    # constant, so without this, any test that writes through one of these
+    # modules' own SKILLS_DIR (not a fresh get_hermes_home() call) can fall
+    # back to whatever HERMES_HOME was -- or wasn't -- set when the worker
+    # first imported it, up to and including the real ~/.hermes/. This
+    # happened for real during Phase 3 development (5+ test skills leaked
+    # into the real home). Force every such constant to track this test's
+    # isolated fake_home on every test, in every worker, automatically --
+    # individual test files should not need to remember this themselves.
+    for _mod_name in (
+        "tools.skill_manager_tool", "tools.skills_tool",
+        "tools.skills_sync", "tools.skills_hub",
+    ):
+        try:
+            monkeypatch.setattr(f"{_mod_name}.SKILLS_DIR", fake_home / "skills")
+        except Exception:
+            pass  # module not importable in this test environment -- not this test's concern
     # Tests should not inherit the agent's current gateway/messaging surface.
     # Individual tests that need gateway behavior set these explicitly.
     monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)

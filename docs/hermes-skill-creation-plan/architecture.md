@@ -19,7 +19,12 @@ Task completion / explicit request -> candidate detector (optional) -> draft cre
 1. `external_dirs` is discovery configuration, not write authorization.
 2. `create_dir` controls new skill creation; fallback to legacy home skills.
 3. Drafts are never discoverable as published skills.
-4. Approval is bound to draft ID, destination and immutable content hash.
+4. Approval is bound to draft ID, destination and immutable content hash,
+   AND requires independent human authority -- a tool call's own arguments
+   never constitute approval. `approve_draft()` blocks on
+   `tools.approval.request_explicit_approval()` (real CLI `input()` or the
+   gateway's `/approve` command); with no interactive channel available it
+   fails closed. (Phase 3.1.)
 5. Publication is fail-closed for security scanner errors.
 6. Publication is atomic for new directories and rejects collisions.
 7. Git operations never stage or commit unrelated changes.

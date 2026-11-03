@@ -4,6 +4,8 @@ actions (Phase 2) -- the tool-layer integration on top of agent/skill_creation/.
 
 import json
 
+import pytest
+
 from tools.skill_manager_tool import skill_manage
 
 
@@ -155,3 +157,135 @@ class TestUnknownAction:
         assert result["success"] is False
         assert "draft" in result["error"]
         assert "drafts_list" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 -- approve / publish / publish_git
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def isolated_create_dir(tmp_path, monkeypatch):
+    """Configure skills.create_dir explicitly so publish actions never fall
+    back to the (process-wide, potentially stale) legacy SKILLS_DIR module
+    constants -- the real production mechanism, and avoids the exact
+    cross-test pollution risk documented in test_skill_draft_publication.py.
+    """
+    from hermes_constants import get_hermes_home
+
+    create_dir = tmp_path / "skills-pack" / "skills"
+    create_dir.mkdir(parents=True)
+    config_path = get_hermes_home() / "config.yaml"
+    config_path.write_text(f"skills:\n  create_dir: {create_dir}\n")
+    return create_dir
+
+
+def _approved(isolated_create_dir, name, **kw):
+    """These tool-layer tests exercise publish/publish_git, not the
+    human-approval gate itself (that's tests/agent/test_skill_draft_approval.py
+    and TestApproveAction.test_approve_requires_human_confirmation below) --
+    stand in for "a human already approved" for this one call.
+    """
+    from unittest.mock import patch
+
+    draft = _draft(name=name, **kw)
+    skill_manage(action="validate", draft_id=draft["draft_id"])
+    with patch("tools.approval.request_explicit_approval", return_value=True):
+        approval = json.loads(skill_manage(action="approve", draft_id=draft["draft_id"], ttl_seconds=900))
+    assert approval["success"] is True
+    return draft["draft_id"]
+
+
+class TestApproveAction:
+    def test_approve_requires_draft_id(self):
+        raw = skill_manage(action="approve")
+        result = json.loads(raw)
+        assert result["success"] is False
+
+    def test_approve_fails_closed_without_human_channel(self, isolated_create_dir, monkeypatch):
+        """P0: calling skill_manage(action='approve') with nothing but the
+        tool's own arguments -- no CLI TTY, no gateway session -- must not
+        grant approval. The agent's tool call alone is not authorization."""
+        monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+
+        draft = _draft(name="tool-layer-self-approve-skill")
+        skill_manage(action="validate", draft_id=draft["draft_id"])
+
+        raw = skill_manage(action="approve", draft_id=draft["draft_id"])
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "not approved by a human" in result["error"].lower()
+
+        preview = json.loads(skill_manage(action="preview", draft_id=draft["draft_id"]))
+        assert preview["state"] == "validated"  # never moved to awaiting_approval
+
+    def test_approve_moves_to_awaiting_approval(self, isolated_create_dir):
+        draft_id = _approved(isolated_create_dir, "approve-action-skill")
+        raw = skill_manage(action="preview", draft_id=draft_id)
+        result = json.loads(raw)
+        assert result["state"] == "awaiting_approval"
+        assert result["success"] is True
+
+    def test_approve_does_not_clear_prompt_cache(self, isolated_create_dir):
+        from unittest.mock import patch
+
+        with patch("agent.prompt_builder.clear_skills_system_prompt_cache") as mock_clear:
+            _approved(isolated_create_dir, "approve-no-cache-clear-skill")
+        mock_clear.assert_not_called()
+
+
+class TestPublishAction:
+    def test_publish_requires_draft_id(self):
+        raw = skill_manage(action="publish")
+        result = json.loads(raw)
+        assert result["success"] is False
+
+    def test_publish_moves_bytes_and_is_discoverable(self, isolated_create_dir):
+        draft_id = _approved(isolated_create_dir, "publish-action-skill")
+        raw = skill_manage(action="publish", draft_id=draft_id)
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["state"] == "published"
+
+        from tools.skills_tool import skills_list
+        assert "publish-action-skill" in skills_list()
+
+    def test_publish_clears_prompt_cache(self, isolated_create_dir):
+        from unittest.mock import patch
+
+        draft_id = _approved(isolated_create_dir, "publish-cache-clear-skill")
+        with patch("agent.prompt_builder.clear_skills_system_prompt_cache") as mock_clear:
+            skill_manage(action="publish", draft_id=draft_id)
+        mock_clear.assert_called_once()
+
+    def test_discard_refuses_once_published(self, isolated_create_dir):
+        draft_id = _approved(isolated_create_dir, "discard-after-publish-skill")
+        skill_manage(action="publish", draft_id=draft_id)
+
+        raw = skill_manage(action="discard", draft_id=draft_id)
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "delete" in result["error"].lower()
+
+
+class TestPublishGitAction:
+    def test_publish_git_requires_draft_id(self):
+        raw = skill_manage(action="publish_git")
+        result = json.loads(raw)
+        assert result["success"] is False
+
+    def test_publish_git_on_non_repo_is_clean_noop(self, isolated_create_dir):
+        draft_id = _approved(isolated_create_dir, "publish-git-non-repo-skill")
+        skill_manage(action="publish", draft_id=draft_id)
+
+        raw = skill_manage(action="publish_git", draft_id=draft_id)
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["git"]["committed"] is False
+
+    def test_publish_git_before_publish_fails(self, isolated_create_dir):
+        draft_id = _approved(isolated_create_dir, "publish-git-too-early-skill")
+        raw = skill_manage(action="publish_git", draft_id=draft_id)
+        result = json.loads(raw)
+        assert result["success"] is False
