@@ -115,6 +115,8 @@ class ContextCompressor:
         self.last_prompt_tokens = 0
         self.last_completion_tokens = 0
         self.last_total_tokens = 0
+        self.last_prompt_tokens_source = "unavailable"
+        self.last_prompt_tokens_observed_at: float | None = None
 
         self.summary_model = summary_model_override or ""
 
@@ -127,6 +129,12 @@ class ContextCompressor:
         self.last_prompt_tokens = usage.get("prompt_tokens", 0)
         self.last_completion_tokens = usage.get("completion_tokens", 0)
         self.last_total_tokens = usage.get("total_tokens", 0)
+        if self.last_prompt_tokens > 0:
+            self.last_prompt_tokens_source = "provider_usage"
+            self.last_prompt_tokens_observed_at = time.time()
+        else:
+            self.last_prompt_tokens_source = "unavailable"
+            self.last_prompt_tokens_observed_at = None
 
     def should_compress(self, prompt_tokens: int = None) -> bool:
         """Check if context exceeds the compression threshold."""

@@ -1279,6 +1279,8 @@ class AIAgent:
             self.context_compressor.last_prompt_tokens = 0
             self.context_compressor.last_completion_tokens = 0
             self.context_compressor.last_total_tokens = 0
+            self.context_compressor.last_prompt_tokens_source = "unavailable"
+            self.context_compressor.last_prompt_tokens_observed_at = None
             self.context_compressor.compression_count = 0
             self.context_compressor._context_probed = False
             self.context_compressor._context_probe_persistable = False
@@ -6199,6 +6201,8 @@ class AIAgent:
         )
         self.context_compressor.last_prompt_tokens = _compressed_est
         self.context_compressor.last_completion_tokens = 0
+        self.context_compressor.last_prompt_tokens_source = "local_estimate"
+        self.context_compressor.last_prompt_tokens_observed_at = time.time()
 
         # Only reset the pressure warning if compression actually brought
         # us below the warning level (85% of threshold).  When compression
