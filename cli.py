@@ -5426,7 +5426,14 @@ class HermesCLI:
                 self.conversation_history,
                 self.agent._cached_system_prompt or "",
                 approx_tokens=approx_tokens,
+                manual=True,
             )
+            if compressed is self.conversation_history:
+                outcome = getattr(self.agent.context_compressor, "last_compaction_outcome", "failed")
+                failure = getattr(self.agent.context_compressor, "last_summary_failure", None)
+                detail = f" ({failure})" if failure else ""
+                print(f"  ❌ Compression not committed: {outcome}{detail}. Transcript preserved.")
+                return
             self.conversation_history = compressed
             new_count = len(self.conversation_history)
             new_tokens = estimate_messages_tokens_rough(self.conversation_history)

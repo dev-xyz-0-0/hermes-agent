@@ -14,6 +14,7 @@ Improvements over v1:
 """
 
 import logging
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -145,6 +146,26 @@ class ContextCompressor:
         self._summary_failure_cooldown_until: float = 0.0
         self.last_summary_failure: Optional[str] = None
         self.last_compaction_outcome: str = "not_attempted"
+        self.summary_completion_metadata_available: Optional[bool] = None
+        self._attempt_lock = threading.Lock()
+        self._attempt_generation = 0
+
+    def invalidate_pending_attempts(self) -> None:
+        """Prevent in-flight summary results from committing after a reset."""
+        if not hasattr(self, "_attempt_lock"):
+            self._attempt_lock = threading.Lock()
+            self._attempt_generation = 0
+        with self._attempt_lock:
+            self._attempt_generation += 1
+
+    def _begin_attempt(self) -> int:
+        with self._attempt_lock:
+            self._attempt_generation += 1
+            return self._attempt_generation
+
+    def _attempt_is_current(self, attempt: int) -> bool:
+        with self._attempt_lock:
+            return attempt == self._attempt_generation
 
     def update_from_response(self, usage: Dict[str, Any]):
         """Update tracked token usage from API response."""
@@ -280,7 +301,10 @@ class ContextCompressor:
 
         return "\n\n".join(parts)
 
-    def _generate_summary(self, turns_to_summarize: List[Dict[str, Any]]) -> Optional[str]:
+    def _generate_summary(
+        self, turns_to_summarize: List[Dict[str, Any]], *,
+        bypass_cooldown: bool = False, attempt: Optional[int] = None,
+    ) -> Optional[str]:
         """Generate a structured summary of conversation turns.
 
         Uses a structured template (Goal, Progress, Decisions, Files, Next Steps)
@@ -292,7 +316,7 @@ class ContextCompressor:
         placeholder.
         """
         now = time.monotonic()
-        if now < self._summary_failure_cooldown_until:
+        if not bypass_cooldown and now < self._summary_failure_cooldown_until:
             self.last_compaction_outcome = "summary_cooldown"
             logger.debug(
                 "Skipping context summary during cooldown (%.0fs remaining)",
@@ -383,6 +407,7 @@ Target ~{summary_budget} tokens. Be specific — include file paths, command out
 
 Write only the summary body. Do not include any preamble or prefix."""
 
+        overflow_recovery_attempted = False
         try:
             call_kwargs = {
                 "task": "compression",
@@ -392,31 +417,78 @@ Write only the summary body. Do not include any preamble or prefix."""
             }
             if self.summary_model:
                 call_kwargs["model"] = self.summary_model
-            response = call_llm(**call_kwargs)
+            try:
+                response = call_llm(**call_kwargs)
+            except Exception as first_error:
+                if classify_summary_failure(first_error) != "context_overflow":
+                    raise
+                # One bounded retry through the existing auxiliary call path.
+                # The transcript remains untouched unless this returns a valid
+                # complete summary.
+                overflow_recovery_attempted = True
+                self.last_compaction_outcome = "overflow_recovery_attempted"
+                response = call_llm(**call_kwargs)
+            if attempt is not None and not self._attempt_is_current(attempt):
+                return None
+            choice = response.choices[0]
+            finish_reason = getattr(choice, "finish_reason", None)
+            response_status = getattr(response, "status", None)
+            incomplete = getattr(response, "incomplete_details", None)
+            self.summary_completion_metadata_available = bool(
+                finish_reason is not None or response_status is not None or incomplete is not None
+            )
+            incomplete_reason = (
+                incomplete.get("reason") if isinstance(incomplete, dict)
+                else getattr(incomplete, "reason", None)
+            )
+            if (
+                str(finish_reason or "").lower() in {
+                    "length", "max_tokens", "max_output_tokens", "incomplete", "content_filter",
+                }
+                or str(response_status or "").lower() == "incomplete"
+                or str(incomplete_reason or "").lower() in {"max_tokens", "max_output_tokens"}
+            ):
+                self.last_summary_failure = "truncated_output"
+                self.last_compaction_outcome = "summary_failed"
+                self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
+                return None
             content = response.choices[0].message.content
             # Handle cases where content is not a string (e.g., dict from llama.cpp)
             if not isinstance(content, str):
                 content = str(content) if content else ""
             summary = content.strip()
-            # Store for iterative updates on next compaction
-            self._previous_summary = summary
+            if not summary:
+                self.last_summary_failure = "empty_output"
+                self.last_compaction_outcome = "summary_failed"
+                self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
+                return None
             self._summary_failure_cooldown_until = 0.0
             self.last_summary_failure = None
             self.last_compaction_outcome = "summary_generated"
             return self._with_summary_prefix(summary)
         except RuntimeError as e:
+            if attempt is not None and not self._attempt_is_current(attempt):
+                return None
             self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
             self.last_summary_failure = classify_summary_failure(e)
-            self.last_compaction_outcome = "summary_failed"
+            self.last_compaction_outcome = (
+                "overflow_recovery_failed" if overflow_recovery_attempted
+                else "summary_failed"
+            )
             logging.warning("Context compression: no provider available for "
-                            "summary. Middle turns will be dropped without summary "
-                            "for %d seconds.",
+                            "summary. Transcript preserved; further automatic "
+                            "attempts paused for %d seconds.",
                             _SUMMARY_FAILURE_COOLDOWN_SECONDS)
             return None
         except Exception as e:
+            if attempt is not None and not self._attempt_is_current(attempt):
+                return None
             self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
             self.last_summary_failure = classify_summary_failure(e)
-            self.last_compaction_outcome = "summary_failed"
+            self.last_compaction_outcome = (
+                "overflow_recovery_failed" if overflow_recovery_attempted
+                else "summary_failed"
+            )
             logging.warning(
                 "Failed to generate context summary: %s. "
                 "Further summary attempts paused for %d seconds.",
@@ -599,7 +671,10 @@ Write only the summary body. Do not include any preamble or prefix."""
     # Main compression entry point
     # ------------------------------------------------------------------
 
-    def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None) -> List[Dict[str, Any]]:
+    def compress(
+        self, messages: List[Dict[str, Any]], current_tokens: int = None, *,
+        manual: bool = False, ownership_check=None,
+    ) -> List[Dict[str, Any]]:
         """Compress conversation messages by summarizing middle turns.
 
         Algorithm:
@@ -612,6 +687,8 @@ Write only the summary body. Do not include any preamble or prefix."""
         After compression, orphaned tool_call / tool_result pairs are cleaned
         up so the API never receives mismatched IDs.
         """
+        original_messages = messages
+        attempt = self._begin_attempt()
         n_messages = len(messages)
         if n_messages <= self.protect_first_n + self.protect_last_n + 1:
             if not self.quiet_mode:
@@ -666,7 +743,23 @@ Write only the summary body. Do not include any preamble or prefix."""
             )
 
         # Phase 3: Generate structured summary
-        summary = self._generate_summary(turns_to_summarize)
+        summary = self._generate_summary(
+            turns_to_summarize, bypass_cooldown=manual, attempt=attempt,
+        )
+        owns_result = self._attempt_is_current(attempt)
+        if ownership_check is not None:
+            try:
+                owns_result = owns_result and bool(ownership_check())
+            except Exception:
+                owns_result = False
+        if not summary or not owns_result:
+            return original_messages
+
+        # Commit iterative state only after validation and ownership checks.
+        summary_body = summary
+        if summary_body.startswith(SUMMARY_PREFIX):
+            summary_body = summary_body[len(SUMMARY_PREFIX):].lstrip()
+        self._previous_summary = summary_body
 
         # Phase 4: Assemble compressed message list
         compressed = []
@@ -703,10 +796,6 @@ Write only the summary body. Do not include any preamble or prefix."""
                     _merge_summary_into_tail = True
             if not _merge_summary_into_tail:
                 compressed.append({"role": summary_role, "content": summary})
-        else:
-            if not self.quiet_mode:
-                logger.debug("No summary model available — middle turns dropped without summary")
-
         for i in range(compress_end, n_messages):
             msg = messages[i].copy()
             if _merge_summary_into_tail and i == compress_end:
@@ -716,6 +805,7 @@ Write only the summary body. Do not include any preamble or prefix."""
             compressed.append(msg)
 
         self.compression_count += 1
+        self.last_compaction_outcome = "compacted"
 
         compressed = self._sanitize_tool_pairs(compressed)
 

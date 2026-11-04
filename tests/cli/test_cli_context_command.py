@@ -75,3 +75,20 @@ def test_context_without_agent_is_explicitly_unavailable():
     with patch("cli._cprint") as output:
         cli._handle_context_command("/context")
     assert "no active agent" in output.call_args.args[0]
+
+
+def test_manual_compress_bypasses_cooldown_once_and_preserves_on_failure():
+    cli = _cli()
+    cli.conversation_history = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": str(i)}
+        for i in range(6)
+    ]
+    original = cli.conversation_history
+    cli.agent.compression_enabled = True
+    cli.agent._compress_context = MagicMock(return_value=(original, "system"))
+    with patch("builtins.print") as output:
+        cli._manual_compress()
+    assert cli.agent._compress_context.call_count == 1
+    assert cli.agent._compress_context.call_args.kwargs["manual"] is True
+    assert cli.conversation_history is original
+    assert "Transcript preserved" in output.call_args_list[-1].args[0]

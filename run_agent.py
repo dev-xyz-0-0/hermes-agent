@@ -1280,6 +1280,7 @@ class AIAgent:
 
         # Context compressor internal counters (if present)
         if hasattr(self, "context_compressor") and self.context_compressor:
+            self.context_compressor.invalidate_pending_attempts()
             self.context_compressor.last_prompt_tokens = 0
             self.context_compressor.last_completion_tokens = 0
             self.context_compressor.last_total_tokens = 0
@@ -1293,6 +1294,7 @@ class AIAgent:
             self.context_compressor._summary_failure_cooldown_until = 0.0
             self.context_compressor.last_summary_failure = None
             self.context_compressor.last_compaction_outcome = "not_attempted"
+            self.context_compressor.summary_completion_metadata_available = None
     
     def switch_model(self, new_model, new_provider, api_key='', base_url='', api_mode=''):
         """Switch the model/provider in-place for a live agent.
@@ -6143,13 +6145,17 @@ class AIAgent:
             if messages and messages[-1].get("_flush_sentinel") == _sentinel:
                 messages.pop()
 
-    def _compress_context(self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default") -> tuple:
+    def _compress_context(
+        self, messages: list, system_message: str, *, approx_tokens: int = None,
+        task_id: str = "default", manual: bool = False,
+    ) -> tuple:
         """Compress conversation context and split the session in SQLite.
 
         Returns:
             (compressed_messages, new_system_prompt) tuple
         """
         _pre_msg_count = len(messages)
+        _attempt_session_id = self.session_id
         logger.info(
             "context compression started: session=%s messages=%d tokens=~%s model=%s",
             self.session_id or "none", _pre_msg_count,
@@ -6165,7 +6171,24 @@ class AIAgent:
             except Exception:
                 pass
 
-        compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens)
+        compressed = self.context_compressor.compress(
+            messages, current_tokens=approx_tokens, manual=manual,
+            ownership_check=lambda: self.session_id == _attempt_session_id,
+        )
+
+        # Summary failure, cooldown, reset, or a superseding attempt: preserve
+        # the exact transcript, prompt, session identity, and usage anchor.
+        if compressed is messages:
+            logger.warning(
+                "context compression not committed: session=%s outcome=%s failure=%s",
+                _attempt_session_id,
+                self.context_compressor.last_compaction_outcome,
+                self.context_compressor.last_summary_failure or "none",
+            )
+            return messages, self._cached_system_prompt or system_message
+
+        from agent.usage_anchor import install_usage_anchor
+        install_usage_anchor(self, None)
 
         todo_snapshot = self._todo_store.format_for_injection()
         if todo_snapshot:
@@ -7624,6 +7647,7 @@ class AIAgent:
             max_retries = 3
             primary_recovery_attempted = False
             max_compression_attempts = 3
+            max_context_overflow_recovery_attempts = 1
             codex_auth_retry_attempted=False
             anthropic_auth_retry_attempted=False
             nous_auth_retry_attempted=False
@@ -8541,19 +8565,19 @@ class AIAgent:
                             self._vprint(f"{self.log_prefix}⚠️  Context length exceeded at minimum tier — attempting compression...", force=True)
 
                         compression_attempts += 1
-                        if compression_attempts > max_compression_attempts:
-                            self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached.", force=True)
+                        if compression_attempts > max_context_overflow_recovery_attempts:
+                            self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_context_overflow_recovery_attempts}) reached.", force=True)
                             self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
-                            logging.error(f"{self.log_prefix}Context compression failed after {max_compression_attempts} attempts.")
+                            logging.error(f"{self.log_prefix}Context compression failed after {max_context_overflow_recovery_attempts} attempt.")
                             self._persist_session(messages, conversation_history)
                             return {
                                 "messages": messages,
                                 "completed": False,
                                 "api_calls": api_call_count,
-                                "error": f"Context length exceeded: max compression attempts ({max_compression_attempts}) reached.",
+                                "error": f"Context length exceeded: max compression attempts ({max_context_overflow_recovery_attempts}) reached.",
                                 "partial": True
                             }
-                        self._emit_status(f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_compression_attempts})...")
+                        self._emit_status(f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_context_overflow_recovery_attempts})...")
 
                         original_len = len(messages)
                         messages, active_system_prompt = self._compress_context(

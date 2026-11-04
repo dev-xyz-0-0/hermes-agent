@@ -207,6 +207,7 @@ def render_context_diagnosis(
     cooldown_remaining = max(0, int(cooldown_until - time.monotonic()))
     summary_failure = str(getattr(compressor, "last_summary_failure", "") or "none")
     compaction_outcome = str(getattr(compressor, "last_compaction_outcome", "") or "unavailable")
+    completion_metadata = getattr(compressor, "summary_completion_metadata_available", None)
     observed = snapshot.measurement.observed_at
     freshness = f"observed {observed:.3f}" if observed is not None else "timestamp unavailable"
     threshold = snapshot.threshold_tokens
@@ -224,6 +225,11 @@ def render_context_diagnosis(
         f"Last summary failure: {summary_failure}",
         f"Summary cooldown: {'active (' + str(cooldown_remaining) + 's)' if cooldown_remaining else 'inactive'}",
         f"Last compaction outcome: {compaction_outcome}",
+        "Summary completion metadata: " + (
+            "available" if completion_metadata is True else
+            "unavailable; truncation cannot be inferred" if completion_metadata is False else
+            "not observed"
+        ),
     ]
     return "\n".join(lines)[:max_chars]
 

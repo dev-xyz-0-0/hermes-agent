@@ -157,7 +157,9 @@ def persist_usage_anchor(agent: Any, anchor: Optional[dict[str, Any]]) -> None:
 
 def install_usage_anchor(agent: Any, anchor: Optional[dict[str, Any]]) -> None:
     agent._usage_anchor = anchor
-    if getattr(agent, "_turn_base_usage_anchor", None) is None and anchor is not None:
+    if anchor is None:
+        agent._turn_base_usage_anchor = None
+    elif getattr(agent, "_turn_base_usage_anchor", None) is None:
         agent._turn_base_usage_anchor = anchor
     persist_usage_anchor(agent, anchor)
 

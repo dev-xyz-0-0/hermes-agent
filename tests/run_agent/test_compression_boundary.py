@@ -5,8 +5,10 @@ so that parallel tool calls are never split during compression.
 """
 
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from agent.context_compressor import ContextCompressor
+from run_agent import AIAgent
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +41,52 @@ def _make_compressor(**kwargs) -> ContextCompressor:
     defaults.update(kwargs)
     with patch("agent.context_compressor.get_model_context_length", return_value=8000):
         return ContextCompressor(**defaults)
+
+
+def _minimal_agent_for_compression(compressor):
+    agent = AIAgent.__new__(AIAgent)
+    agent.session_id = "session-a"
+    agent.model = "test-model"
+    agent.platform = "cli"
+    agent.context_compressor = compressor
+    agent._usage_anchor = {"session_id": "session-a"}
+    agent._turn_base_usage_anchor = agent._usage_anchor
+    agent._session_db = None
+    agent._memory_manager = None
+    agent._cached_system_prompt = "system"
+    agent._context_pressure_warned = True
+    agent._todo_store = SimpleNamespace(format_for_injection=lambda: "")
+    agent.flush_memories = lambda *_args, **_kwargs: None
+    agent._invalidate_system_prompt = lambda: setattr(agent, "_cached_system_prompt", None)
+    agent._build_system_prompt = lambda _system: "rebuilt system"
+    return agent
+
+
+class TestTransactionalCompressionBoundary:
+    def test_non_mutating_failure_preserves_usage_anchor_and_session(self):
+        compressor = _make_compressor(protect_first_n=2, protect_last_n=2)
+        agent = _minimal_agent_for_compression(compressor)
+        messages = [{"role": "user", "content": str(i)} for i in range(12)]
+        anchor = agent._usage_anchor
+        with patch("agent.context_compressor.call_llm", side_effect=Exception("timeout")):
+            result, system = agent._compress_context(messages, "system", approx_tokens=7000)
+        assert result is messages
+        assert system == "system"
+        assert agent.session_id == "session-a"
+        assert agent._usage_anchor is anchor
+
+    def test_successful_rewrite_invalidates_usage_anchor(self):
+        compressor = _make_compressor(protect_first_n=2, protect_last_n=2)
+        agent = _minimal_agent_for_compression(compressor)
+        messages = [{"role": "user", "content": str(i)} for i in range(12)]
+        response = SimpleNamespace(choices=[SimpleNamespace(
+            finish_reason="stop", message=SimpleNamespace(content="valid summary"),
+        )])
+        with patch("agent.context_compressor.call_llm", return_value=response):
+            result, _system = agent._compress_context(messages, "system", approx_tokens=7000)
+        assert result is not messages
+        assert agent._usage_anchor is None
+        assert agent._turn_base_usage_anchor is None
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,8 @@
 """Tests for agent/context_compressor.py — compression logic, thresholds, truncation fallback."""
 
 import pytest
+import threading
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 from agent.context_compressor import ContextCompressor, SUMMARY_PREFIX, classify_summary_failure
@@ -106,20 +108,19 @@ class TestCompress:
         result = compressor.compress(msgs)
         assert result == msgs
 
-    def test_truncation_fallback_no_client(self, compressor):
-        # compressor has client=None, so should use truncation fallback
+    def test_no_provider_preserves_transcript(self, compressor):
         msgs = [{"role": "system", "content": "System prompt"}] + self._make_messages(10)
         result = compressor.compress(msgs)
-        assert len(result) < len(msgs)
-        # Should keep system message and last N
-        assert result[0]["role"] == "system"
-        assert compressor.compression_count == 1
+        assert result is msgs
+        assert compressor.compression_count == 0
 
     def test_compression_increments_count(self, compressor):
         msgs = self._make_messages(10)
-        compressor.compress(msgs)
+        with patch.object(compressor, "_generate_summary", return_value=f"{SUMMARY_PREFIX}\nvalid"):
+            compressor.compress(msgs)
         assert compressor.compression_count == 1
-        compressor.compress(msgs)
+        with patch.object(compressor, "_generate_summary", return_value=f"{SUMMARY_PREFIX}\nvalid"):
+            compressor.compress(msgs)
         assert compressor.compression_count == 2
 
     def test_protects_first_and_last(self, compressor):
@@ -171,7 +172,7 @@ class TestGenerateSummaryNoneContent:
             for i in range(10)
         ]
         result = c.compress(msgs)
-        assert len(result) < len(msgs)
+        assert result is msgs
 
 
 class TestNonStringContent:
@@ -210,9 +211,8 @@ class TestNonStringContent:
 
         with patch("agent.context_compressor.call_llm", return_value=mock_response):
             summary = c._generate_summary(messages)
-        # None content → empty string → standardized compaction handoff prefix added
-        assert summary is not None
-        assert summary == SUMMARY_PREFIX
+        assert summary is None
+        assert c.last_summary_failure == "empty_output"
 
     def test_summary_call_does_not_force_temperature(self):
         mock_response = MagicMock()
@@ -251,6 +251,151 @@ class TestSummaryFailureCooldown:
         assert first is None
         assert second is None
         assert mock_call.call_count == 1
+
+    def test_manual_attempt_bypasses_cooldown_once(self):
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True)
+        c._summary_failure_cooldown_until = 10**12
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content="short but valid"),
+            )]
+        )
+        with patch("agent.context_compressor.call_llm", return_value=response) as call:
+            assert c._generate_summary([{"role": "user", "content": "x"}], bypass_cooldown=True)
+        call.assert_called_once()
+
+
+class TestSafeSummaryValidation:
+    @staticmethod
+    def _compressor():
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            return ContextCompressor(
+                model="test", quiet_mode=True, protect_first_n=2, protect_last_n=2,
+            )
+
+    @staticmethod
+    def _messages():
+        return [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"message {i}"}
+            for i in range(12)
+        ]
+
+    @pytest.mark.parametrize("error", [
+        "401 unauthorized API key", "connection reset by peer", "request timed out",
+        "provider overloaded 503", "unclassified terminal failure",
+    ])
+    def test_terminal_failures_preserve_original_transcript(self, error):
+        c = self._compressor()
+        messages = self._messages()
+        with patch("agent.context_compressor.call_llm", side_effect=Exception(error)):
+            result = c.compress(messages)
+        assert result is messages
+        assert c.compression_count == 0
+
+    def test_empty_and_provider_truncated_outputs_are_rejected(self):
+        c = self._compressor()
+        messages = self._messages()
+        empty = SimpleNamespace(choices=[SimpleNamespace(
+            finish_reason="stop", message=SimpleNamespace(content="   "),
+        )])
+        with patch("agent.context_compressor.call_llm", return_value=empty):
+            assert c.compress(messages) is messages
+        assert c.last_summary_failure == "empty_output"
+
+        c._summary_failure_cooldown_until = 0
+        truncated = SimpleNamespace(choices=[SimpleNamespace(
+            finish_reason="length", message=SimpleNamespace(content="partial"),
+        )])
+        with patch("agent.context_compressor.call_llm", return_value=truncated):
+            assert c.compress(messages) is messages
+        assert c.last_summary_failure == "truncated_output"
+
+    def test_valid_short_summary_commits(self):
+        c = self._compressor()
+        messages = self._messages()
+        response = SimpleNamespace(choices=[SimpleNamespace(
+            finish_reason="stop", message=SimpleNamespace(content="Done."),
+        )])
+        with patch("agent.context_compressor.call_llm", return_value=response):
+            result = c.compress(messages)
+        assert result is not messages
+        assert len(result) < len(messages)
+        assert c.last_compaction_outcome == "compacted"
+
+    def test_context_overflow_has_one_bounded_recovery_then_preserves(self):
+        c = self._compressor()
+        messages = self._messages()
+        error = Exception("maximum context length exceeded")
+        with patch("agent.context_compressor.call_llm", side_effect=error) as call:
+            result = c.compress(messages)
+        assert result is messages
+        assert call.call_count == 2
+        assert c.last_summary_failure == "context_overflow"
+        assert c.last_compaction_outcome == "overflow_recovery_failed"
+
+    def test_reset_during_summary_rejects_stale_result(self):
+        c = self._compressor()
+        messages = self._messages()
+        started = threading.Event()
+        release = threading.Event()
+        response = SimpleNamespace(choices=[SimpleNamespace(
+            finish_reason="stop", message=SimpleNamespace(content="valid"),
+        )])
+
+        def delayed(**_kwargs):
+            started.set()
+            assert release.wait(timeout=2)
+            return response
+
+        result = []
+        with patch("agent.context_compressor.call_llm", side_effect=delayed):
+            thread = threading.Thread(target=lambda: result.append(c.compress(messages)))
+            thread.start()
+            assert started.wait(timeout=2)
+            c.invalidate_pending_attempts()
+            release.set()
+            thread.join(timeout=2)
+        assert result == [messages]
+        assert c.compression_count == 0
+
+    def test_overlapping_attempt_only_newest_can_commit(self):
+        c = self._compressor()
+        messages = self._messages()
+        first_started = threading.Event()
+        release_first = threading.Event()
+        lock = threading.Lock()
+        calls = 0
+
+        def response(content):
+            return SimpleNamespace(choices=[SimpleNamespace(
+                finish_reason="stop", message=SimpleNamespace(content=content),
+            )])
+
+        def side_effect(**_kwargs):
+            nonlocal calls
+            with lock:
+                calls += 1
+                number = calls
+            if number == 1:
+                first_started.set()
+                assert release_first.wait(timeout=2)
+                return response("obsolete")
+            return response("newest")
+
+        results = []
+        with patch("agent.context_compressor.call_llm", side_effect=side_effect):
+            first = threading.Thread(target=lambda: results.append(("first", c.compress(messages))))
+            first.start()
+            assert first_started.wait(timeout=2)
+            second_result = c.compress(messages)
+            release_first.set()
+            first.join(timeout=2)
+        first_result = dict(results)["first"]
+        assert first_result is messages
+        assert second_result is not messages
+        assert c.compression_count == 1
 
 
 class TestSummaryPrefixNormalization:

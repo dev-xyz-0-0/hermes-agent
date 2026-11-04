@@ -61,6 +61,10 @@ def _make_runner():
     runner._agent_cache_lock = None  # disables _evict_cached_agent lock path
     runner._is_user_authorized = lambda _source: True
     runner._format_session_info = lambda: ""
+    # These tests exercise model-override reset only. Avoid leaving a real
+    # default-executor memory-flush task pending during pytest's event-loop
+    # teardown; production reset behavior is covered by dedicated flush tests.
+    runner._async_flush_memories = AsyncMock(return_value=None)
 
     return runner
 
