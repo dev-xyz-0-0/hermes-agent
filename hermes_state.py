@@ -595,6 +595,42 @@ class SessionDB:
             row = cursor.fetchone()
         return dict(row) if row else None
 
+    def patch_session_model_config(self, session_id: str, patch: Dict[str, Any]) -> bool:
+        """Atomically patch JSON session metadata without a schema migration."""
+        if not isinstance(patch, dict):
+            return False
+        def _do(conn):
+            row = conn.execute("SELECT model_config FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            if row is None:
+                return 0
+            try:
+                current = json.loads(row[0]) if row[0] else {}
+            except (json.JSONDecodeError, TypeError):
+                current = {}
+            if not isinstance(current, dict):
+                current = {}
+            for key, value in patch.items():
+                if value is None:
+                    current.pop(key, None)
+                else:
+                    current[key] = value
+            return conn.execute(
+                "UPDATE sessions SET model_config = ? WHERE id = ?",
+                (json.dumps(current, separators=(",", ":")), session_id),
+            ).rowcount
+        return self._execute_write(_do) > 0
+
+    def get_session_model_config_value(self, session_id: str, key: str, default: Any = None) -> Any:
+        """Read one session metadata key, returning default for corrupt legacy JSON."""
+        row = self.get_session(session_id)
+        if not row:
+            return default
+        try:
+            config = json.loads(row.get("model_config")) if row.get("model_config") else {}
+        except (json.JSONDecodeError, TypeError):
+            return default
+        return config.get(key, default) if isinstance(config, dict) else default
+
     def resolve_session_id(self, session_id_or_prefix: str) -> Optional[str]:
         """Resolve an exact or uniquely prefixed session ID to the full ID.
 

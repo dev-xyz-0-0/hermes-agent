@@ -5518,10 +5518,25 @@ class GatewayRunner:
         partial_note = ""
         if agent is None:
             from types import SimpleNamespace
+            from agent.usage_anchor import load_persisted_usage_anchor
+
+            persisted_anchor = load_persisted_usage_anchor(
+                getattr(self, "_session_db", None), entry.session_id
+            )
+            persisted_identity = str(
+                persisted_anchor.get("model_identity", "")
+                if isinstance(persisted_anchor, dict) else ""
+            )
 
             agent = SimpleNamespace(
-                model="",
+                model=str(persisted_anchor.get("model", "")) if persisted_anchor else "",
                 session_id=entry.session_id,
+                provider="",
+                api_mode="",
+                base_url="",
+                _usage_anchor_model_identity_override=persisted_identity,
+                _usage_anchor=persisted_anchor,
+                _turn_base_usage_anchor=None,
                 context_compressor=SimpleNamespace(
                     context_length=0,
                     threshold_tokens=0,
@@ -5536,8 +5551,9 @@ class GatewayRunner:
             )
             partial_note = (
                 "Partial diagnostics: no session-bound cached agent is available; "
-                "cached prompt, tool schemas, model window, and fresh provider usage are unavailable. "
-                "Persisted prompt counts are not used because their provenance/freshness cannot be verified."
+                "cached prompt, tool schemas, and model window are unavailable. "
+                "Unanchored persisted prompt counts are not used because their provenance/freshness cannot be verified; "
+                "anchored usage is used only when its session, model, and transcript prefix validate."
             )
 
         from agent.context_breakdown import (

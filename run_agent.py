@@ -1177,6 +1177,8 @@ class AIAgent:
         self.session_estimated_cost_usd = 0.0
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
+        self._usage_anchor = None
+        self._turn_base_usage_anchor = None
         
         # ── Ollama num_ctx injection ──
         # Ollama defaults to 2048 context regardless of the model's capabilities.
@@ -1270,6 +1272,8 @@ class AIAgent:
         self.session_estimated_cost_usd = 0.0
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
+        self._usage_anchor = None
+        self._turn_base_usage_anchor = None
         
         # Turn counter (added after reset_session_state was first written — #2635)
         self._user_turn_count = 0
@@ -1310,6 +1314,9 @@ class AIAgent:
 
         old_model = self.model
         old_provider = self.provider
+
+        from agent.usage_anchor import install_usage_anchor
+        install_usage_anchor(self, None)
 
         # ── Swap core runtime fields ──
         self.model = new_model
@@ -7216,6 +7223,10 @@ class AIAgent:
         # Initialize conversation (copy to avoid mutating the caller's list)
         messages = list(conversation_history) if conversation_history else []
 
+        from agent.usage_anchor import restore_usage_anchor
+        self._turn_base_usage_anchor = None
+        restore_usage_anchor(self, messages)
+
         # Strip budget pressure warnings from previous turns.  These are
         # turn-scoped signals injected by _get_budget_warning() into tool
         # result content.  If left in the replayed history, models (especially
@@ -7444,6 +7455,7 @@ class AIAgent:
                 break
             
             api_call_count += 1
+            _usage_for_anchor = None
             self._api_call_count = api_call_count
             self._touch_activity(f"starting API call #{api_call_count}")
             if not self.iteration_budget.consume():
@@ -8014,6 +8026,7 @@ class AIAgent:
                             "total_tokens": total_tokens,
                         }
                         self.context_compressor.update_from_response(usage_dict)
+                        _usage_for_anchor = (prompt_tokens, completion_tokens)
 
                         # Cache discovered context length after successful call.
                         # Only persist limits confirmed by the provider (parsed
@@ -8838,7 +8851,7 @@ class AIAgent:
                     )
                 else:
                     assistant_message = response.choices[0].message
-                
+
                 # Normalize content to string — some OpenAI-compatible servers
                 # (llama-server, etc.) return content as a dict or list instead
                 # of a plain string, which crashes downstream .strip() calls.
@@ -8859,6 +8872,17 @@ class AIAgent:
                         assistant_message.content = "\n".join(parts)
                     else:
                         assistant_message.content = str(raw)
+
+                if _usage_for_anchor is not None:
+                    from agent.usage_anchor import capture_usage_anchor, install_usage_anchor
+                    _anchor_response = self._build_assistant_message(assistant_message, finish_reason)
+                    _anchor = capture_usage_anchor(
+                        self, _usage_for_anchor[0], _usage_for_anchor[1], messages,
+                        response_message=_anchor_response,
+                        request_messages=api_messages,
+                    )
+                    if _anchor is not None:
+                        install_usage_anchor(self, _anchor)
 
                 try:
                     from hermes_cli.plugins import invoke_hook as _invoke_hook

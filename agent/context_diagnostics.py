@@ -93,7 +93,27 @@ def snapshot_agent_context(
     observed_at = getattr(compressor, "last_prompt_tokens_observed_at", None)
     limitations: list[str] = []
 
-    if used is not None and source in ("provider_usage", "local_estimate"):
+    anchored = None
+    if messages is not None:
+        from agent.usage_anchor import anchored_context_tokens, model_identity
+        for candidate in (
+            getattr(agent, "_turn_base_usage_anchor", None),
+            getattr(agent, "_usage_anchor", None),
+        ):
+            anchored = anchored_context_tokens(
+                list(messages), candidate, session_id=session_key,
+                model_key=model_identity(agent),
+            )
+            if anchored is not None:
+                break
+
+    if anchored is not None:
+        used, has_estimated_delta, observed_at = anchored
+        provenance = "anchored_estimate" if has_estimated_delta else "provider_usage"
+        limitations.append(
+            "Provider usage is bound to a validated transcript prefix; only appended messages are estimated."
+        )
+    elif used is not None and source in ("provider_usage", "local_estimate"):
         provenance: MeasurementProvenance = source
         if source == "provider_usage":
             limitations.append("Provider usage describes the most recent completed request.")

@@ -5,6 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from agent.usage_anchor import capture_usage_anchor
+
 from gateway.config import Platform
 from gateway.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
@@ -124,6 +126,30 @@ async def test_missing_agent_reports_partial_and_rejects_stale_persisted_usage()
     assert "provenance/freshness cannot be verified" in result
     assert "Source: local_estimate" in result
     assert "97,000" not in result
+
+
+@pytest.mark.asyncio
+async def test_gateway_restart_uses_only_validated_persisted_anchor():
+    runner = _runner(cached=False)
+    key = build_session_key(_source())
+    session_id = runner.session_store._entries[key].session_id
+    history = runner.session_store.load_transcript(session_id)
+    live = _agent(session_id)
+    live.provider = "provider"
+    live.api_mode = "chat"
+    live.base_url = ""
+    anchor = capture_usage_anchor(live, 12_345, 55, history)
+    runner._session_db = SimpleNamespace(
+        get_session_model_config_value=lambda sid, key, default=None: anchor
+    )
+    result = await runner._handle_context_command(_event("/context"))
+    assert "12,400" in result
+    assert "Source: provider_usage" in result
+
+    history[0]["content"] = "rewritten"
+    runner.session_store.load_transcript = lambda _session_id: list(history)
+    result = await runner._handle_context_command(_event("/context"))
+    assert "12,400" not in result
 
 
 @pytest.mark.asyncio
