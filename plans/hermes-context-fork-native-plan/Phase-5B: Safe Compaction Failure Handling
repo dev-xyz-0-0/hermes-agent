@@ -1,0 +1,203 @@
+Phase 5B: Safe Compaction Failure Handling
+
+Phase 5A is approved based on the reported implementation and test results.
+
+You are authorized to modify transcript-loss behavior under the following explicit policy.
+
+## 1. Preserve transcript on summary failure
+
+When `_generate_summary()` fails or returns no usable summary:
+
+- Preserve the original conversation transcript.
+- Do not drop middle messages.
+- Do not insert a synthetic successful-summary marker.
+- Do not mark compaction as successful.
+- Do not invalidate an otherwise valid usage anchor if the transcript was not modified.
+- Record the failure class and outcome for `/context diagnose`.
+
+Apply this to authentication/quota, network, timeout, overload, unknown failures, and active cooldown suppression.
+
+## 2. Validate summary output
+
+Reject summaries that are:
+
+- Empty or whitespace-only.
+- Explicitly marked as truncated by provider finish reason or output metadata.
+- Otherwise known to be incomplete.
+
+Do not infer truncation merely because a summary is short.
+
+If the auxiliary client does not expose reliable completion metadata, report that limitation instead of guessing.
+
+## 3. Overflow recovery
+
+Preserve the existing provider-overflow detection mechanism.
+
+Allow at most one bounded recovery attempt for a provider-confirmed context overflow, using existing supported recovery mechanisms.
+
+Do not implement silent message dropping, recursive retries, or a new fallback summarizer.
+
+If safe recovery is unavailable or fails, preserve the transcript and surface an explicit failure.
+
+Do not broaden overflow detection to unrelated provider errors.
+
+## 4. Manual `/compress`
+
+Allow an explicitly requested `/compress` operation to bypass the ordinary summary-failure cooldown once.
+
+The bypass must:
+
+- Be limited to one logical manual attempt.
+- Respect existing cancellation/session ownership.
+- Avoid unbounded retry loops.
+- Preserve the transcript if the attempt fails.
+
+## 5. State and concurrency
+
+- Commit transcript changes only after a valid summary is available.
+- Preserve session isolation.
+- Reject stale results after `/new` or `/reset`.
+- Prevent overlapping attempts from committing obsolete results.
+- Preserve Phase 1–5A diagnostic provenance and anchor semantics.
+
+## 6. Tests
+
+Add deterministic tests covering:
+
+- All classified terminal failures.
+- Active cooldown.
+- Empty summaries.
+- Provider-confirmed truncation.
+- Valid short summaries.
+- Successful compaction.
+- Provider-confirmed overflow.
+- Failed bounded overflow recovery.
+- Manual cooldown bypass.
+- Reset during compaction.
+- Concurrent compaction attempts.
+- Usage-anchor preservation on non-mutating failure.
+- Usage-anchor invalidation after successful transcript rewrite.
+
+Investigate the existing asynchronous teardown timeouts in `test_session_model_reset.py`.
+
+Identify whether the issue is pre-existing, test-harness-related, or introduced by Phase 5 changes. Do not modify production memory behavior merely to suppress test teardown errors.
+
+## Constraints
+
+Do not implement Phase 6 yet.
+
+Do not introduce persistent cooldowns, adaptive backoff, new persistence schemas, or Holographic memory changes.
+
+Do not change compaction thresholds or model-window calculations.
+
+Do not commit, push, restart, or deploy.
+
+## Deliverables
+
+Stop after Phase 5B and report:
+
+1. Exact transcript-preservation behavior.
+2. Overflow-recovery behavior.
+3. Summary validation rules.
+4. Manual `/compress` behavior.
+5. Files modified.
+6. Test results, including teardown errors.
+7. Remaining risks and limitations.
+
+   Phase 5A is complete. I stopped before changing transcript-loss or overflow-recovery policy, as required.
+   ## Root cause of the 97% warning
+   The reproduced post-reset warning was a delivery ownership race:
+   1. Session A reaches 97% compaction pressure.
+   2. Its agent thread queues a gateway status notification.
+   3. `/new` or `/reset` rebinds the chat to Session B.
+   4. The previously queued Session A notification was delivered without revalidating the active session.
+   This is distinct from stale accounting:
+   - Reset clears compressor measurements, counters, anchors, cooldown state, and cached agent state.
+   - Anchors from Session A fail validation against Session B.
+   - A fresh session can still genuinely reach high pressure due to its system prompt, tool schemas, and first provider request.
+   - Therefore, a 97% warning alone does not prove stale usage accounting.
+   The fix binds each context-pressure warning to its originating session ID and revalidates ownership immediately before sending it.
+   ## Files modified
+   - [agent/context_compressor.py](/home/bc-dev/Documents/github/current/hermes-agent/agent/context_compressor.py)
+   - [agent/context_diagnostics.py](/home/bc-dev/Documents/github/current/hermes-agent/agent/context_diagnostics.py)
+   - [cli.py](/home/bc-dev/Documents/github/current/hermes-agent/cli.py)
+   - [gateway/run.py](/home/bc-dev/Documents/github/current/hermes-agent/gateway/run.py)
+   - [run_agent.py](/home/bc-dev/Documents/github/current/hermes-agent/run_agent.py)
+   - [tests/agent/test_context_compressor.py](/home/bc-dev/Documents/github/current/hermes-agent/tests/agent/test_context_compressor.py)
+   - [tests/cli/test_cli_context_command.py](/home/bc-dev/Documents/github/current/hermes-agent/tests/cli/test_cli_context_command.py)
+   - [tests/gateway/test_context_command.py](/home/bc-dev/Documents/github/current/hermes-agent/tests/gateway/test_context_command.py)
+   - [tests/test_hermes_state.py](/home/bc-dev/Documents/github/current/hermes-agent/tests/test_hermes_state.py)
+   The existing modification to `PHASE-5-RESET.md` was user-owned and was not edited by me.
+   ## Warning ownership and reset behavior
+   Warnings now carry diagnostic ownership metadata:
+   - `queued`
+   - `delivered`
+   - `dropped_stale`
+   Immediately before delivery, the gateway compares the warning’s originating session ID with the session currently bound to that chat.
+   - Same session: warning is delivered.
+   - Different session after `/new`, `/reset`, or another rebind: warning is discarded.
+   - Other chats and sessions remain isolated.
+   - Warning metadata is diagnostic and in-memory only; it does not introduce a new warning subsystem or persistence schema.
+   - After gateway restart, historical warning ownership is reported as unavailable rather than inferred.
+   The deterministic regression test changes the session binding between warning generation and delivery without sleeps.
+   ## `/context diagnose`
+   Supported in both the interactive CLI and gateway:
+   ```text
+   Context diagnosis
+   Session: …abc123
+   Active turn: no
+   Measurement: provider_usage (observed 1234.500)
+   Compaction threshold: 100,000
+   Reset state: fresh session
+   Anchor check: PASS — anchor belongs to this session and transcript prefix
+   Warning owner: …previous123
+   Warning check: PASS — prior-session warning was rejected
+   Last summary failure: timeout
+   Summary cooldown: active (412s)
+   Last compaction outcome: summary_failed
+   ```
+   It is bounded and read-only. It does not rebuild prompts, resolve tools, invoke an LLM, query memory, or mutate session state.
+   ## Compaction reliability findings
+   Already present and verified:
+   - Compression requests do not force a temperature.
+   - The cooldown uses `time.monotonic()`.
+   - Cooldown state is session-local and non-persistent.
+   Added in Phase 5A:
+   - Failure classification for authentication/quota, network, timeout, overload, empty output, truncated output, context overflow, and unknown failures.
+   - Last summary failure and compaction outcome metadata.
+   - Reset clearing of summary failure/cooldown metadata.
+   - Diagnostic display of this information.
+   ## Atomic metadata review
+   `patch_session_model_config()` performs its read-modify-write inside the existing `_execute_write()` transaction. SQLite’s immediate write transaction serializes separate `SessionDB` instances as well as threads sharing one instance.
+
+   A deterministic concurrent-writer test confirms that two simultaneous patches preserve:
+   - Both new keys
+   - Existing unrelated metadata
+   No schema change was made.
+   ## Test results
+   Main Phase 1–5A regression selection:
+   - **376 passed**
+   Additional gateway reset/session suite:
+   - **113 passed**
+   - **2 teardown errors**
+   The two errors were existing asynchronous test-cleanup timeouts in `test_session_model_reset.py`. Running that file independently produced:
+   - **3 passed**
+   - **3 teardown timeout errors**
+   The test bodies pass; pytest times out while shutting down the default executor after reset-triggered background memory tasks. No functional assertion failed.
+
+   Also passed:
+   - Python compilation
+   - `git diff --check`
+   ## Required Phase 5B boundary
+   There is a confirmed policy conflict requiring approval before proceeding:
+
+   `ContextCompressor.compress()` currently drops the selected middle transcript when `_generate_summary()` returns `None`. That includes terminal summary failures and active cooldown suppression. Empty output is also currently converted into a summary-prefix-only result.
+
+   Changing this to preserve the original transcript would alter existing transcript-loss and potentially overflow-recovery behavior—the exact boundary called out in the Phase 5 plan.
+
+   Not yet implemented pending approval:
+   - Preserve the original transcript after terminal summary failure.
+   - Reject empty/truncated summaries before committing compression.
+   - Manual `/compress` cooldown bypass.
+   - Any corresponding overflow-recovery policy adjustment.
+   Phase 1–4 APIs and behavior remain compatible. No thresholds, gateway hygiene decisions, persistence schemas, or reset semantics were changed. Nothing was committed, pushed, restarted, or deployed.

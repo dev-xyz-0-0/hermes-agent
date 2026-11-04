@@ -796,9 +796,20 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
         except (json.JSONDecodeError, TypeError, AttributeError):
             logger.debug("Could not parse memory result as JSON for capacity check")
 
-    # Generic heuristic for non-terminal tools
-    lower = result[:500].lower()
-    if '"error"' in lower or '"failed"' in lower or result.startswith("Error"):
+    # Generic check for MCP-style {"result": {"success": ..., "error": ...}} envelopes
+    try:
+        data = json.loads(result)
+        if isinstance(data, dict):
+            payload = data.get("result", data)
+            if isinstance(payload, dict) and ("success" in payload or "error" in payload):
+                if payload.get("success") is False or payload.get("error") is not None:
+                    return True, " [error]"
+                return False, ""
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        logger.debug("Could not parse %s result as JSON for success/error check", tool_name)
+
+    # Fallback heuristic for plain-text / non-JSON tool results
+    if result.startswith("Error"):
         return True, " [error]"
 
     return False, ""
