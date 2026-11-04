@@ -503,6 +503,8 @@ class GatewayRunner:
         self._running_agents: Dict[str, Any] = {}
         self._running_agents_ts: Dict[str, float] = {}  # start timestamp per session
         self._pending_messages: Dict[str, str] = {}  # Queued messages during interrupt
+        # Diagnostic-only ownership metadata for context-pressure notifications.
+        self._last_context_warnings: Dict[str, Dict[str, Any]] = {}
         # Last successfully-resolved (non-empty) model, keyed by session. Used
         # as a fallback when a fresh config read transiently returns an empty
         # model (e.g. an mtime-keyed config-cache miss during a post-interrupt
@@ -5466,8 +5468,8 @@ class GatewayRunner:
     ) -> str:
         """Return bounded diagnostics for the source's currently bound session."""
         args = event.get_command_args().strip().lower().split()
-        if args and args != ["all"]:
-            return "Usage: `/context [all]` (alias: `/ctx`)"
+        if args and args not in (["all"], ["diagnose"]):
+            return "Usage: `/context [all|diagnose]` (alias: `/ctx`)"
 
         source = event.source
         session_key = self._session_key_for_source(source)
@@ -5562,6 +5564,18 @@ class GatewayRunner:
             render_context_details,
         )
 
+        if args == ["diagnose"]:
+            from agent.context_diagnostics import render_context_diagnosis
+            warning = getattr(self, "_last_context_warnings", {}).get(session_key)
+            reset_state = (
+                "fresh session" if not history else "active session with transcript"
+            )
+            return render_context_diagnosis(
+                agent, messages=history, active_session_id=entry.session_id,
+                warning=warning, reset_state=reset_state,
+                turn_active=turn_active, max_chars=3_500,
+            )
+
         breakdown = compute_context_breakdown(agent, messages=history)
         rendered = (
             render_context_details(breakdown, max_chars=3_500, max_rows=20)
@@ -5577,6 +5591,31 @@ class GatewayRunner:
             suffix = "\n\n" + "\n".join(notes)
             rendered = rendered[: max(0, 3_500 - len(suffix))].rstrip() + suffix
         return rendered[:3_500]
+
+    async def _deliver_session_owned_status(
+        self, *, session_key: str, session_id: str, event_type: str,
+        adapter: Any, chat_id: str, message: str, metadata: Optional[dict] = None,
+    ) -> bool:
+        """Deliver an agent status only if its originating session still owns the route."""
+        entries = getattr(self.session_store, "_entries", {})
+        store_lock = getattr(self.session_store, "_lock", None)
+        if store_lock:
+            with store_lock:
+                current_entry = entries.get(session_key)
+        else:
+            current_entry = entries.get(session_key)
+        current_id = str(getattr(current_entry, "session_id", "") or "")
+        warnings = getattr(self, "_last_context_warnings", None)
+        if warnings is None:
+            warnings = self._last_context_warnings = {}
+        if current_id != str(session_id):
+            if event_type == "context_pressure":
+                warnings[session_key] = {"session_id": session_id, "state": "dropped_stale"}
+            return False
+        await adapter.send(chat_id, message, metadata=metadata)
+        if event_type == "context_pressure":
+            warnings[session_key] = {"session_id": session_id, "state": "delivered"}
+        return True
 
     async def _handle_usage_command(self, event: MessageEvent) -> str:
         """Handle /usage command -- show token usage for the session's last agent run."""
@@ -7097,10 +7136,18 @@ class GatewayRunner:
             if not _status_adapter:
                 return
             try:
+                if event_type == "context_pressure":
+                    warnings = getattr(self, "_last_context_warnings", None)
+                    if warnings is None:
+                        warnings = self._last_context_warnings = {}
+                    warnings[session_key] = {
+                        "session_id": session_id, "state": "queued",
+                    }
                 asyncio.run_coroutine_threadsafe(
-                    _status_adapter.send(
-                        _status_chat_id,
-                        message,
+                    self._deliver_session_owned_status(
+                        session_key=session_key, session_id=session_id,
+                        event_type=event_type, adapter=_status_adapter,
+                        chat_id=_status_chat_id, message=message,
                         metadata=_status_thread_metadata,
                     ),
                     _loop_for_step,

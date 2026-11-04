@@ -5441,8 +5441,8 @@ class HermesCLI:
     def _handle_context_command(self, command: str) -> None:
         """Render a read-only context snapshot from the live CLI agent."""
         args = [part.lower() for part in command.split()[1:]]
-        if args and args != ["all"]:
-            _cprint("  Usage: /context [all] (alias: /ctx)")
+        if args and args not in (["all"], ["diagnose"]):
+            _cprint("  Usage: /context [all|diagnose] (alias: /ctx)")
             return
 
         agent = getattr(self, "agent", None)
@@ -5457,6 +5457,15 @@ class HermesCLI:
         )
 
         messages = list(getattr(self, "conversation_history", None) or [])
+        if args == ["diagnose"]:
+            from agent.context_diagnostics import render_context_diagnosis
+            _cprint(render_context_diagnosis(
+                agent, messages=messages,
+                active_session_id=str(getattr(self, "session_id", "") or ""),
+                reset_state=("fresh session" if not messages else "active session with transcript"),
+                max_chars=12_000,
+            ))
+            return
         breakdown = compute_context_breakdown(agent, messages=messages)
         rendered = (
             render_context_details(breakdown, max_chars=12_000)

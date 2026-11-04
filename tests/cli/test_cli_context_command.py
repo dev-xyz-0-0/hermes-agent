@@ -61,11 +61,12 @@ def test_context_uses_cached_state_without_rebuilding_prompt():
     cli.agent._build_system_prompt.assert_not_called()
 
 
-def test_context_rejects_unknown_arguments():
+def test_context_diagnose_uses_read_only_renderer():
     cli = _cli()
     with patch("cli._cprint") as output:
         cli._handle_context_command("/context diagnose")
-    assert "Usage:" in output.call_args.args[0]
+    assert "Context diagnosis" in output.call_args.args[0]
+    assert "Measurement: provider_usage" in output.call_args.args[0]
 
 
 def test_context_without_agent_is_explicitly_unavailable():

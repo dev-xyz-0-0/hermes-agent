@@ -50,6 +50,26 @@ _CHARS_PER_TOKEN = 4
 _SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
 
 
+def classify_summary_failure(error: Any) -> str:
+    """Classify summary failures for diagnostics without changing retry policy."""
+    text = str(error or "").lower()
+    if not text:
+        return "empty_output"
+    if any(term in text for term in ("unauthorized", "forbidden", "api key", "authentication", "quota", "billing")):
+        return "authentication_or_quota"
+    if "context" in text and any(term in text for term in ("length", "window", "overflow", "too long")):
+        return "context_overflow"
+    if any(term in text for term in ("timeout", "timed out", "deadline")):
+        return "timeout"
+    if any(term in text for term in ("overload", "capacity", "503", "529", "rate limit")):
+        return "overload"
+    if any(term in text for term in ("network", "connection", "dns", "socket")):
+        return "network"
+    if any(term in text for term in ("truncated", "max_tokens", "length limit")):
+        return "truncated_output"
+    return "unknown"
+
+
 class ContextCompressor:
     """Compresses conversation context when approaching the model's context limit.
 
@@ -123,6 +143,8 @@ class ContextCompressor:
         # Stores the previous compaction summary for iterative updates
         self._previous_summary: Optional[str] = None
         self._summary_failure_cooldown_until: float = 0.0
+        self.last_summary_failure: Optional[str] = None
+        self.last_compaction_outcome: str = "not_attempted"
 
     def update_from_response(self, usage: Dict[str, Any]):
         """Update tracked token usage from API response."""
@@ -271,6 +293,7 @@ class ContextCompressor:
         """
         now = time.monotonic()
         if now < self._summary_failure_cooldown_until:
+            self.last_compaction_outcome = "summary_cooldown"
             logger.debug(
                 "Skipping context summary during cooldown (%.0fs remaining)",
                 self._summary_failure_cooldown_until - now,
@@ -378,9 +401,13 @@ Write only the summary body. Do not include any preamble or prefix."""
             # Store for iterative updates on next compaction
             self._previous_summary = summary
             self._summary_failure_cooldown_until = 0.0
+            self.last_summary_failure = None
+            self.last_compaction_outcome = "summary_generated"
             return self._with_summary_prefix(summary)
-        except RuntimeError:
+        except RuntimeError as e:
             self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
+            self.last_summary_failure = classify_summary_failure(e)
+            self.last_compaction_outcome = "summary_failed"
             logging.warning("Context compression: no provider available for "
                             "summary. Middle turns will be dropped without summary "
                             "for %d seconds.",
@@ -388,6 +415,8 @@ Write only the summary body. Do not include any preamble or prefix."""
             return None
         except Exception as e:
             self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
+            self.last_summary_failure = classify_summary_failure(e)
+            self.last_compaction_outcome = "summary_failed"
             logging.warning(
                 "Failed to generate context summary: %s. "
                 "Further summary attempts paused for %d seconds.",

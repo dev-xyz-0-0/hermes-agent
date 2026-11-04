@@ -3,7 +3,20 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
-from agent.context_compressor import ContextCompressor, SUMMARY_PREFIX
+from agent.context_compressor import ContextCompressor, SUMMARY_PREFIX, classify_summary_failure
+
+
+@pytest.mark.parametrize(("message", "expected"), [
+    ("401 unauthorized API key", "authentication_or_quota"),
+    ("connection reset by peer", "network"),
+    ("request timed out", "timeout"),
+    ("provider overloaded 503", "overload"),
+    ("output truncated at max_tokens", "truncated_output"),
+    ("context length exceeded", "context_overflow"),
+    ("", "empty_output"),
+])
+def test_summary_failure_classifier(message, expected):
+    assert classify_summary_failure(message) == expected
 
 
 @pytest.fixture()

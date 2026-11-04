@@ -1,9 +1,43 @@
 """Tests for hermes_state.py — SessionDB SQLite CRUD, FTS5 search, export."""
 
 import time
+import threading
 import pytest
 
 from hermes_state import SessionDB
+
+
+def test_model_config_patch_is_atomic_across_concurrent_writers(tmp_path):
+    path = tmp_path / "atomic.db"
+    first = SessionDB(path)
+    second = SessionDB(path)
+    first.create_session("session", "test", model_config={"existing": True})
+    barrier = threading.Barrier(3)
+    errors = []
+
+    def write(session_db, key):
+        try:
+            barrier.wait()
+            session_db.patch_session_model_config("session", {key: key})
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=write, args=(first, "one")),
+        threading.Thread(target=write, args=(second, "two")),
+    ]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert first.get_session_model_config_value("session", "existing") is True
+    assert first.get_session_model_config_value("session", "one") == "one"
+    assert first.get_session_model_config_value("session", "two") == "two"
+    first.close()
+    second.close()
 
 
 @pytest.fixture()

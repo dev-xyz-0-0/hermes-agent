@@ -189,8 +189,69 @@ async def test_context_is_bounded_and_read_only():
 @pytest.mark.asyncio
 async def test_context_rejects_malformed_arguments():
     runner = _runner()
-    result = await runner._handle_context_command(_event("/context diagnose"))
+    result = await runner._handle_context_command(_event("/context diagnose extra"))
     assert result.startswith("Usage:")
+
+
+@pytest.mark.asyncio
+async def test_context_diagnose_is_read_only_and_reports_session_evidence():
+    runner = _runner()
+    key = build_session_key(_source())
+    agent = runner._agent_cache[key][0]
+    agent._build_system_prompt = MagicMock(side_effect=AssertionError("must not rebuild"))
+    before = dict(vars(agent.context_compressor))
+    result = await runner._handle_context_command(_event("/context diagnose"))
+    assert "Context diagnosis" in result
+    assert "Measurement: provider_usage" in result
+    assert "Anchor check:" in result
+    assert "Warning check:" in result
+    assert vars(agent.context_compressor) == before
+    agent._build_system_prompt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delayed_warning_from_reset_session_is_dropped_deterministically():
+    runner = _runner()
+    key = build_session_key(_source())
+    old_id = runner.session_store._entries[key].session_id
+
+    class Adapter:
+        def __init__(self):
+            self.sent = []
+        async def send(self, chat_id, message, metadata=None):
+            self.sent.append((chat_id, message, metadata))
+
+    adapter = Adapter()
+    runner.session_store._entries[key].session_id = "new-session"
+    delivered = await runner._deliver_session_owned_status(
+        session_key=key, session_id=old_id, event_type="context_pressure",
+        adapter=adapter, chat_id="chat-a", message="97%", metadata=None,
+    )
+    assert delivered is False
+    assert adapter.sent == []
+    assert runner._last_context_warnings[key]["state"] == "dropped_stale"
+
+
+@pytest.mark.asyncio
+async def test_current_session_high_pressure_warning_is_delivered():
+    runner = _runner()
+    key = build_session_key(_source())
+    session_id = runner.session_store._entries[key].session_id
+
+    class Adapter:
+        def __init__(self):
+            self.sent = []
+        async def send(self, chat_id, message, metadata=None):
+            self.sent.append((chat_id, message, metadata))
+
+    adapter = Adapter()
+    delivered = await runner._deliver_session_owned_status(
+        session_key=key, session_id=session_id, event_type="context_pressure",
+        adapter=adapter, chat_id="chat-a", message="97%", metadata=None,
+    )
+    assert delivered is True
+    assert adapter.sent == [("chat-a", "97%", None)]
+    assert runner._last_context_warnings[key]["state"] == "delivered"
 
 
 @pytest.mark.asyncio

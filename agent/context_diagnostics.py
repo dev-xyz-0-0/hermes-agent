@@ -154,6 +154,80 @@ def snapshot_agent_context(
     )
 
 
+def render_context_diagnosis(
+    agent: Any,
+    *,
+    messages: Optional[Sequence[dict[str, Any]]] = None,
+    active_session_id: Optional[str] = None,
+    warning: Optional[dict[str, Any]] = None,
+    reset_state: Optional[str] = None,
+    turn_active: bool = False,
+    max_chars: int = 3_500,
+) -> str:
+    """Render bounded, read-only lifecycle evidence for reset investigations."""
+    snapshot = snapshot_agent_context(agent, messages=messages)
+    session_id = str(active_session_id or snapshot.session_key or "")
+    short_id = session_id[-12:] if session_id else "unavailable"
+
+    anchor_status = "UNKNOWN — no usage anchor is available"
+    if messages is not None:
+        from agent.usage_anchor import validate_usage_anchor, model_identity
+        candidates = (
+            getattr(agent, "_turn_base_usage_anchor", None),
+            getattr(agent, "_usage_anchor", None),
+        )
+        present = [candidate for candidate in candidates if isinstance(candidate, dict)]
+        if present:
+            valid = any(validate_usage_anchor(
+                candidate, list(messages), session_id=session_id,
+                model_key=model_identity(agent),
+            ) for candidate in present)
+            anchor_status = (
+                "PASS — anchor belongs to this session and transcript prefix"
+                if valid else
+                "FAIL — anchor is stale or belongs to another session/model"
+            )
+
+    warning_status = "UNKNOWN — no warning metadata is available"
+    warning_owner = "unavailable"
+    if isinstance(warning, dict):
+        warning_owner_id = str(warning.get("session_id") or "")
+        warning_owner = warning_owner_id[-12:] if warning_owner_id else "unavailable"
+        state = str(warning.get("state") or "unknown")
+        if warning_owner_id == session_id:
+            warning_status = f"PASS — current-session warning ({state})"
+        elif state == "dropped_stale":
+            warning_status = "PASS — prior-session warning was rejected"
+        else:
+            warning_status = f"FAIL — prior-session warning is marked {state}"
+
+    compressor = getattr(agent, "context_compressor", None)
+    cooldown_until = float(getattr(compressor, "_summary_failure_cooldown_until", 0.0) or 0.0)
+    import time
+    cooldown_remaining = max(0, int(cooldown_until - time.monotonic()))
+    summary_failure = str(getattr(compressor, "last_summary_failure", "") or "none")
+    compaction_outcome = str(getattr(compressor, "last_compaction_outcome", "") or "unavailable")
+    observed = snapshot.measurement.observed_at
+    freshness = f"observed {observed:.3f}" if observed is not None else "timestamp unavailable"
+    threshold = snapshot.threshold_tokens
+
+    lines = [
+        "Context diagnosis",
+        f"Session: …{short_id}",
+        f"Active turn: {'yes' if turn_active else 'no'}",
+        f"Measurement: {snapshot.measurement.provenance} ({freshness})",
+        f"Compaction threshold: {threshold:,}" if threshold else "Compaction threshold: unavailable",
+        f"Reset state: {reset_state or 'unknown'}",
+        f"Anchor check: {anchor_status}",
+        f"Warning owner: …{warning_owner}",
+        f"Warning check: {warning_status}",
+        f"Last summary failure: {summary_failure}",
+        f"Summary cooldown: {'active (' + str(cooldown_remaining) + 's)' if cooldown_remaining else 'inactive'}",
+        f"Last compaction outcome: {compaction_outcome}",
+    ]
+    return "\n".join(lines)[:max_chars]
+
+
 def _positive_int(value: Any) -> Optional[int]:
     try:
         parsed = int(value)

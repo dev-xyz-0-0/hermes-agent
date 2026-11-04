@@ -1290,6 +1290,9 @@ class AIAgent:
             self.context_compressor._context_probe_persistable = False
             # Iterative summary from previous session must not bleed into new one (#2635)
             self.context_compressor._previous_summary = None
+            self.context_compressor._summary_failure_cooldown_until = 0.0
+            self.context_compressor.last_summary_failure = None
+            self.context_compressor.last_compaction_outcome = "not_attempted"
     
     def switch_model(self, new_model, new_provider, api_key='', base_url='', api_mode=''):
         """Switch the model/provider in-place for a live agent.
