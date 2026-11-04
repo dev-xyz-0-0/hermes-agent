@@ -59,10 +59,14 @@ class TestUpdateFromResponse:
         assert compressor.last_prompt_tokens == 5000
         assert compressor.last_completion_tokens == 1000
         assert compressor.last_total_tokens == 6000
+        assert compressor.last_prompt_tokens_source == "provider_usage"
+        assert compressor.last_prompt_tokens_observed_at is not None
 
     def test_missing_fields_default_zero(self, compressor):
         compressor.update_from_response({})
         assert compressor.last_prompt_tokens == 0
+        assert compressor.last_prompt_tokens_source == "unavailable"
+        assert compressor.last_prompt_tokens_observed_at is None
 
 
 class TestGetStatus:
