@@ -4621,6 +4621,8 @@ class HermesCLI:
             self._manual_compress()
         elif canonical == "usage":
             self._show_usage()
+        elif canonical == "context":
+            self._handle_context_command(cmd_original)
         elif canonical == "insights":
             self._show_insights(cmd_original)
         elif canonical == "paste":
@@ -5435,6 +5437,33 @@ class HermesCLI:
 
         except Exception as e:
             print(f"  ❌ Compression failed: {e}")
+
+    def _handle_context_command(self, command: str) -> None:
+        """Render a read-only context snapshot from the live CLI agent."""
+        args = [part.lower() for part in command.split()[1:]]
+        if args and args != ["all"]:
+            _cprint("  Usage: /context [all] (alias: /ctx)")
+            return
+
+        agent = getattr(self, "agent", None)
+        if agent is None:
+            _cprint("  Context diagnostics unavailable: no active agent state yet.")
+            return
+
+        from agent.context_breakdown import (
+            compute_context_breakdown,
+            render_context_breakdown,
+            render_context_details,
+        )
+
+        messages = list(getattr(self, "conversation_history", None) or [])
+        breakdown = compute_context_breakdown(agent, messages=messages)
+        rendered = (
+            render_context_details(breakdown, max_chars=12_000)
+            if args == ["all"]
+            else render_context_breakdown(breakdown, grid=True, max_chars=12_000)
+        )
+        _cprint(rendered)
 
     def _show_usage(self):
         """Show cumulative token usage for the current session."""

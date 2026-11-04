@@ -141,6 +141,10 @@ class TestDerivedDicts:
 # ---------------------------------------------------------------------------
 
 class TestGatewayKnownCommands:
+    def test_context_and_alias_are_gateway_commands(self):
+        assert "context" in GATEWAY_KNOWN_COMMANDS
+        assert "ctx" in GATEWAY_KNOWN_COMMANDS
+
     def test_excludes_cli_only_without_config_gate(self):
         for cmd in COMMAND_REGISTRY:
             if cmd.cli_only and not cmd.gateway_config_gate:
@@ -170,6 +174,10 @@ class TestGatewayKnownCommands:
 
 
 class TestGatewayHelpLines:
+    def test_context_discovery_includes_alias(self):
+        line = next(line for line in gateway_help_lines() if "`/context" in line)
+        assert "`/ctx`" in line
+
     def test_returns_nonempty_list(self):
         lines = gateway_help_lines()
         assert len(lines) > 10
@@ -190,6 +198,9 @@ class TestGatewayHelpLines:
 
 
 class TestTelegramBotCommands:
+    def test_context_is_in_telegram_menu(self):
+        assert "context" in {name for name, _description in telegram_bot_commands()}
+
     def test_returns_list_of_tuples(self):
         cmds = telegram_bot_commands()
         assert len(cmds) > 10

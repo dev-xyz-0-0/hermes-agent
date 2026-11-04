@@ -2062,6 +2062,12 @@ class GatewayRunner:
             _evt_cmd = event.get_command()
             _cmd_def_inner = _resolve_cmd_inner(_evt_cmd) if _evt_cmd else None
 
+            # Context diagnostics are read-only and must never be queued as
+            # model input. A running turn can change the snapshot while it is
+            # rendered, so the handler labels that limitation explicitly.
+            if _cmd_def_inner and _cmd_def_inner.name == "context":
+                return await self._handle_context_command(event, turn_active=True)
+
             # /stop must hard-kill the session when an agent is running.
             # A soft interrupt (agent.interrupt()) doesn't help when the agent
             # is truly hung — the executor thread is blocked and never checks
@@ -2207,6 +2213,9 @@ class GatewayRunner:
 
         if canonical == "status":
             return await self._handle_status_command(event)
+
+        if canonical == "context":
+            return await self._handle_context_command(event)
         
         if canonical == "stop":
             return await self._handle_stop_command(event)
@@ -5451,6 +5460,107 @@ class GatewayRunner:
             f"Branch: `{new_session_id}`\n"
             f"Use `/resume` to switch back to the original."
         )
+
+    async def _handle_context_command(
+        self, event: MessageEvent, *, turn_active: bool = False
+    ) -> str:
+        """Return bounded diagnostics for the source's currently bound session."""
+        args = event.get_command_args().strip().lower().split()
+        if args and args != ["all"]:
+            return "Usage: `/context [all]` (alias: `/ctx`)"
+
+        source = event.source
+        session_key = self._session_key_for_source(source)
+        store = self.session_store
+        try:
+            store._ensure_loaded()
+        except Exception:
+            pass
+
+        entry = None
+        store_lock = getattr(store, "_lock", None)
+        entries = getattr(store, "_entries", None)
+        if isinstance(entries, dict):
+            if store_lock:
+                with store_lock:
+                    entry = entries.get(session_key)
+            else:
+                entry = entries.get(session_key)
+        if entry is None:
+            return (
+                "Context diagnostics unavailable: this chat has no active session yet.\n"
+                "Send a message first to materialize session state."
+            )
+
+        try:
+            history = store.load_transcript(entry.session_id) or []
+        except Exception:
+            history = []
+
+        agent = None
+        running = getattr(self, "_running_agents", {}).get(session_key)
+        if running is not None and hasattr(running, "context_compressor"):
+            agent = running
+        if agent is None:
+            cache_lock = getattr(self, "_agent_cache_lock", None)
+            cache = getattr(self, "_agent_cache", None)
+            if cache_lock and isinstance(cache, dict):
+                with cache_lock:
+                    cached = cache.get(session_key)
+                    if cached:
+                        agent = cached[0]
+
+        # A stable routing key can be rebound to a new session by /new. Never
+        # expose the cached object if it still belongs to the prior session.
+        if agent is not None and str(getattr(agent, "session_id", "")) != str(entry.session_id):
+            agent = None
+
+        partial_note = ""
+        if agent is None:
+            from types import SimpleNamespace
+
+            agent = SimpleNamespace(
+                model="",
+                session_id=entry.session_id,
+                context_compressor=SimpleNamespace(
+                    context_length=0,
+                    threshold_tokens=0,
+                    threshold_percent=0,
+                    last_prompt_tokens=0,
+                    last_prompt_tokens_source="unavailable",
+                    last_prompt_tokens_observed_at=None,
+                    compression_count=0,
+                ),
+                tools=[],
+                _memory_store=None,
+            )
+            partial_note = (
+                "Partial diagnostics: no session-bound cached agent is available; "
+                "cached prompt, tool schemas, model window, and fresh provider usage are unavailable. "
+                "Persisted prompt counts are not used because their provenance/freshness cannot be verified."
+            )
+
+        from agent.context_breakdown import (
+            compute_context_breakdown,
+            render_context_breakdown,
+            render_context_details,
+        )
+
+        breakdown = compute_context_breakdown(agent, messages=history)
+        rendered = (
+            render_context_details(breakdown, max_chars=3_500, max_rows=20)
+            if args == ["all"]
+            else render_context_breakdown(breakdown, max_chars=3_500)
+        )
+        notes = []
+        if partial_note:
+            notes.append(partial_note)
+        if turn_active:
+            notes.append("Snapshot note: an active turn may be changing context state.")
+        if notes:
+            suffix = "\n\n" + "\n".join(notes)
+            rendered = rendered[: max(0, 3_500 - len(suffix))].rstrip() + suffix
+        return rendered[:3_500]
 
     async def _handle_usage_command(self, event: MessageEvent) -> str:
         """Handle /usage command -- show token usage for the session's last agent run."""

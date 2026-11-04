@@ -132,6 +132,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, args_hint="[page]"),
     CommandDef("help", "Show available commands", "Info"),
     CommandDef("usage", "Show token usage for the current session", "Info"),
+    CommandDef("context", "Show context occupancy and estimated attribution", "Info",
+               aliases=("ctx",), args_hint="[all]", subcommands=("all",)),
     CommandDef("insights", "Show usage insights and analytics", "Info",
                args_hint="[days]"),
     CommandDef("platforms", "Show gateway/messaging platform status", "Info",

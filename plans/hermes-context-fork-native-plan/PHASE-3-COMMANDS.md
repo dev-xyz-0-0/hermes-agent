@@ -1,7 +1,7 @@
 # Phase 3 — Gateway and CLI Commands (P0)
 
 ## Objective
-Expose `/context`, `/ctx`, `/context all` through the fork's existing command dispatch, help, and busy-state rules.
+Expose `/context`, `/ctx`, `/context all` through the fork's existing command dispatch, help, and busy-state rules. 
 
 ## Implementation
 1. Locate and reuse actual gateway/CLI command registry and native dispatch (do not add a parallel framework).
