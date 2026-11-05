@@ -334,6 +334,55 @@ async def test_context_diagnose_is_read_only_and_reports_session_evidence():
 
 
 @pytest.mark.asyncio
+async def test_context_diagnose_validates_anchor_against_provider_visible_history():
+    """session_meta is persisted but never sent to the provider."""
+    runner = _runner()
+    key = build_session_key(_source())
+    agent = runner._agent_cache[key][0]
+    history = [
+        {"role": "session_meta", "tools": [{"type": "function"}]},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "next"},
+    ]
+    provider_history = runner._provider_visible_history(history)
+    agent._usage_anchor = capture_usage_anchor(agent, 123, 7, provider_history)
+    runner.session_store.load_transcript = lambda _session_id: list(history)
+
+    result = await runner._handle_context_command(_event("/context diagnose"))
+
+    assert "Anchor check: PASS" in result
+
+    history[1]["content"] = "rewritten"
+    result = await runner._handle_context_command(_event("/context diagnose"))
+    assert "Anchor check: FAIL" in result
+
+
+@pytest.mark.asyncio
+async def test_context_diagnose_reloads_persisted_anchor_at_same_boundary():
+    runner = _runner(cached=False)
+    key = build_session_key(_source())
+    session_id = runner.session_store._entries[key].session_id
+    history = [
+        {"role": "session_meta", "tools": [{"type": "function"}]},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    live = _agent(session_id)
+    anchor = capture_usage_anchor(
+        live, 123, 7, runner._provider_visible_history(history)
+    )
+    runner.session_store.load_transcript = lambda _session_id: list(history)
+    runner._session_db = SimpleNamespace(
+        get_session_model_config_value=lambda _sid, _key, _default=None: anchor
+    )
+
+    result = await runner._handle_context_command(_event("/context diagnose"))
+
+    assert "Anchor check: PASS" in result
+
+
+@pytest.mark.asyncio
 async def test_delayed_warning_from_reset_session_is_dropped_deterministically():
     runner = _runner()
     key = build_session_key(_source())
