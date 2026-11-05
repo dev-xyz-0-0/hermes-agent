@@ -9,6 +9,7 @@ therefore never cleared:
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 
 
 # Ensure repo root is importable
@@ -118,3 +119,53 @@ class TestResetSessionState:
         agent.reset_session_state()
 
         assert agent._user_turn_count == 0
+
+    def test_reset_without_memory_manager_invalidates_phase6_metadata(self):
+        """Partially constructed agents do not need a memory manager to reset."""
+        agent = _make_minimal_agent()
+        agent.session_id = "partial-session"
+        agent._holographic_static_memory_snapshot = "stale private block"
+        agent._holographic_static_attribution = {"state": "available", "tokens": 10}
+        agent._holographic_recall_attribution = {"state": "available", "tokens": 20}
+        assert not hasattr(agent, "_memory_manager")
+
+        agent.reset_session_state()
+
+        assert agent._holographic_static_memory_snapshot is None
+        assert agent._holographic_static_attribution == {
+            "state": "disabled",
+            "session_id": "partial-session",
+            "tokens": None,
+            "provenance": "reset",
+        }
+        assert agent._holographic_recall_attribution == {
+            "state": "disabled",
+            "session_id": "partial-session",
+            "tokens": None,
+            "provenance": "reset",
+        }
+
+    def test_reset_with_initialized_holographic_manager_invalidates_metadata(self):
+        """A live Holographic manager retains enabled state but no old measurement."""
+        agent = _make_minimal_agent()
+        agent.session_id = "live-session"
+        agent._memory_manager = SimpleNamespace(provider_names=["holographic"])
+        agent._holographic_static_memory_snapshot = "stale private block"
+        agent._holographic_static_attribution = {"state": "available", "tokens": 10}
+        agent._holographic_recall_attribution = {"state": "available", "tokens": 20}
+
+        agent.reset_session_state()
+
+        assert agent._holographic_static_memory_snapshot is None
+        assert agent._holographic_static_attribution == {
+            "state": "unavailable",
+            "session_id": "live-session",
+            "tokens": None,
+            "provenance": "reset",
+        }
+        assert agent._holographic_recall_attribution == {
+            "state": "unavailable",
+            "session_id": "live-session",
+            "tokens": None,
+            "provenance": "reset",
+        }
