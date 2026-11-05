@@ -211,6 +211,18 @@ def render_context_diagnosis(
     observed = snapshot.measurement.observed_at
     freshness = f"observed {observed:.3f}" if observed is not None else "timestamp unavailable"
     threshold = snapshot.threshold_tokens
+    memory_attribution = getattr(agent, "_holographic_recall_attribution", None)
+    if isinstance(memory_attribution, dict) and str(memory_attribution.get("session_id") or "") == session_id:
+        memory_state = str(memory_attribution.get("state") or "unavailable")
+        memory_provenance = str(memory_attribution.get("provenance") or "unavailable")
+        memory_tokens = memory_attribution.get("tokens")
+        memory_summary = (
+            f"{memory_state}, ~{int(memory_tokens):,} tokens ({memory_provenance})"
+            if memory_state == "available" and isinstance(memory_tokens, (int, float))
+            else memory_state
+        )
+    else:
+        memory_summary = "unavailable"
 
     lines = [
         "Context diagnosis",
@@ -239,6 +251,7 @@ def render_context_diagnosis(
         f"Cancellation: {getattr(compressor, 'compression_cancellation_state', 'unavailable')}",
         f"Last fallback outcome: {getattr(compressor, 'last_fallback_outcome', 'unavailable')}",
         f"Transcript: {getattr(compressor, 'transcript_outcome', 'unavailable')}",
+        f"Holographic recall: {memory_summary}",
         "Summary completion metadata: " + (
             "available" if completion_metadata is True else
             "unavailable; truncation cannot be inferred" if completion_metadata is False else

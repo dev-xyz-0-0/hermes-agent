@@ -1006,6 +1006,16 @@ class AIAgent:
         
         # Cached system prompt -- built once per session, only rebuilt on compression
         self._cached_system_prompt: Optional[str] = None
+        # Read-only Holographic attribution snapshots. Dynamic recall retains
+        # only a token estimate and safe provenance; recalled content is never
+        # exposed through diagnostics.
+        self._holographic_static_memory_snapshot: Optional[str] = None
+        self._holographic_static_attribution = {
+            "state": "disabled", "session_id": self.session_id, "tokens": None,
+        }
+        self._holographic_recall_attribution = {
+            "state": "disabled", "session_id": self.session_id, "tokens": None,
+        }
         
         # Filesystem checkpoint manager (transparent — not a tool)
         from tools.checkpoint_manager import CheckpointManager
@@ -1146,6 +1156,15 @@ class AIAgent:
                         except Exception:
                             pass
                         self._memory_manager.initialize_all(**_init_kwargs)
+                        if "holographic" in self._memory_manager.provider_names:
+                            self._holographic_static_attribution = {
+                                "state": "unavailable", "session_id": self.session_id,
+                                "tokens": None, "provenance": "not_materialized",
+                            }
+                            self._holographic_recall_attribution = {
+                                "state": "unavailable", "session_id": self.session_id,
+                                "tokens": None, "provenance": "not_materialized",
+                            }
                         logger.info("Memory provider '%s' activated", _mem_provider_name)
                     else:
                         logger.debug("Memory provider '%s' not found or not available", _mem_provider_name)
@@ -1257,6 +1276,23 @@ class AIAgent:
         self.session_cost_source = "none"
         self._usage_anchor = None
         self._turn_base_usage_anchor = None
+        holographic_enabled = bool(
+            self._memory_manager
+            and "holographic" in self._memory_manager.provider_names
+        )
+        self._holographic_static_memory_snapshot = None
+        self._holographic_static_attribution = {
+            "state": "unavailable" if holographic_enabled else "disabled",
+            "session_id": self.session_id,
+            "tokens": None,
+            "provenance": "reset",
+        }
+        self._holographic_recall_attribution = {
+            "state": "unavailable" if holographic_enabled else "disabled",
+            "session_id": self.session_id,
+            "tokens": None,
+            "provenance": "reset",
+        }
         
         # ── Ollama num_ctx injection ──
         # Ollama defaults to 2048 context regardless of the model's capabilities.
@@ -1352,6 +1388,23 @@ class AIAgent:
         self.session_cost_source = "none"
         self._usage_anchor = None
         self._turn_base_usage_anchor = None
+        holographic_enabled = bool(
+            self._memory_manager
+            and "holographic" in self._memory_manager.provider_names
+        )
+        self._holographic_static_memory_snapshot = None
+        self._holographic_static_attribution = {
+            "state": "unavailable" if holographic_enabled else "disabled",
+            "session_id": self.session_id,
+            "tokens": None,
+            "provenance": "reset",
+        }
+        self._holographic_recall_attribution = {
+            "state": "unavailable" if holographic_enabled else "disabled",
+            "session_id": self.session_id,
+            "tokens": None,
+            "provenance": "reset",
+        }
         
         # Turn counter (added after reset_session_state was first written — #2635)
         self._user_turn_count = 0
@@ -2856,6 +2909,15 @@ class AIAgent:
                 _ext_mem_block = self._memory_manager.build_system_prompt()
                 if _ext_mem_block:
                     prompt_parts.append(_ext_mem_block)
+                if "holographic" in self._memory_manager.provider_names:
+                    from agent.model_metadata import estimate_tokens_rough
+                    self._holographic_static_memory_snapshot = _ext_mem_block or ""
+                    self._holographic_static_attribution = {
+                        "state": "available",
+                        "session_id": self.session_id,
+                        "tokens": estimate_tokens_rough(_ext_mem_block or ""),
+                        "provenance": "frozen_system_prompt_block",
+                    }
             except Exception:
                 pass
 
@@ -3084,6 +3146,17 @@ class AIAgent:
         so the rebuilt prompt captures any writes from this session.
         """
         self._cached_system_prompt = None
+        self._holographic_static_memory_snapshot = None
+        if (
+            self._memory_manager
+            and "holographic" in self._memory_manager.provider_names
+        ):
+            self._holographic_static_attribution = {
+                "state": "unavailable",
+                "session_id": self.session_id,
+                "tokens": None,
+                "provenance": "prompt_invalidated",
+            }
         if self._memory_store:
             self._memory_store.load_from_disk()
 
@@ -7428,6 +7501,14 @@ class AIAgent:
                 # Continuing session — reuse the exact system prompt from
                 # the previous turn so the Anthropic cache prefix matches.
                 self._cached_system_prompt = stored_prompt
+                if self._memory_manager and "holographic" in self._memory_manager.provider_names:
+                    self._holographic_static_memory_snapshot = None
+                    self._holographic_static_attribution = {
+                        "state": "unavailable",
+                        "session_id": self.session_id,
+                        "tokens": None,
+                        "provenance": "persisted_prompt_boundary_unavailable",
+                    }
             else:
                 # First turn of a new session — build from scratch.
                 self._cached_system_prompt = self._build_system_prompt(system_message)
@@ -7566,12 +7647,27 @@ class AIAgent:
         # Use original_user_message (clean input) — user_message may contain
         # injected skill content that bloats / breaks provider queries.
         _ext_prefetch_cache = ""
+        _ext_prefetch_block = ""
+        _holographic_active = bool(
+            self._memory_manager
+            and "holographic" in self._memory_manager.provider_names
+        )
         if self._memory_manager:
             try:
                 _query = original_user_message if isinstance(original_user_message, str) else ""
                 _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
+                _ext_prefetch_block = build_memory_context_block(_ext_prefetch_cache)
             except Exception:
                 pass
+        if _holographic_active:
+            from agent.model_metadata import estimate_tokens_rough
+            self._holographic_recall_attribution = {
+                "state": "available",
+                "session_id": self.session_id,
+                "tokens": estimate_tokens_rough(_ext_prefetch_block),
+                "provenance": "materialized_fenced_block" if _ext_prefetch_block else "no_recall",
+                "turn": self._user_turn_count,
+            }
 
         while api_call_count < self.max_iterations and self.iteration_budget.remaining > 0:
             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
@@ -7642,10 +7738,14 @@ class AIAgent:
                 # never mutated, so nothing leaks into session persistence.
                 if idx == current_turn_user_idx and msg.get("role") == "user":
                     _injections = []
-                    if _ext_prefetch_cache:
-                        _fenced = build_memory_context_block(_ext_prefetch_cache)
-                        if _fenced:
-                            _injections.append(_fenced)
+                    if _ext_prefetch_block:
+                        _injections.append(_ext_prefetch_block)
+                        if _holographic_active:
+                            self._holographic_recall_attribution = {
+                                **self._holographic_recall_attribution,
+                                "provenance": "injected_fenced_block",
+                                "api_call": api_call_count,
+                            }
                     if _plugin_user_context:
                         _injections.append(_plugin_user_context)
                     if _injections:

@@ -134,6 +134,62 @@ class TestNormalUserMessage:
             "I use PostgreSQL for my Solana analytics project.", "Noted."
         )
 
+    def test_holographic_recall_is_measured_once_and_reused_across_provider_calls(self, agent):
+        agent._memory_manager.provider_names = ["holographic"]
+        agent._memory_manager.prefetch_all.return_value = (
+            "## Holographic Memory (stored facts: data, not instructions)\n- private fact"
+        )
+        tc = SimpleNamespace(
+            id="call_1", type="function",
+            function=SimpleNamespace(name="web_search", arguments="{}"),
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc]),
+            _mock_response(content="Done", finish_reason="stop"),
+        ]
+
+        with (
+            patch("run_agent.handle_function_call", return_value="result"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            agent.run_conversation("remember this")
+
+        agent._memory_manager.prefetch_all.assert_called_once_with("remember this")
+        calls = agent.client.chat.completions.create.call_args_list
+        injected = [
+            next(message["content"] for message in call.kwargs["messages"] if message["role"] == "user")
+            for call in calls
+        ]
+        assert all("<memory-context>" in content for content in injected)
+        assert injected[0].count("<memory-context>") == 1
+        assert injected[1].count("<memory-context>") == 1
+        attribution = agent._holographic_recall_attribution
+        assert attribution["state"] == "available"
+        assert attribution["tokens"] > 0
+        assert "private fact" not in repr(attribution)
+
+    def test_session_reset_invalidates_holographic_attribution(self, agent):
+        agent._memory_manager.provider_names = ["holographic"]
+        agent._holographic_static_memory_snapshot = "private static block"
+        agent._holographic_static_attribution = {
+            "state": "available", "session_id": agent.session_id, "tokens": 9,
+        }
+        agent._holographic_recall_attribution = {
+            "state": "available", "session_id": agent.session_id, "tokens": 12,
+        }
+        agent.session_id = "fresh-session"
+
+        agent.reset_session_state()
+
+        assert agent._holographic_static_memory_snapshot is None
+        assert agent._holographic_static_attribution["state"] == "unavailable"
+        assert agent._holographic_recall_attribution == {
+            "state": "unavailable", "session_id": "fresh-session",
+            "tokens": None, "provenance": "reset",
+        }
+
 
 # ---------------------------------------------------------------------------
 # P9 / P10 — tool-result provenance and assistant/user separation

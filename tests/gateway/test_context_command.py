@@ -245,6 +245,47 @@ async def test_multiple_telegram_chats_are_isolated():
 
 
 @pytest.mark.asyncio
+async def test_holographic_attribution_is_session_and_chat_isolated():
+    runner = _runner(chat_ids=("chat-a", "chat-b"))
+    first_key = build_session_key(_source("chat-a"))
+    second_key = build_session_key(_source("chat-b"))
+    first_agent = runner._agent_cache[first_key][0]
+    second_agent = runner._agent_cache[second_key][0]
+    first_agent._holographic_recall_attribution = {
+        "state": "available", "session_id": first_agent.session_id,
+        "tokens": 321, "provenance": "injected_fenced_block",
+    }
+    second_agent._holographic_recall_attribution = {
+        "state": "available", "session_id": second_agent.session_id,
+        "tokens": 0, "provenance": "no_recall",
+    }
+
+    first = await runner._handle_context_command(_event("/context", "chat-a"))
+    second = await runner._handle_context_command(_event("/context", "chat-b"))
+
+    assert "Dynamic recall: ~321 tokens" in first
+    assert "Dynamic recall: ~0 tokens" in second
+    assert "~321 tokens" not in second
+
+
+@pytest.mark.asyncio
+async def test_context_diagnose_reports_only_redacted_holographic_metadata():
+    runner = _runner()
+    key = build_session_key(_source())
+    agent = runner._agent_cache[key][0]
+    agent._holographic_recall_attribution = {
+        "state": "available", "session_id": agent.session_id,
+        "tokens": 44, "provenance": "injected_fenced_block",
+        "secret_for_test": "private recalled fact",
+    }
+
+    result = await runner._handle_context_command(_event("/context diagnose"))
+
+    assert "Holographic recall: available, ~44 tokens (injected_fenced_block)" in result
+    assert "private recalled fact" not in result
+
+
+@pytest.mark.asyncio
 async def test_stale_cached_agent_from_prior_session_is_not_exposed():
     runner = _runner()
     key = build_session_key(_source())

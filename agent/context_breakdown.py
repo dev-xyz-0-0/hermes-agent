@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Literal, Mapping, Optional, Sequence
 
 from agent.context_diagnostics import ContextSnapshot, snapshot_agent_context
 from agent.model_metadata import estimate_messages_tokens_rough, estimate_tokens_rough
@@ -43,6 +43,7 @@ class ContextCategory:
     tokens: Optional[int]
     available: bool
     limitation: str = ""
+    state: Literal["available", "unavailable", "disabled"] = "available"
 
 
 @dataclass(frozen=True)
@@ -83,7 +84,10 @@ def compute_context_breakdown(
 
     skills_block = _match_text(_SKILLS_RE, prompt) if prompt_available else None
     context_block = _match_text(_CONTEXT_RE, prompt) if prompt_available else None
-    static_blocks, static_available = _static_memory_blocks(agent)
+    static_blocks, static_available, static_state, static_limitation = _static_memory_blocks(agent)
+    dynamic_tokens, dynamic_available, dynamic_state, dynamic_limitation = (
+        _dynamic_holographic_memory(agent, dynamic_memory_context)
+    )
 
     residual = prompt
     for block in (skills_block, context_block, *static_blocks):
@@ -102,7 +106,7 @@ def compute_context_breakdown(
     tools = tuple(getattr(agent, "tools", None) or ())
     builtin_tools, mcp_tools, subagent_tools = _partition_tools(tools)
 
-    values: dict[str, tuple[Optional[int], bool, str]] = {
+    values: dict[str, tuple[Any, ...]] = {
         "base_system": _text_value(residual, prompt_available),
         "rules_context": _text_value(context_block or "", prompt_available),
         "skills": _text_value(skills_block or "", prompt_available),
@@ -113,13 +117,14 @@ def compute_context_breakdown(
             sum(estimate_tokens_rough(block) for block in static_blocks)
             if static_available else None,
             static_available,
-            "" if static_available else "Frozen memory snapshot was unavailable.",
+            static_limitation,
+            static_state,
         ),
         "dynamic_memory": (
-            estimate_tokens_rough(dynamic_memory_context or "")
-            if dynamic_memory_context is not None else None,
-            dynamic_memory_context is not None,
-            "" if dynamic_memory_context is not None else "No already-produced recall block was supplied.",
+            dynamic_tokens,
+            dynamic_available,
+            dynamic_limitation,
+            dynamic_state,
         ),
         "conversation": (
             estimate_messages_tokens_rough(list(messages)) if messages is not None else None,
@@ -164,6 +169,9 @@ def render_context_breakdown(
     lines.append("Estimated prompt material by category")
     for category in breakdown.categories[:max(0, max_categories)]:
         glyph = _GLYPHS.get(category.id, "▪")
+        if category.state == "disabled":
+            lines.append(f"{glyph} {category.label}: disabled")
+            continue
         if not category.available or category.tokens is None:
             lines.append(f"{glyph} {category.label}: unavailable")
             continue
@@ -202,7 +210,16 @@ def render_context_details(
     max_rows: int = 30,
 ) -> str:
     """Render bounded per-skill and per-toolset estimates without content."""
-    lines = [*_render_occupancy_lines(breakdown), "", "Expanded estimates"]
+    lines = [*_render_occupancy_lines(breakdown), "", "Memory attribution"]
+    for category_id in ("static_memory", "dynamic_memory"):
+        category = next(item for item in breakdown.categories if item.id == category_id)
+        if category.state == "disabled":
+            lines.append(f"- {category.label}: disabled")
+        elif category.available and category.tokens is not None:
+            lines.append(f"- {category.label}: ~{category.tokens:,} tokens")
+        else:
+            lines.append(f"- {category.label}: unavailable")
+    lines.extend(["", "Expanded estimates"])
     rows = breakdown.details[:max(0, max_rows)]
     if not rows:
         lines.append("No per-skill or per-toolset details available.")
@@ -231,17 +248,85 @@ def _partition_tools(tools: Sequence[dict[str, Any]]) -> tuple[list[dict], list[
     return builtin, mcp, subagents
 
 
-def _static_memory_blocks(agent: Any) -> tuple[tuple[str, ...], bool]:
+def _static_memory_blocks(
+    agent: Any,
+) -> tuple[tuple[str, ...], bool, Literal["available", "unavailable", "disabled"], str]:
+    blocks: list[str] = []
+    builtin_available = True
     if not hasattr(agent, "_memory_store"):
-        return (), False
-    store = getattr(agent, "_memory_store", None)
-    if store is None:
-        return (), True
-    snapshot = getattr(store, "_system_prompt_snapshot", None)
-    if not isinstance(snapshot, dict):
-        return (), False
-    blocks = tuple(str(snapshot.get(key) or "") for key in ("memory", "user"))
-    return tuple(block for block in blocks if block), True
+        builtin_available = False
+    else:
+        store = getattr(agent, "_memory_store", None)
+        if store is not None:
+            snapshot = getattr(store, "_system_prompt_snapshot", None)
+            if not isinstance(snapshot, dict):
+                builtin_available = False
+            else:
+                blocks.extend(str(snapshot.get(key) or "") for key in ("memory", "user"))
+
+    has_holographic_attribution = hasattr(agent, "_holographic_static_attribution")
+    holographic = _session_owned_attribution(agent, "_holographic_static_attribution")
+    holographic_state = _memory_state(holographic) if has_holographic_attribution else "disabled"
+    if holographic_state == "available":
+        block = getattr(agent, "_holographic_static_memory_snapshot", None)
+        if isinstance(block, str) and block:
+            blocks.append(block)
+        elif _safe_nonnegative_int(holographic.get("tokens")):
+            # A persisted prompt can retain the text while its in-memory boundary
+            # is unavailable. Do not guess which base/system text was memory.
+            holographic_state = "unavailable"
+
+    available = builtin_available and holographic_state != "unavailable"
+    if holographic_state == "disabled" and builtin_available:
+        state = "available"
+    elif not available:
+        state = "unavailable"
+    else:
+        state = "available"
+    limitation = "" if available else "Frozen memory snapshot boundaries were unavailable."
+    return tuple(block for block in blocks if block), available, state, limitation
+
+
+def _dynamic_holographic_memory(
+    agent: Any,
+    supplied: Optional[str],
+) -> tuple[Optional[int], bool, Literal["available", "unavailable", "disabled"], str]:
+    # Retain the Phase 2 adapter for callers that already hold a produced block.
+    if supplied is not None:
+        return estimate_tokens_rough(supplied), True, "available", ""
+    attribution = _session_owned_attribution(agent, "_holographic_recall_attribution")
+    state = _memory_state(attribution)
+    if state == "disabled":
+        return None, False, "disabled", "Holographic memory is disabled."
+    if state != "available":
+        return None, False, "unavailable", "No session-owned materialized recall measurement is available."
+    tokens = _safe_nonnegative_int(attribution.get("tokens"))
+    if tokens is None:
+        return None, False, "unavailable", "The materialized recall token estimate is unavailable."
+    return tokens, True, "available", ""
+
+
+def _session_owned_attribution(agent: Any, attribute: str) -> dict[str, Any]:
+    value = getattr(agent, attribute, None)
+    if not isinstance(value, dict):
+        return {}
+    session_id = str(getattr(agent, "session_id", "") or "")
+    if str(value.get("session_id") or "") != session_id:
+        return {}
+    return value
+
+
+def _memory_state(value: Mapping[str, Any]) -> Literal["available", "unavailable", "disabled"]:
+    state = str(value.get("state") or "unavailable")
+    return state if state in ("available", "unavailable", "disabled") else "unavailable"
+
+
+def _safe_nonnegative_int(value: Any) -> Optional[int]:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _build_details(

@@ -1,10 +1,12 @@
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from agent.context_breakdown import (
     compute_context_breakdown,
     render_context_breakdown,
     render_context_details,
 )
+from agent.model_metadata import estimate_tokens_rough
 
 
 def _tool(name: str, description: str = "tool") -> dict:
@@ -174,3 +176,77 @@ def test_unicode_and_long_names_render_safely():
     rendered = render_context_details(breakdown, max_chars=1_000)
     assert "工具" in rendered
     assert len(rendered) <= 1_000
+
+
+def test_holographic_static_and_materialized_recall_are_attributed_without_double_counting():
+    agent = _agent()
+    static_block = "# Holographic Memory\nActive recall policy."
+    recall_block = "<memory-context>\nprivate recalled fact\n</memory-context>"
+    agent._cached_system_prompt = agent._cached_system_prompt.replace(
+        "You are Hermes.", f"You are Hermes.\n\n{static_block}"
+    )
+    agent._holographic_static_memory_snapshot = static_block
+    agent._holographic_static_attribution = {
+        "state": "available", "session_id": "session-a",
+        "tokens": estimate_tokens_rough(static_block),
+        "provenance": "frozen_system_prompt_block",
+    }
+    agent._holographic_recall_attribution = {
+        "state": "available", "session_id": "session-a",
+        "tokens": estimate_tokens_rough(recall_block),
+        "provenance": "injected_fenced_block",
+    }
+
+    baseline = compute_context_breakdown(_agent(), messages=[])
+    breakdown = compute_context_breakdown(agent, messages=[])
+    categories = _categories(breakdown)
+
+    assert categories["static_memory"].tokens == (
+        _categories(baseline)["static_memory"].tokens + estimate_tokens_rough(static_block)
+    )
+    assert categories["base_system"].tokens == _categories(baseline)["base_system"].tokens
+    assert categories["dynamic_memory"].tokens == estimate_tokens_rough(recall_block)
+    rendered = render_context_breakdown(breakdown) + render_context_details(breakdown)
+    assert "private recalled fact" not in rendered
+
+
+def test_holographic_disabled_no_recall_and_stale_session_states_are_explicit():
+    agent = _agent()
+    agent._holographic_static_attribution = {
+        "state": "disabled", "session_id": "session-a", "tokens": None,
+    }
+    agent._holographic_recall_attribution = {
+        "state": "disabled", "session_id": "session-a", "tokens": None,
+    }
+    disabled = compute_context_breakdown(agent, messages=[])
+    assert _categories(disabled)["dynamic_memory"].state == "disabled"
+    assert "Dynamic recall: disabled" in render_context_breakdown(disabled)
+
+    agent._holographic_recall_attribution = {
+        "state": "available", "session_id": "session-a", "tokens": 0,
+        "provenance": "no_recall",
+    }
+    no_recall = compute_context_breakdown(agent, messages=[])
+    assert _categories(no_recall)["dynamic_memory"].tokens == 0
+
+    agent._holographic_recall_attribution["session_id"] = "another-session"
+    stale = compute_context_breakdown(agent, messages=[])
+    assert _categories(stale)["dynamic_memory"].state == "unavailable"
+
+
+def test_holographic_diagnostics_do_not_call_memory_provider_or_database():
+    agent = _agent()
+    agent._memory_manager = MagicMock()
+    agent._holographic_static_attribution = {
+        "state": "unavailable", "session_id": "session-a", "tokens": None,
+    }
+    agent._holographic_recall_attribution = {
+        "state": "available", "session_id": "session-a", "tokens": 5,
+        "provenance": "injected_fenced_block",
+    }
+
+    compute_context_breakdown(agent, messages=[])
+
+    agent._memory_manager.prefetch_all.assert_not_called()
+    agent._memory_manager.get_provider.assert_not_called()
+    agent._memory_manager.initialize_all.assert_not_called()
