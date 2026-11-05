@@ -1276,22 +1276,20 @@ class AIAgent:
         self.session_cost_source = "none"
         self._usage_anchor = None
         self._turn_base_usage_anchor = None
-        memory_manager = getattr(self, "_memory_manager", None)
         holographic_enabled = bool(
-            memory_manager
-            and "holographic" in memory_manager.provider_names
+            self._memory_manager
+            and "holographic" in self._memory_manager.provider_names
         )
-        session_id = str(getattr(self, "session_id", "") or "")
         self._holographic_static_memory_snapshot = None
         self._holographic_static_attribution = {
             "state": "unavailable" if holographic_enabled else "disabled",
-            "session_id": session_id,
+            "session_id": self.session_id,
             "tokens": None,
             "provenance": "reset",
         }
         self._holographic_recall_attribution = {
             "state": "unavailable" if holographic_enabled else "disabled",
-            "session_id": session_id,
+            "session_id": self.session_id,
             "tokens": None,
             "provenance": "reset",
         }
@@ -1390,20 +1388,22 @@ class AIAgent:
         self.session_cost_source = "none"
         self._usage_anchor = None
         self._turn_base_usage_anchor = None
+        memory_manager = getattr(self, "_memory_manager", None)
         holographic_enabled = bool(
-            self._memory_manager
-            and "holographic" in self._memory_manager.provider_names
+            memory_manager
+            and "holographic" in memory_manager.provider_names
         )
+        session_id = str(getattr(self, "session_id", "") or "")
         self._holographic_static_memory_snapshot = None
         self._holographic_static_attribution = {
             "state": "unavailable" if holographic_enabled else "disabled",
-            "session_id": self.session_id,
+            "session_id": session_id,
             "tokens": None,
             "provenance": "reset",
         }
         self._holographic_recall_attribution = {
             "state": "unavailable" if holographic_enabled else "disabled",
-            "session_id": self.session_id,
+            "session_id": session_id,
             "tokens": None,
             "provenance": "reset",
         }
