@@ -5482,6 +5482,42 @@ class GatewayRunner:
             f"Use `/resume` to switch back to the original."
         )
 
+    @staticmethod
+    def _provider_visible_history(history: list[dict]) -> list[dict]:
+        """Return the transcript representation used as provider history.
+
+        Session metadata is durable bookkeeping rather than a provider
+        message.  Anchor validation must use this same representation, or a
+        persisted ``session_meta`` row shifts every anchored fingerprint.
+        """
+        visible = []
+        for message in history:
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            if not role or role in ("session_meta", "system"):
+                continue
+
+            has_tool_calls = "tool_calls" in message
+            has_tool_call_id = "tool_call_id" in message
+            if has_tool_calls or has_tool_call_id or role == "tool":
+                visible.append({key: value for key, value in message.items() if key != "timestamp"})
+                continue
+
+            content = message.get("content")
+            if not content:
+                continue
+            entry = {"role": role, "content": content}
+            if message.get("mirror"):
+                source = message.get("mirror_source", "another session")
+                entry["content"] = f"[Delivered from {source}] {content}"
+            if role == "assistant":
+                for key in ("reasoning", "reasoning_details", "codex_reasoning_items"):
+                    if message.get(key):
+                        entry[key] = message[key]
+            visible.append(entry)
+        return visible
+
     async def _handle_context_command(
         self, event: MessageEvent, *, turn_active: bool = False
     ) -> str:
@@ -5590,7 +5626,11 @@ class GatewayRunner:
                 "fresh session" if not history else "active session with transcript"
             )
             return render_context_diagnosis(
-                agent, messages=history, active_session_id=entry.session_id,
+                # Anchors bind to the conversation representation sent to the
+                # provider, not transcript-only metadata such as session_meta.
+                # Keep validation on the same boundary that run_conversation()
+                # used when it captured the provider usage.
+                agent, messages=self._provider_visible_history(history), active_session_id=entry.session_id,
                 warning=warning, reset_state=reset_state,
                 turn_active=turn_active, max_chars=3_500,
             )
@@ -7358,58 +7398,9 @@ class GatewayRunner:
             # Capture the full tool definitions for transcript logging
             tools_holder[0] = agent.tools if hasattr(agent, 'tools') else None
             
-            # Convert history to agent format.
-            # Two cases:
-            #   1. Normal path (from transcript): simple {role, content, timestamp} dicts
-            #      - Strip timestamps, keep role+content
-            #   2. Interrupt path (from agent result["messages"]): full agent messages
-            #      that may include tool_calls, tool_call_id, reasoning, etc.
-            #      - These must be passed through intact so the API sees valid
-            #        assistant→tool sequences (dropping tool_calls causes 500 errors)
-            agent_history = []
-            for msg in history:
-                role = msg.get("role")
-                if not role:
-                    continue
-                
-                # Skip metadata entries (tool definitions, session info)
-                # -- these are for transcript logging, not for the LLM
-                if role in ("session_meta",):
-                    continue
-                
-                # Skip system messages -- the agent rebuilds its own system prompt
-                if role == "system":
-                    continue
-                
-                # Rich agent messages (tool_calls, tool results) must be passed
-                # through intact so the API sees valid assistant→tool sequences
-                has_tool_calls = "tool_calls" in msg
-                has_tool_call_id = "tool_call_id" in msg
-                is_tool_message = role == "tool"
-                
-                if has_tool_calls or has_tool_call_id or is_tool_message:
-                    clean_msg = {k: v for k, v in msg.items() if k != "timestamp"}
-                    agent_history.append(clean_msg)
-                else:
-                    # Simple text message - just need role and content
-                    content = msg.get("content")
-                    if content:
-                        # Tag cross-platform mirror messages so the agent knows their origin
-                        if msg.get("mirror"):
-                            mirror_src = msg.get("mirror_source", "another session")
-                            content = f"[Delivered from {mirror_src}] {content}"
-                        entry = {"role": role, "content": content}
-                        # Preserve reasoning fields on assistant messages so
-                        # multi-turn reasoning context survives session reload.
-                        # The agent's _build_api_kwargs converts these to the
-                        # provider-specific format (reasoning_content, etc.).
-                        if role == "assistant":
-                            for _rkey in ("reasoning", "reasoning_details",
-                                          "codex_reasoning_items"):
-                                _rval = msg.get(_rkey)
-                                if _rval:
-                                    entry[_rkey] = _rval
-                        agent_history.append(entry)
+            # Use the same normalization for provider input and later anchor
+            # validation in /context diagnose.
+            agent_history = self._provider_visible_history(history)
             
             # Collect MEDIA paths already in history so we can exclude them
             # from the current turn's extraction. This is compression-safe:
