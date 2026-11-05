@@ -5225,8 +5225,14 @@ class GatewayRunner:
                 )
             )
 
-            if tmp_agent.is_interrupted() or self._running_agents.get(session_key) is not tmp_agent:
+            if tmp_agent.is_interrupted or self._running_agents.get(session_key) is not tmp_agent:
                 return "Compression cancelled. Transcript preserved."
+
+            # A compressor failure returns the original object as its
+            # transaction-abort signal.  Do not rewrite the transcript from
+            # the gateway's reduced manual-compression view in that case.
+            if compressed is msgs:
+                return "Compression did not complete. Transcript preserved."
 
             # _compress_context already calls end_session() on the old session
             # (preserving its full transcript in SQLite) and creates a new
@@ -5250,7 +5256,7 @@ class GatewayRunner:
                 f"~{approx_tokens:,} → ~{new_tokens:,} tokens"
             )
         except Exception as e:
-            logger.warning("Manual compress failed: %s", e)
+            logger.exception("Manual compress failed")
             return f"Compression failed: {e}"
         finally:
             if self._running_agents.get(session_key) in (_AGENT_PENDING_SENTINEL, tmp_agent):
