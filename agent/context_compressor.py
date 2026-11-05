@@ -16,9 +16,17 @@ Improvements over v1:
 import logging
 import threading
 import time
+from contextvars import copy_context
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
-from agent.auxiliary_client import call_llm
+from agent.auxiliary_client import (
+    AuxiliaryRequestProgress,
+    call_llm,
+    pin_summary_route,
+    resolve_provider_client,
+    resolve_task_route,
+)
 from agent.model_metadata import (
     get_model_context_length,
     estimate_messages_tokens_rough,
@@ -49,6 +57,12 @@ _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
 # Chars per token rough estimate
 _CHARS_PER_TOKEN = 4
 _SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
+
+
+class SummaryValidationError(RuntimeError):
+    def __init__(self, classification: str):
+        super().__init__(classification.replace("_", " "))
+        self.classification = classification
 
 
 def classify_summary_failure(error: Any) -> str:
@@ -149,6 +163,16 @@ class ContextCompressor:
         self.summary_completion_metadata_available: Optional[bool] = None
         self._attempt_lock = threading.Lock()
         self._attempt_generation = 0
+        self.primary_attempt_status = "unavailable"
+        self.stall_detection_outcome = "unavailable"
+        self.fallback_attempted = False
+        self.fallback_provider: Optional[str] = None
+        self.fallback_model: Optional[str] = None
+        self.logical_attempt_count = 0
+        self.commit_fence_state = "unavailable"
+        self.compression_cancellation_state = "inactive"
+        self.last_fallback_outcome = "unavailable"
+        self.transcript_outcome = "unchanged"
 
     def invalidate_pending_attempts(self) -> None:
         """Prevent in-flight summary results from committing after a reset."""
@@ -166,6 +190,58 @@ class ContextCompressor:
     def _attempt_is_current(self, attempt: int) -> bool:
         with self._attempt_lock:
             return attempt == self._attempt_generation
+
+    def _owned_update(self, attempt: int, **values: Any) -> bool:
+        """Apply attempt-owned state atomically if *attempt* still owns it."""
+        with self._attempt_lock:
+            if attempt != self._attempt_generation:
+                return False
+            for name, value in values.items():
+                setattr(self, name, value)
+            return True
+
+    def _attempt_update(self, attempt: Optional[int], **values: Any) -> bool:
+        """Compatibility update for direct, uncoordinated summary calls."""
+        if attempt is not None:
+            return self._owned_update(attempt, **values)
+        for name, value in values.items():
+            setattr(self, name, value)
+        return True
+
+    def _begin_logical_attempt(self) -> int:
+        with self._attempt_lock:
+            self._attempt_generation += 1
+            generation = self._attempt_generation
+            self.primary_attempt_status = "running"
+            self.last_compaction_outcome = "summary_running"
+            self.stall_detection_outcome = "pending"
+            self.fallback_attempted = False
+            self.fallback_provider = None
+            self.fallback_model = None
+            self.logical_attempt_count = 1
+            self.commit_fence_state = "pending"
+            self.compression_cancellation_state = "active"
+            self.last_fallback_outcome = "not_attempted"
+            self.transcript_outcome = "preserved"
+            return generation
+
+    def _claim_recovery(self, attempt: int, *, new_generation: bool) -> Optional[int]:
+        """Atomically claim the sole recovery permit."""
+        with self._attempt_lock:
+            if attempt != self._attempt_generation or self.logical_attempt_count >= 2:
+                return None
+            self.logical_attempt_count += 1
+            if new_generation:
+                self._attempt_generation += 1
+            return self._attempt_generation
+
+    def _revoke_attempt(self, attempt: int) -> Optional[int]:
+        """Revoke a stalled worker before releasing its provider request."""
+        with self._attempt_lock:
+            if attempt != self._attempt_generation:
+                return None
+            self._attempt_generation += 1
+            return self._attempt_generation
 
     def update_from_response(self, usage: Dict[str, Any]):
         """Update tracked token usage from API response."""
@@ -304,6 +380,8 @@ class ContextCompressor:
     def _generate_summary(
         self, turns_to_summarize: List[Dict[str, Any]], *,
         bypass_cooldown: bool = False, attempt: Optional[int] = None,
+        progress: Optional[AuxiliaryRequestProgress] = None,
+        defer_failure: bool = False,
     ) -> Optional[str]:
         """Generate a structured summary of conversation turns.
 
@@ -317,7 +395,9 @@ class ContextCompressor:
         """
         now = time.monotonic()
         if not bypass_cooldown and now < self._summary_failure_cooldown_until:
-            self.last_compaction_outcome = "summary_cooldown"
+            if defer_failure:
+                raise SummaryValidationError("summary_cooldown")
+            self._attempt_update(attempt, last_compaction_outcome="summary_cooldown")
             logger.debug(
                 "Skipping context summary during cooldown (%.0fs remaining)",
                 self._summary_failure_cooldown_until - now,
@@ -407,34 +487,22 @@ Target ~{summary_budget} tokens. Be specific — include file paths, command out
 
 Write only the summary body. Do not include any preamble or prefix."""
 
-        overflow_recovery_attempted = False
+        call_kwargs = {
+            "task": "compression",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": summary_budget * 2,
+        }
+        if self.summary_model:
+            call_kwargs["model"] = self.summary_model
         try:
-            call_kwargs = {
-                "task": "compression",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": summary_budget * 2,
-                # timeout resolved from auxiliary.compression.timeout config by call_llm
-            }
-            if self.summary_model:
-                call_kwargs["model"] = self.summary_model
-            try:
-                response = call_llm(**call_kwargs)
-            except Exception as first_error:
-                if classify_summary_failure(first_error) != "context_overflow":
-                    raise
-                # One bounded retry through the existing auxiliary call path.
-                # The transcript remains untouched unless this returns a valid
-                # complete summary.
-                overflow_recovery_attempted = True
-                self.last_compaction_outcome = "overflow_recovery_attempted"
-                response = call_llm(**call_kwargs)
+            response = call_llm(**call_kwargs, progress=progress)
             if attempt is not None and not self._attempt_is_current(attempt):
                 return None
             choice = response.choices[0]
             finish_reason = getattr(choice, "finish_reason", None)
             response_status = getattr(response, "status", None)
             incomplete = getattr(response, "incomplete_details", None)
-            self.summary_completion_metadata_available = bool(
+            metadata_available = bool(
                 finish_reason is not None or response_status is not None or incomplete is not None
             )
             incomplete_reason = (
@@ -448,9 +516,15 @@ Write only the summary body. Do not include any preamble or prefix."""
                 or str(response_status or "").lower() == "incomplete"
                 or str(incomplete_reason or "").lower() in {"max_tokens", "max_output_tokens"}
             ):
-                self.last_summary_failure = "truncated_output"
-                self.last_compaction_outcome = "summary_failed"
-                self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
+                if defer_failure:
+                    raise SummaryValidationError("truncated_output")
+                self._attempt_update(
+                        attempt,
+                        summary_completion_metadata_available=metadata_available,
+                        last_summary_failure="truncated_output",
+                        last_compaction_outcome="summary_failed",
+                        _summary_failure_cooldown_until=time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS,
+                    )
                 return None
             content = response.choices[0].message.content
             # Handle cases where content is not a string (e.g., dict from llama.cpp)
@@ -458,37 +532,36 @@ Write only the summary body. Do not include any preamble or prefix."""
                 content = str(content) if content else ""
             summary = content.strip()
             if not summary:
-                self.last_summary_failure = "empty_output"
-                self.last_compaction_outcome = "summary_failed"
-                self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
+                if defer_failure:
+                    raise SummaryValidationError("empty_output")
+                self._attempt_update(
+                        attempt,
+                        summary_completion_metadata_available=metadata_available,
+                        last_summary_failure="empty_output",
+                        last_compaction_outcome="summary_failed",
+                        _summary_failure_cooldown_until=time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS,
+                    )
                 return None
-            self._summary_failure_cooldown_until = 0.0
-            self.last_summary_failure = None
-            self.last_compaction_outcome = "summary_generated"
+            if not self._attempt_update(
+                attempt,
+                summary_completion_metadata_available=metadata_available,
+                _summary_failure_cooldown_until=0.0,
+                last_summary_failure=None,
+                last_compaction_outcome="summary_generated",
+            ):
+                return None
             return self._with_summary_prefix(summary)
-        except RuntimeError as e:
-            if attempt is not None and not self._attempt_is_current(attempt):
-                return None
-            self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
-            self.last_summary_failure = classify_summary_failure(e)
-            self.last_compaction_outcome = (
-                "overflow_recovery_failed" if overflow_recovery_attempted
-                else "summary_failed"
-            )
-            logging.warning("Context compression: no provider available for "
-                            "summary. Transcript preserved; further automatic "
-                            "attempts paused for %d seconds.",
-                            _SUMMARY_FAILURE_COOLDOWN_SECONDS)
-            return None
         except Exception as e:
             if attempt is not None and not self._attempt_is_current(attempt):
                 return None
-            self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
-            self.last_summary_failure = classify_summary_failure(e)
-            self.last_compaction_outcome = (
-                "overflow_recovery_failed" if overflow_recovery_attempted
-                else "summary_failed"
-            )
+            if defer_failure:
+                raise
+            self._attempt_update(
+                    attempt,
+                    _summary_failure_cooldown_until=time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS,
+                    last_summary_failure=classify_summary_failure(e),
+                    last_compaction_outcome="summary_failed",
+                )
             logging.warning(
                 "Failed to generate context summary: %s. "
                 "Further summary attempts paused for %d seconds.",
@@ -671,9 +744,146 @@ Write only the summary body. Do not include any preamble or prefix."""
     # Main compression entry point
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _control_cancelled(control) -> bool:
+        if control is None:
+            return False
+        try:
+            return bool(control.is_cancelled())
+        except Exception:
+            return True
+
+    @staticmethod
+    def _control_publish(control, generation: int, cancel, expected=None):
+        if control is None:
+            return SimpleNamespace(generation=generation, active=True)
+        try:
+            return control.publish(generation, cancel, expected=expected)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _control_valid(control, fence, generation: int) -> bool:
+        if fence is None:
+            return False
+        if control is None:
+            return bool(getattr(fence, "active", False))
+        try:
+            return bool(control.valid(fence, generation))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _control_clear(control, fence, generation: int) -> None:
+        if fence is None:
+            return
+        if control is None:
+            fence.active = False
+            return
+        try:
+            control.clear(fence, getattr(fence, "generation", generation))
+        except Exception:
+            pass
+
+    def _run_monitored_summary(
+        self, turns: List[Dict[str, Any]], *, generation: int,
+        manual: bool, stall_timeout: float, control, fence,
+        route: Optional[dict] = None, detect_stall: bool = True,
+        progress: Optional[AuxiliaryRequestProgress] = None,
+    ) -> SimpleNamespace:
+        progress = progress or AuxiliaryRequestProgress()
+        result = {"summary": None, "error": None}
+
+        def worker() -> None:
+            try:
+                if route:
+                    with pin_summary_route(route):
+                        result["summary"] = self._generate_summary(
+                            turns, bypass_cooldown=manual, attempt=generation,
+                            progress=progress, defer_failure=True,
+                        )
+                else:
+                    result["summary"] = self._generate_summary(
+                        turns, bypass_cooldown=manual, attempt=generation,
+                        progress=progress, defer_failure=True,
+                    )
+            except BaseException as exc:
+                result["error"] = exc
+
+        # A copied context prevents a pin or other request-local state from
+        # leaking to the detached worker or a concurrent compression.
+        context = copy_context()
+        thread = threading.Thread(
+            target=lambda: context.run(worker), daemon=True,
+            name=f"context-summary-{generation}",
+        )
+        thread.start()
+        while thread.is_alive():
+            if self._control_cancelled(control) or not self._control_valid(control, fence, generation):
+                progress.cancel()
+                return SimpleNamespace(summary=None, error=None, stalled=False, cancelled=True)
+            if (
+                detect_stall
+                and progress.supported is True
+                and time.monotonic() - progress.last_progress >= max(0.01, stall_timeout)
+            ):
+                revoked_generation = self._revoke_attempt(generation)
+                progress.cancel()
+                return SimpleNamespace(
+                    summary=None, error=None, stalled=True, cancelled=False,
+                    generation=revoked_generation,
+                )
+            progress.wait(min(0.1, max(0.01, stall_timeout)))
+        return SimpleNamespace(
+            summary=result["summary"], error=result["error"],
+            stalled=False, cancelled=False,
+        )
+
+    def _select_fallback_route(self, routes, primary_provider: str, primary_model: str) -> Optional[dict]:
+        if isinstance(routes, dict):
+            routes = [routes]
+        for candidate in routes or ():
+            if not isinstance(candidate, dict):
+                continue
+            provider = str(candidate.get("provider") or "").strip().lower()
+            model = str(candidate.get("model") or "").strip()
+            if not provider or not model:
+                continue
+            if provider == str(primary_provider or "").strip().lower() and model == str(primary_model or "").strip():
+                continue
+            base_url = str(candidate.get("base_url") or "").strip() or None
+            api_key = str(candidate.get("api_key") or "").strip() or None
+            try:
+                client, resolved_model = resolve_provider_client(
+                    provider, model=model, explicit_base_url=base_url,
+                    explicit_api_key=api_key,
+                )
+            except Exception:
+                continue
+            if client is None:
+                continue
+            return {
+                "provider": provider,
+                "model": resolved_model or model,
+                "base_url": base_url,
+                "api_key": api_key,
+            }
+        return None
+
+    def _finalize_failure(self, generation: int, classification: str, outcome: str) -> None:
+        self._owned_update(
+            generation,
+            last_summary_failure=classification,
+            last_compaction_outcome=outcome,
+            _summary_failure_cooldown_until=time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS,
+            transcript_outcome="preserved",
+            compression_cancellation_state="inactive",
+        )
+
     def compress(
         self, messages: List[Dict[str, Any]], current_tokens: int = None, *,
-        manual: bool = False, ownership_check=None,
+        manual: bool = False, ownership_check=None, fallback_routes=None,
+        attempt_control=None, stall_timeout: float = 30.0,
     ) -> List[Dict[str, Any]]:
         """Compress conversation messages by summarizing middle turns.
 
@@ -688,7 +898,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         up so the API never receives mismatched IDs.
         """
         original_messages = messages
-        attempt = self._begin_attempt()
+        attempt = self._begin_logical_attempt()
         n_messages = len(messages)
         if n_messages <= self.protect_first_n + self.protect_last_n + 1:
             if not self.quiet_mode:
@@ -742,25 +952,202 @@ Write only the summary body. Do not include any preamble or prefix."""
                 tail_msgs,
             )
 
-        # Phase 3: Generate structured summary
-        summary = self._generate_summary(
-            turns_to_summarize, bypass_cooldown=manual, attempt=attempt,
+        # Phase 3: Generate structured summary under a published commit fence.
+        primary_progress = AuxiliaryRequestProgress()
+        primary_fence = self._control_publish(
+            attempt_control, attempt, primary_progress.cancel,
         )
+        if primary_fence is None:
+            self._owned_update(
+                attempt, last_compaction_outcome="fence_unavailable",
+                primary_attempt_status="failed", commit_fence_state="unavailable",
+                compression_cancellation_state="inactive",
+            )
+            return original_messages
+        self._owned_update(attempt, commit_fence_state="active")
+
+        # _run_monitored_summary owns its request progress bridge; publish a
+        # cancellation closure that is rebound to that bridge by the control.
+        run = self._run_monitored_summary(
+            turns_to_summarize, generation=attempt, manual=manual,
+            stall_timeout=stall_timeout, control=attempt_control,
+            fence=primary_fence, progress=primary_progress,
+        )
+        summary = run.summary
+        active_fence = primary_fence
+        if not run.stalled:
+            self._owned_update(
+                attempt,
+                stall_detection_outcome=(
+                    "no_stall" if primary_progress.supported is True
+                    else "unsupported" if primary_progress.supported is False
+                    else "not_observed"
+                ),
+            )
+
+        if run.cancelled:
+            self._owned_update(
+                attempt, primary_attempt_status="cancelled",
+                compression_cancellation_state="cancelled",
+                last_compaction_outcome="cancelled", transcript_outcome="preserved",
+            )
+            self._control_clear(attempt_control, active_fence, attempt)
+            return original_messages
+
+        if run.stalled:
+            if run.generation is None:
+                self._control_clear(attempt_control, active_fence, attempt)
+                return original_messages
+            attempt = run.generation
+            self._owned_update(
+                attempt, primary_attempt_status="stalled",
+                stall_detection_outcome="confirmed_stall",
+                commit_fence_state="revoked",
+            )
+            if self._control_cancelled(attempt_control):
+                self._control_clear(attempt_control, active_fence, attempt)
+                return original_messages
+            primary_provider, primary_model = resolve_task_route(
+                "compression", model=self.summary_model or None,
+            )
+            route = self._select_fallback_route(
+                fallback_routes, primary_provider, primary_model or self.summary_model or self.model,
+            )
+            if route is None:
+                self._finalize_failure(attempt, "timeout", "fallback_unavailable")
+                self._control_clear(attempt_control, active_fence, attempt)
+                return original_messages
+            fallback_generation = self._claim_recovery(attempt, new_generation=False)
+            if fallback_generation is None:
+                self._control_clear(attempt_control, active_fence, attempt)
+                return original_messages
+            fallback_progress = AuxiliaryRequestProgress()
+            fallback_fence = self._control_publish(
+                attempt_control, fallback_generation, fallback_progress.cancel,
+                expected=active_fence,
+            )
+            if fallback_fence is None:
+                self._finalize_failure(
+                    fallback_generation, "unknown", "fallback_fence_unavailable",
+                )
+                return original_messages
+            attempt = fallback_generation
+            active_fence = fallback_fence
+            self._owned_update(
+                attempt, fallback_attempted=True,
+                fallback_provider=route["provider"], fallback_model=route["model"],
+                last_fallback_outcome="running", commit_fence_state="active",
+            )
+            run = self._run_monitored_summary(
+                turns_to_summarize, generation=attempt, manual=True,
+                stall_timeout=stall_timeout, control=attempt_control,
+                fence=active_fence, route=route, detect_stall=True,
+                progress=fallback_progress,
+            )
+            summary = run.summary
+            if run.cancelled:
+                self._owned_update(
+                    attempt, last_fallback_outcome="cancelled",
+                    compression_cancellation_state="cancelled",
+                    last_compaction_outcome="cancelled",
+                )
+                self._control_clear(attempt_control, active_fence, attempt)
+                return original_messages
+            if run.stalled:
+                attempt = run.generation or attempt
+                self._finalize_failure(attempt, "timeout", "fallback_stalled")
+                self._owned_update(attempt, last_fallback_outcome="stalled")
+                self._control_clear(attempt_control, active_fence, attempt)
+                return original_messages
+            if run.error is not None:
+                classification = (
+                    run.error.classification
+                    if isinstance(run.error, SummaryValidationError)
+                    else classify_summary_failure(run.error)
+                )
+                self._finalize_failure(attempt, classification, "fallback_failed")
+                self._owned_update(attempt, last_fallback_outcome="failed")
+                self._control_clear(attempt_control, active_fence, attempt)
+                return original_messages
+            self._owned_update(attempt, last_fallback_outcome="succeeded")
+        elif run.error is not None:
+            classification = (
+                run.error.classification
+                if isinstance(run.error, SummaryValidationError)
+                else classify_summary_failure(run.error)
+            )
+            if classification == "summary_cooldown":
+                self._owned_update(
+                    attempt, last_compaction_outcome="summary_cooldown",
+                    transcript_outcome="preserved",
+                    compression_cancellation_state="inactive",
+                )
+                self._control_clear(attempt_control, active_fence, attempt)
+                return original_messages
+            if classification == "context_overflow":
+                recovery_generation = self._claim_recovery(attempt, new_generation=False)
+                if recovery_generation is not None:
+                    self._owned_update(
+                        attempt, last_compaction_outcome="overflow_recovery_attempted",
+                        primary_attempt_status="overflow_recovery",
+                    )
+                    recovery_progress = AuxiliaryRequestProgress()
+                    recovery_fence = self._control_publish(
+                        attempt_control, attempt, recovery_progress.cancel,
+                        expected=active_fence,
+                    )
+                    if recovery_fence is None:
+                        self._finalize_failure(attempt, "unknown", "overflow_recovery_failed")
+                        return original_messages
+                    active_fence = recovery_fence
+                    run = self._run_monitored_summary(
+                        turns_to_summarize, generation=attempt, manual=True,
+                        stall_timeout=stall_timeout, control=attempt_control,
+                        fence=active_fence, detect_stall=True,
+                        progress=recovery_progress,
+                    )
+                    summary = run.summary
+                    if run.cancelled:
+                        self._control_clear(attempt_control, active_fence, attempt)
+                        return original_messages
+                    if run.stalled:
+                        attempt = run.generation or attempt
+                        self._finalize_failure(attempt, "timeout", "overflow_recovery_stalled")
+                        self._control_clear(attempt_control, active_fence, attempt)
+                        return original_messages
+                    if run.error is not None:
+                        retry_classification = (
+                            run.error.classification
+                            if isinstance(run.error, SummaryValidationError)
+                            else classify_summary_failure(run.error)
+                        )
+                        self._finalize_failure(attempt, retry_classification, "overflow_recovery_failed")
+                        self._control_clear(attempt_control, active_fence, attempt)
+                        return original_messages
+                else:
+                    self._finalize_failure(attempt, classification, "summary_failed")
+                    self._control_clear(attempt_control, active_fence, attempt)
+                    return original_messages
+            else:
+                self._finalize_failure(attempt, classification, "summary_failed")
+                self._control_clear(attempt_control, active_fence, attempt)
+                return original_messages
+
         owns_result = self._attempt_is_current(attempt)
         if ownership_check is not None:
             try:
                 owns_result = owns_result and bool(ownership_check())
             except Exception:
                 owns_result = False
+        owns_result = owns_result and self._control_valid(attempt_control, active_fence, attempt)
         if not summary or not owns_result:
+            self._control_clear(attempt_control, active_fence, attempt)
             return original_messages
 
         # Commit iterative state only after validation and ownership checks.
         summary_body = summary
         if summary_body.startswith(SUMMARY_PREFIX):
             summary_body = summary_body[len(SUMMARY_PREFIX):].lstrip()
-        self._previous_summary = summary_body
-
         # Phase 4: Assemble compressed message list
         compressed = []
         for i in range(compress_start):
@@ -804,8 +1191,19 @@ Write only the summary body. Do not include any preamble or prefix."""
                 _merge_summary_into_tail = False
             compressed.append(msg)
 
-        self.compression_count += 1
-        self.last_compaction_outcome = "compacted"
+        with self._attempt_lock:
+            if attempt != self._attempt_generation:
+                self._control_clear(attempt_control, active_fence, attempt)
+                return original_messages
+            self._previous_summary = summary_body
+            self.compression_count += 1
+            self.last_compaction_outcome = "compacted"
+            self.primary_attempt_status = "succeeded" if not self.fallback_attempted else "stalled"
+            self.commit_fence_state = "committed"
+            self.compression_cancellation_state = "inactive"
+            self.transcript_outcome = "committed"
+
+        self._control_clear(attempt_control, active_fence, attempt)
 
         compressed = self._sanitize_tool_pairs(compressed)
 

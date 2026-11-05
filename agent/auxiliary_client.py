@@ -47,6 +47,8 @@ import logging
 import os
 import threading
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path  # noqa: F401 — used by test mocks
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
@@ -58,6 +60,118 @@ from hermes_cli.config import get_hermes_home
 from hermes_constants import OPENROUTER_BASE_URL
 
 logger = logging.getLogger(__name__)
+
+
+class AuxiliaryRequestProgress:
+    """Thread-safe progress and cancellation bridge for one auxiliary request."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._changed = threading.Event()
+        self._supported: Optional[bool] = None
+        self._last_progress = time.monotonic()
+        self._cancel = None
+        self._cancelled = False
+
+    @property
+    def supported(self) -> Optional[bool]:
+        with self._lock:
+            return self._supported
+
+    @property
+    def last_progress(self) -> float:
+        with self._lock:
+            return self._last_progress
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def set_supported(self, supported: bool) -> None:
+        with self._lock:
+            self._supported = bool(supported)
+            if supported:
+                self._last_progress = time.monotonic()
+            self._changed.set()
+
+    def mark_progress(self) -> None:
+        with self._lock:
+            self._last_progress = time.monotonic()
+            self._changed.set()
+
+    def install_cancel(self, callback) -> None:
+        call_now = False
+        with self._lock:
+            self._cancel = callback
+            call_now = self._cancelled and callback is not None
+            self._changed.set()
+        if call_now:
+            try:
+                callback()
+            except Exception:
+                pass
+
+    def cancel(self) -> None:
+        callback = None
+        with self._lock:
+            self._cancelled = True
+            callback = self._cancel
+            self._changed.set()
+        if callback is not None:
+            try:
+                callback()
+            except Exception:
+                pass
+
+    def wait(self, timeout: float) -> None:
+        self._changed.wait(timeout=max(0.0, timeout))
+        self._changed.clear()
+
+
+def resolve_task_route(task: str, *, model: str = None) -> tuple[str, Optional[str]]:
+    """Resolve safe task route identity without making a provider request."""
+    provider, resolved_model, _base_url, _api_key = _resolve_task_provider_model(
+        task, None, model, None, None,
+    )
+    return str(provider or "auto"), resolved_model
+
+
+_SUMMARY_ROUTE_PIN: ContextVar[Optional[dict]] = ContextVar(
+    "hermes_summary_route_pin", default=None,
+)
+_CONSUMED_SUMMARY_ROUTE: ContextVar[Optional[dict]] = ContextVar(
+    "hermes_consumed_summary_route", default=None,
+)
+
+
+@contextmanager
+def pin_summary_route(route: Optional[dict]):
+    """Pin a route to the next compression call in this context only."""
+    token = _SUMMARY_ROUTE_PIN.set(dict(route or {}) or None)
+    consumed_token = _CONSUMED_SUMMARY_ROUTE.set(None)
+    try:
+        yield
+    finally:
+        _SUMMARY_ROUTE_PIN.reset(token)
+        _CONSUMED_SUMMARY_ROUTE.reset(consumed_token)
+
+
+def take_pinned_summary_route() -> Optional[dict]:
+    """Consume the context-local summary route exactly once."""
+    route = _SUMMARY_ROUTE_PIN.get()
+    if route is None:
+        return None
+    _SUMMARY_ROUTE_PIN.set(None)
+    copied = dict(route)
+    _CONSUMED_SUMMARY_ROUTE.set(copied)
+    return copied
+
+
+def consumed_summary_route() -> Optional[dict]:
+    """Return a non-consuming copy for related work such as chunk digests."""
+    route = _CONSUMED_SUMMARY_ROUTE.get()
+    return dict(route) if route else None
 
 _PROVIDER_ALIASES = {
     "google": "gemini",
@@ -2222,6 +2336,27 @@ def _get_task_timeout(task: str, default: float = _DEFAULT_AUX_TIMEOUT) -> float
     return default
 
 
+def get_compression_stall_timeout(default: float = 30.0) -> float:
+    """Return the compression inactivity deadline without contacting a provider."""
+    env_value = os.getenv("HERMES_COMPRESSION_STALL_TIMEOUT")
+    if env_value is not None:
+        try:
+            return max(0.01, float(env_value))
+        except (TypeError, ValueError):
+            pass
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+        task_config = (config.get("auxiliary", {}) or {}).get("compression", {}) or {}
+        raw = task_config.get("stall_timeout")
+        if raw is not None:
+            return max(0.01, float(raw))
+        request_timeout = float(task_config.get("timeout", _DEFAULT_AUX_TIMEOUT))
+        return max(0.01, min(default, request_timeout))
+    except (TypeError, ValueError, ImportError, AttributeError):
+        return max(0.01, default)
+
+
 def _build_call_kwargs(
     provider: str,
     model: str,
@@ -2270,6 +2405,96 @@ def _build_call_kwargs(
     return kwargs
 
 
+def _stream_unsupported(error: Exception) -> bool:
+    text = str(error or "").lower()
+    return "stream" in text and any(
+        term in text for term in ("unsupported", "not support", "not implemented", "invalid")
+    )
+
+
+def _call_with_progress_stream(
+    create, kwargs: Dict[str, Any], max_tokens: Optional[int],
+    progress: AuxiliaryRequestProgress,
+) -> Any:
+    """Consume an OpenAI-compatible stream while retaining completion metadata."""
+    stream_kwargs = dict(kwargs)
+    stream_kwargs["stream"] = True
+    try:
+        stream = _call_with_parameter_recovery(create, stream_kwargs, max_tokens)
+    except Exception as exc:
+        if _stream_unsupported(exc):
+            progress.set_supported(False)
+            return _call_with_parameter_recovery(create, dict(kwargs), max_tokens)
+        raise
+
+    if not hasattr(stream, "__iter__"):
+        # Some adapters accept ``stream`` but still return a complete response.
+        progress.set_supported(False)
+        return stream
+
+    progress.set_supported(True)
+    close = getattr(stream, "close", None)
+    progress.install_cancel(close if callable(close) else None)
+    content_parts: List[str] = []
+    reasoning_parts: List[str] = []
+    finish_reason = None
+    usage = None
+    response_status = None
+    incomplete_details = None
+    try:
+        for chunk in stream:
+            if progress.cancelled:
+                raise InterruptedError("Auxiliary request cancelled")
+            choices = getattr(chunk, "choices", None) or []
+            useful = False
+            if choices:
+                choice = choices[0]
+                delta = getattr(choice, "delta", None)
+                if delta is not None:
+                    content = getattr(delta, "content", None)
+                    if isinstance(content, str) and content:
+                        content_parts.append(content)
+                        useful = True
+                    reasoning = (
+                        getattr(delta, "reasoning_content", None)
+                        or getattr(delta, "reasoning", None)
+                    )
+                    if isinstance(reasoning, str) and reasoning:
+                        reasoning_parts.append(reasoning)
+                        useful = True
+                    for tool_call in getattr(delta, "tool_calls", None) or ():
+                        function = getattr(tool_call, "function", None)
+                        if getattr(function, "name", None) or getattr(function, "arguments", None):
+                            useful = True
+                finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+            usage = getattr(chunk, "usage", None) or usage
+            response_status = getattr(chunk, "status", None) or response_status
+            incomplete_details = (
+                getattr(chunk, "incomplete_details", None) or incomplete_details
+            )
+            if useful:
+                progress.mark_progress()
+    finally:
+        progress.install_cancel(None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    message = SimpleNamespace(
+        content="".join(content_parts) or None,
+        reasoning_content="".join(reasoning_parts) or None,
+        tool_calls=None,
+    )
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason=finish_reason or "stop")],
+        usage=usage,
+        status=response_status,
+        incomplete_details=incomplete_details,
+    )
+
+
 def call_llm(
     task: str = None,
     *,
@@ -2283,6 +2508,7 @@ def call_llm(
     tools: list = None,
     timeout: float = None,
     extra_body: dict = None,
+    progress: AuxiliaryRequestProgress = None,
 ) -> Any:
     """Centralized synchronous LLM call.
 
@@ -2308,6 +2534,15 @@ def call_llm(
     Raises:
         RuntimeError: If no provider is configured.
     """
+    pinned = take_pinned_summary_route() if task == "compression" else None
+    if pinned:
+        provider = pinned.get("provider") or provider
+        model = pinned.get("model") or model
+        base_url = pinned.get("base_url") or base_url
+        api_key = pinned.get("api_key") or api_key
+        if pinned.get("timeout") is not None:
+            timeout = pinned["timeout"]
+
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
 
@@ -2384,9 +2619,11 @@ def call_llm(
 
     # Correct unsupported optional parameters, then try payment fallback.
     try:
-        return _call_with_parameter_recovery(
-            client.chat.completions.create, kwargs, max_tokens
-        )
+        if progress is not None:
+            return _call_with_progress_stream(
+                client.chat.completions.create, kwargs, max_tokens, progress,
+            )
+        return _call_with_parameter_recovery(client.chat.completions.create, kwargs, max_tokens)
     except Exception as first_err:
         # ── Payment / credit exhaustion fallback ──────────────────────
         # When the resolved provider returns 402 or a credit-related error,
@@ -2402,9 +2639,11 @@ def call_llm(
                     temperature=temperature, max_tokens=max_tokens,
                     tools=tools, timeout=effective_timeout,
                     extra_body=extra_body)
-                return _call_with_parameter_recovery(
-                    fb_client.chat.completions.create, fb_kwargs, max_tokens
-                )
+                if progress is not None:
+                    return _call_with_progress_stream(
+                        fb_client.chat.completions.create, fb_kwargs, max_tokens, progress,
+                    )
+                return _call_with_parameter_recovery(fb_client.chat.completions.create, fb_kwargs, max_tokens)
         raise
 
 

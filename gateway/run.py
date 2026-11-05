@@ -5172,11 +5172,18 @@ class GatewayRunner:
         """Handle /compress command -- manually compress conversation context."""
         source = event.source
         session_entry = self.session_store.get_or_create_session(source)
+        session_key = session_entry.session_key
+        if session_key in self._running_agents:
+            return "Another task is already active for this session. Use /stop first."
+        self._running_agents[session_key] = _AGENT_PENDING_SENTINEL
         history = self.session_store.load_transcript(session_entry.session_id)
 
         if not history or len(history) < 4:
+            if self._running_agents.get(session_key) is _AGENT_PENDING_SENTINEL:
+                del self._running_agents[session_key]
             return "Not enough conversation to compress (need at least 4 messages)."
 
+        tmp_agent = None
         try:
             from run_agent import AIAgent
             from agent.model_metadata import estimate_messages_tokens_rough
@@ -5205,12 +5212,21 @@ class GatewayRunner:
                 session_id=session_entry.session_id,
             )
             tmp_agent._print_fn = lambda *a, **kw: None
+            if self._running_agents.get(session_key) is not _AGENT_PENDING_SENTINEL:
+                tmp_agent.interrupt("Compression cancelled")
+                return "Compression cancelled. Transcript preserved."
+            self._running_agents[session_key] = tmp_agent
 
             loop = asyncio.get_event_loop()
             compressed, _ = await loop.run_in_executor(
                 None,
-                lambda: tmp_agent._compress_context(msgs, "", approx_tokens=approx_tokens)
+                lambda: tmp_agent._compress_context(
+                    msgs, "", approx_tokens=approx_tokens, manual=True,
+                )
             )
+
+            if tmp_agent.is_interrupted() or self._running_agents.get(session_key) is not tmp_agent:
+                return "Compression cancelled. Transcript preserved."
 
             # _compress_context already calls end_session() on the old session
             # (preserving its full transcript in SQLite) and creates a new
@@ -5236,6 +5252,9 @@ class GatewayRunner:
         except Exception as e:
             logger.warning("Manual compress failed: %s", e)
             return f"Compression failed: {e}"
+        finally:
+            if self._running_agents.get(session_key) in (_AGENT_PENDING_SENTINEL, tmp_agent):
+                del self._running_agents[session_key]
 
     async def _handle_title_command(self, event: MessageEvent) -> str:
         """Handle /title command — set or show the current session's title."""

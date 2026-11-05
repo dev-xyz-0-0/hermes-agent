@@ -4,6 +4,7 @@ Verifies that _align_boundary_backward correctly handles tool result groups
 so that parallel tool calls are never split during compression.
 """
 
+import threading
 from unittest.mock import patch
 from types import SimpleNamespace
 
@@ -87,6 +88,44 @@ class TestTransactionalCompressionBoundary:
         assert result is not messages
         assert agent._usage_anchor is None
         assert agent._turn_base_usage_anchor is None
+
+    def test_stall_fallback_does_not_repeat_pre_compression_callbacks(self):
+        compressor = _make_compressor(
+            model="primary-model", provider="primary",
+            protect_first_n=2, protect_last_n=2,
+        )
+        agent = _minimal_agent_for_compression(compressor)
+        agent._fallback_chain = [{"provider": "backup", "model": "fallback-model"}]
+        counts = {"flush": 0, "provider": 0}
+        agent.flush_memories = lambda *_args, **_kwargs: counts.__setitem__("flush", counts["flush"] + 1)
+        agent._memory_manager = SimpleNamespace(
+            on_pre_compress=lambda _messages: counts.__setitem__("provider", counts["provider"] + 1)
+        )
+        messages = [{"role": "user", "content": str(i)} for i in range(12)]
+        released = threading.Event()
+        calls = 0
+
+        def call(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                kwargs["progress"].set_supported(True)
+                kwargs["progress"].install_cancel(released.set)
+                assert released.wait(timeout=2)
+                raise InterruptedError("abandoned")
+            kwargs["progress"].set_supported(False)
+            return SimpleNamespace(choices=[SimpleNamespace(
+                finish_reason="stop", message=SimpleNamespace(content="fallback"),
+            )])
+
+        with patch("agent.context_compressor.call_llm", side_effect=call), \
+             patch("agent.context_compressor.resolve_task_route", return_value=("primary", "primary-model")), \
+             patch("agent.context_compressor.resolve_provider_client", return_value=(object(), "fallback-model")), \
+             patch("agent.auxiliary_client.get_compression_stall_timeout", return_value=0.01):
+            result, _system = agent._compress_context(messages, "system", approx_tokens=7000)
+
+        assert result is not messages
+        assert counts == {"flush": 1, "provider": 1}
 
 
 # ---------------------------------------------------------------------------

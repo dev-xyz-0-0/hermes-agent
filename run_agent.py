@@ -209,6 +209,83 @@ class IterationBudget:
             return max(0, self.max_total - self._used)
 
 
+class _CompressionFence:
+    def __init__(self, session_id: str, generation: int):
+        self.session_id = session_id
+        self.generation = generation
+        self.active = True
+
+
+class _CompressionControl:
+    """Per-agent, owner-checked compression cancellation control plane."""
+
+    def __init__(self, agent):
+        self._agent = agent
+        self._lock = threading.Lock()
+        self._fence = None
+        self._cancel = None
+        self._cancelled = False
+
+    def publish(self, generation: int, cancel, *, expected=None):
+        with self._lock:
+            if self._cancelled:
+                return None
+            if expected is not None and self._fence is not expected:
+                return None
+            if expected is not None:
+                expected.active = False
+            fence = _CompressionFence(str(self._agent.session_id or ""), generation)
+            self._fence = fence
+            self._cancel = cancel
+            return fence
+
+    def valid(self, fence, generation: int) -> bool:
+        with self._lock:
+            return bool(
+                not self._cancelled
+                and self._fence is fence
+                and fence.active
+                and fence.generation == generation
+                and fence.session_id == str(self._agent.session_id or "")
+            )
+
+    def is_cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def cancel(self) -> None:
+        callback = None
+        with self._lock:
+            self._cancelled = True
+            if self._fence is not None:
+                self._fence.active = False
+            callback = self._cancel
+        if callback is not None:
+            try:
+                callback()
+            except Exception:
+                pass
+
+    def clear(self, fence, generation: int) -> None:
+        with self._lock:
+            if self._fence is fence and fence.generation == generation:
+                fence.active = False
+                self._fence = None
+                self._cancel = None
+
+    def reset_if_idle(self) -> None:
+        with self._lock:
+            if self._fence is None:
+                self._cancelled = False
+
+    def reset_for_session(self) -> None:
+        self.cancel()
+        with self._lock:
+            self._fence = None
+            self._cancel = None
+            self._cancelled = False
+
+
 # Tools that must never run concurrently (interactive / user-facing).
 # When any of these appear in a batch, we fall back to sequential execution.
 _NEVER_PARALLEL_TOOLS = frozenset({"clarify"})
@@ -623,6 +700,7 @@ class AIAgent:
         self._interrupt_requested = False
         self._interrupt_message = None  # Optional message that triggered interrupt
         self._client_lock = threading.RLock()
+        self._compression_control = _CompressionControl(self)
 
         # Memory-provider finalization is a terminal, at-most-once lifecycle
         # transition. Cleanup can be requested concurrently by independent
@@ -1280,6 +1358,9 @@ class AIAgent:
 
         # Context compressor internal counters (if present)
         if hasattr(self, "context_compressor") and self.context_compressor:
+            control = getattr(self, "_compression_control", None)
+            if control is not None:
+                control.reset_for_session()
             self.context_compressor.invalidate_pending_attempts()
             self.context_compressor.last_prompt_tokens = 0
             self.context_compressor.last_completion_tokens = 0
@@ -1295,6 +1376,16 @@ class AIAgent:
             self.context_compressor.last_summary_failure = None
             self.context_compressor.last_compaction_outcome = "not_attempted"
             self.context_compressor.summary_completion_metadata_available = None
+            self.context_compressor.primary_attempt_status = "unavailable"
+            self.context_compressor.stall_detection_outcome = "unavailable"
+            self.context_compressor.fallback_attempted = False
+            self.context_compressor.fallback_provider = None
+            self.context_compressor.fallback_model = None
+            self.context_compressor.logical_attempt_count = 0
+            self.context_compressor.commit_fence_state = "unavailable"
+            self.context_compressor.compression_cancellation_state = "inactive"
+            self.context_compressor.last_fallback_outcome = "unavailable"
+            self.context_compressor.transcript_outcome = "unchanged"
     
     def switch_model(self, new_model, new_provider, api_key='', base_url='', api_mode=''):
         """Switch the model/provider in-place for a live agent.
@@ -2513,6 +2604,12 @@ class AIAgent:
         """
         self._interrupt_requested = True
         self._interrupt_message = message
+        control = getattr(self, "_compression_control", None)
+        if control is not None:
+            control.cancel()
+        compressor = getattr(self, "context_compressor", None)
+        if compressor is not None:
+            compressor.invalidate_pending_attempts()
         # Signal all tools to abort any in-flight operations immediately
         _set_interrupt(True)
         # Propagate interrupt to any running child agents (subagent delegation)
@@ -2531,6 +2628,9 @@ class AIAgent:
         self._interrupt_requested = False
         self._interrupt_message = None
         _set_interrupt(False)
+        control = getattr(self, "_compression_control", None)
+        if control is not None:
+            control.reset_if_idle()
 
     def _touch_activity(self, desc: str) -> None:
         """Update the last-activity timestamp and description (thread-safe)."""
@@ -6171,9 +6271,13 @@ class AIAgent:
             except Exception:
                 pass
 
+        from agent.auxiliary_client import get_compression_stall_timeout
         compressed = self.context_compressor.compress(
             messages, current_tokens=approx_tokens, manual=manual,
             ownership_check=lambda: self.session_id == _attempt_session_id,
+            fallback_routes=getattr(self, "_fallback_chain", None),
+            attempt_control=getattr(self, "_compression_control", None),
+            stall_timeout=get_compression_stall_timeout(),
         )
 
         # Summary failure, cooldown, reset, or a superseding attempt: preserve

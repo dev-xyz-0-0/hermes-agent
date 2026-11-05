@@ -225,6 +225,20 @@ def render_context_diagnosis(
         f"Last summary failure: {summary_failure}",
         f"Summary cooldown: {'active (' + str(cooldown_remaining) + 's)' if cooldown_remaining else 'inactive'}",
         f"Last compaction outcome: {compaction_outcome}",
+        f"Primary attempt: {getattr(compressor, 'primary_attempt_status', 'unavailable')}",
+        f"Stall detection: {getattr(compressor, 'stall_detection_outcome', 'unavailable')}",
+        f"Fallback attempted: {'yes' if getattr(compressor, 'fallback_attempted', False) else 'no'}",
+        "Fallback route: " + (
+            f"{getattr(compressor, 'fallback_provider', '')}/{getattr(compressor, 'fallback_model', '')}"
+            if getattr(compressor, "fallback_provider", None) and getattr(compressor, "fallback_model", None)
+            else "unavailable"
+        ),
+        f"Logical summary attempts: {getattr(compressor, 'logical_attempt_count', 'unavailable')}",
+        f"Attempt generation: {getattr(compressor, '_attempt_generation', 'unavailable')}",
+        f"Commit fence: {getattr(compressor, 'commit_fence_state', 'unavailable')}",
+        f"Cancellation: {getattr(compressor, 'compression_cancellation_state', 'unavailable')}",
+        f"Last fallback outcome: {getattr(compressor, 'last_fallback_outcome', 'unavailable')}",
+        f"Transcript: {getattr(compressor, 'transcript_outcome', 'unavailable')}",
         "Summary completion metadata: " + (
             "available" if completion_metadata is True else
             "unavailable; truncation cannot be inferred" if completion_metadata is False else

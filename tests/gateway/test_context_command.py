@@ -110,6 +110,89 @@ async def test_commands_discovery_lists_context_and_ctx():
 
 
 @pytest.mark.asyncio
+async def test_manual_compress_rejects_existing_busy_owner():
+    runner = _runner()
+    source = _source()
+    key = build_session_key(source)
+    runner.session_store.get_or_create_session = lambda _source: runner.session_store._entries[key]
+    runner._running_agents[key] = object()
+
+    result = await runner._handle_compress_command(_event("/compress"))
+
+    assert "already active" in result
+
+
+@pytest.mark.asyncio
+async def test_stop_targets_registered_compression_owner():
+    runner = _runner()
+    source = _source()
+    key = build_session_key(source)
+    runner.session_store.get_or_create_session = lambda _source: runner.session_store._entries[key]
+    owner = MagicMock()
+    runner._running_agents[key] = owner
+
+    result = await runner._handle_stop_command(_event("/stop"))
+
+    owner.interrupt.assert_called_once_with("Stop requested")
+    assert "Force-stopped" in result
+    assert key not in runner._running_agents
+
+
+@pytest.mark.asyncio
+async def test_gateway_manual_compress_passes_manual_and_releases_owner(monkeypatch):
+    runner = _runner()
+    source = _source()
+    key = build_session_key(source)
+    entry = runner.session_store._entries[key]
+    history = [
+        {"role": "user" if index % 2 == 0 else "assistant", "content": str(index)}
+        for index in range(6)
+    ]
+    rewritten = []
+    runner.session_store.get_or_create_session = lambda _source: entry
+    runner.session_store.load_transcript = lambda _session_id: list(history)
+    runner.session_store.rewrite_transcript = lambda session_id, messages: rewritten.append((session_id, messages))
+    runner.session_store.update_session = lambda *_args, **_kwargs: None
+    runner.session_store._save = lambda: None
+
+    class FakeAgent:
+        instance = None
+
+        def __init__(self, **kwargs):
+            self.session_id = kwargs["session_id"]
+            self.interrupted = False
+            self.manual = None
+            FakeAgent.instance = self
+
+        def _compress_context(self, messages, _system, *, approx_tokens, manual=False):
+            self.manual = manual
+            return messages[:4], "system"
+
+        def is_interrupted(self):
+            return self.interrupted
+
+        def interrupt(self, _message=None):
+            self.interrupted = True
+
+    monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+    monkeypatch.setattr("gateway.run._resolve_runtime_agent_kwargs", lambda: {"api_key": "test"})
+    monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "model")
+    class InlineLoop:
+        async def run_in_executor(self, _executor, callback):
+            return callback()
+    monkeypatch.setattr("gateway.run.asyncio.get_event_loop", lambda: InlineLoop())
+
+    result = await runner._handle_compress_command(_event("/compress"))
+
+    assert "Compressed" in result
+    assert FakeAgent.instance.manual is True
+    assert key not in runner._running_agents
+    assert rewritten
+
+
+
+
+@pytest.mark.asyncio
 async def test_fresh_chat_does_not_create_a_session():
     runner = _runner(chat_ids=())
     before = dict(runner.session_store._entries)
