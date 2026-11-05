@@ -427,6 +427,28 @@ across all namespaces the process has ever served. `facts`/`active`/
 `superseded`, by contrast, come straight from SQLite and are both durable
 and namespace-scoped.
 
+### Context-overhead attribution
+
+The shared CLI and gateway commands `/context`, `/context all`, and
+`/context diagnose` report the estimated prompt overhead of Holographic
+memory that has already been materialized. Static attribution uses the
+frozen memory boundary in the cached system prompt; dynamic attribution uses
+the fenced recall block already produced for the current turn. Running these
+commands does not call `prefetch()`, search the store, initialize a provider,
+or change retrieval counters.
+
+The displayed state is `available` when a session-owned measurement exists,
+`unavailable` when Hermes cannot safely recover a current boundary, and
+`disabled` when Holographic is not active. An available zero-token dynamic
+measurement means the turn produced no recall block. After a gateway restart,
+static or dynamic attribution can be unavailable because this diagnostic
+metadata is intentionally in-memory and no new persistence schema was
+introduced.
+
+Attribution is an approximate token-overhead measurement, not a stored-fact
+count. Diagnostic output never includes recalled facts, prompt contents,
+credentials, resolved namespaces, or database paths.
+
 ## Backup and Restore
 
 `fact_store {"action": "backup"}` snapshots the live database using

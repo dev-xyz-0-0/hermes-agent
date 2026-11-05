@@ -74,11 +74,103 @@ Hermes has two entry points: start the terminal UI with `hermes`, or run the gat
 | Set a personality | `/personality [name]` | `/personality [name]` |
 | Retry or undo the last turn | `/retry`, `/undo` | `/retry`, `/undo` |
 | Compress context / check usage | `/compress`, `/usage`, `/insights [--days N]` | `/compress`, `/usage`, `/insights [days]` |
+| Inspect current context | `/context`, `/ctx`, `/context all`, `/context diagnose` | Same commands |
 | Browse skills | `/skills` or `/<skill-name>` | `/skills` or `/<skill-name>` |
 | Interrupt current work | `Ctrl+C` or send a new message | `/stop` or send a new message |
 | Platform-specific status | `/platforms` | `/status`, `/sethome` |
 
 For the full command lists, see the [CLI guide](https://hermes-agent.nousresearch.com/docs/user-guide/cli) and the [Messaging Gateway guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging).
+
+## Context diagnostics and reliable compression
+
+The interactive CLI and messaging gateway share read-only context diagnostics. Telegram exposes the canonical `/context` command in its command menu; `/ctx` is accepted as an alias when typed. Other gateway platforms support these commands through the shared command dispatcher where slash commands are available.
+
+| Command | Result |
+|---------|--------|
+| `/context` | Bounded category estimates plus authoritative context occupancy |
+| `/ctx` | Alias for `/context` |
+| `/context all` | Expanded memory, skill, and toolset estimates |
+| `/context diagnose` | Session, measurement, anchor, reset, warning, compression, fallback, cancellation, and memory-attribution state |
+| `/compress` | Manually request transactional context compression |
+
+Example output (values are illustrative and contain no session or memory content):
+
+```text
+Estimated prompt material by category
+■ Base / system: ~8,200 tokens (4.1%)
+▣ Built-in tools: ~12,500 tokens (6.2%)
+◆ Dynamic recall: ~90 tokens (0.0%)
+▨ Conversation: ~31,000 tokens (15.5%)
+
+Authoritative occupancy
+Used: 48,500 / 200,000 tokens (24.2% of window)
+Source: provider_usage
+Compaction pressure: 48.5% (51,500 tokens remaining)
+```
+
+The percentages answer different questions:
+
+- **Context-window utilization** is current occupancy divided by the model's full context window.
+- **Compaction pressure** is current occupancy divided by Hermes's configured compaction threshold. It can reach 100% while unused model-window capacity remains.
+- **Tokens remaining** is headroom before that compaction threshold, not necessarily before the provider's hard context limit.
+
+Category counts are local, bounded estimates derived from already-materialized prompts, tool schemas, transcripts, and memory blocks. They are useful for attribution but may not add up to provider-reported usage. The authoritative occupancy section remains separate and identifies its measurement source:
+
+- `provider_usage` — prompt usage reported for a completed provider request. When tied to an anchor, it describes the exact anchored request boundary.
+- `anchored_estimate` — provider usage from a validated transcript-prefix anchor plus a local estimate for messages appended after that boundary.
+- `local_estimate` — an estimate from the cached system prompt, supplied transcript, and current tool schemas when validated provider usage is unavailable.
+- `unavailable` — Hermes cannot establish a trustworthy current measurement. It does not substitute zero.
+
+Usage anchors include session and model identity, transcript length, and stable prefix fingerprints. A reset, model incompatibility, transcript rewrite, truncation, or compaction invalidates an incompatible anchor. After a gateway restart, a persisted anchor is used only if these checks pass; without a live agent, cached prompt and tool attribution can remain unavailable.
+
+### Holographic memory attribution
+
+When Holographic memory is active, diagnostics can estimate two distinct inputs without performing retrieval:
+
+- **Static memory** comes from a frozen, already-materialized system-prompt boundary.
+- **Dynamic recall** comes from the existing fenced memory block injected into the current turn. Repeated model calls in one tool loop reuse the same measurement instead of accumulating it.
+
+`available` means a session-owned materialized measurement exists; an available zero means recall ran but injected no block. `unavailable` means no safe boundary or current in-memory measurement exists, including after a gateway restart where component boundaries were not persisted. `disabled` means the live agent establishes that Holographic is not enabled. These token estimates measure prompt overhead, not the number of stored facts.
+
+`/context` and `/context diagnose` never initialize memory, search a database, or increment retrieval counters. They render only bounded token estimates and non-sensitive provenance. Recalled facts, prompts, credentials, namespaces, authenticated URLs, and storage paths are not displayed.
+
+### Compression safety and fallback
+
+Compression is transactional: Hermes commits a rewritten transcript only after receiving a valid summary and rechecking session, generation, cancellation, and commit-fence ownership. Authentication, quota, network, timeout, overload, cooldown, unknown, empty-output, and provider-confirmed truncation failures preserve the original transcript. A short but otherwise complete summary is valid.
+
+Terminal summary failures start a session-local 10-minute cooldown. Automatic compression respects it; an explicit `/compress` may bypass it for one logical manual attempt. `/compress` is rejected when another agent already owns that gateway session's busy slot. `/stop` targets the currently published compression attempt, while `/new` and `/reset` invalidate old attempts so late results cannot rewrite a new session.
+
+For auxiliary adapters that report useful streaming progress, an inactivity watchdog resets only on actual model output—not keepalives or empty transport events. A confirmed primary stall can use the first eligible configured fallback route once. This changes only the auxiliary summary route, never the main conversation model. Each logical compression permits at most two summary attempts: the primary plus either one provider-overflow recovery or one stalled-summary fallback, never both. Auxiliary-client parameter recovery or payment fallback may still create more than one physical HTTP request inside a logical attempt.
+
+Buffered Codex and Anthropic auxiliary adapters do not currently expose token-level progress, so Hermes uses their bounded overall request timeout and does not claim progress-aware stall detection for them. `/context diagnose` reports the primary attempt, stall detection, fallback route (provider/model only), logical attempt count, fence/cancellation state, final outcome, and whether the transcript was preserved or committed.
+
+Configure the compression inactivity deadline in `config.yaml`:
+
+```yaml
+auxiliary:
+  compression:
+    stall_timeout: 30
+```
+
+Or override it for the process:
+
+```bash
+HERMES_COMPRESSION_STALL_TIMEOUT=30
+```
+
+Values are seconds. A valid environment value takes precedence over `auxiliary.compression.stall_timeout`; an invalid environment value falls through to configuration. Values below `0.01` are clamped to `0.01`, and there is no separate configured maximum. If neither setting is present, the inactivity deadline is the smaller of 30 seconds and `auxiliary.compression.timeout` (120 seconds by default). The overall provider request timeout remains independent and can end a request before a longer inactivity deadline.
+
+### Troubleshooting context and compression
+
+| Symptom | Expected behavior and checks |
+|---------|------------------------------|
+| `/context` reports unavailable usage | Expected before a measured request, when no live agent exists, or when persisted provenance cannot be validated. Send a normal turn and inspect `Source`; do not interpret unavailable as zero. |
+| High compaction pressure appears after `/new` | First confirm the session shown by `/context diagnose`. A fresh session can genuinely be large because of its system prompt and tool schemas. A queued warning owned by the prior session is dropped rather than delivered as current. |
+| Holographic attribution is unavailable | Expected before recall is materialized or after restart when prompt component boundaries are unavailable. Verify Holographic is enabled and send a normal turn; diagnostics intentionally do not trigger retrieval. |
+| Compression fails or enters cooldown | The transcript is preserved. Use `/context diagnose` for the classified failure and cooldown. Fix provider credentials, quota, or connectivity before retrying; manual `/compress` receives only one cooldown bypass. |
+| Compression fallback is not triggered | Fallback is only for a confirmed progress stall, not ordinary authentication/authorization failures or providers without progress reporting. It also requires an eligible route different from the unhealthy primary and an unused second logical-attempt permit. |
+| `/compress` says another agent is active | The session busy slot already has an owner. Wait for it, use `/stop` if appropriate, then retry; Hermes does not overwrite the active owner. |
+| Diagnosis says a stale warning was dropped | This is expected protection: the warning belonged to a session replaced by `/new` or `/reset` and was rejected before delivery. |
 
 ---
 
