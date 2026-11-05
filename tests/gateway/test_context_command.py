@@ -168,6 +168,7 @@ async def test_gateway_manual_compress_passes_manual_and_releases_owner(monkeypa
             self.manual = manual
             return messages[:4], "system"
 
+        @property
         def is_interrupted(self):
             return self.interrupted
 
@@ -188,6 +189,53 @@ async def test_gateway_manual_compress_passes_manual_and_releases_owner(monkeypa
     assert FakeAgent.instance.manual is True
     assert key not in runner._running_agents
     assert rewritten
+
+
+@pytest.mark.asyncio
+async def test_gateway_manual_compress_failure_preserves_transcript(monkeypatch):
+    runner = _runner()
+    key = build_session_key(_source())
+    entry = runner.session_store._entries[key]
+    history = [
+        {"role": "user" if index % 2 == 0 else "assistant", "content": str(index)}
+        for index in range(6)
+    ]
+    rewritten = []
+    runner.session_store.get_or_create_session = lambda _source: entry
+    runner.session_store.load_transcript = lambda _session_id: list(history)
+    runner.session_store.rewrite_transcript = lambda *args: rewritten.append(args)
+    runner.session_store.update_session = lambda *_args, **_kwargs: None
+
+    class FailedAgent:
+        def __init__(self, **kwargs):
+            self.session_id = kwargs["session_id"]
+            self._interrupted = False
+
+        @property
+        def is_interrupted(self):
+            return self._interrupted
+
+        def interrupt(self, _message=None):
+            self._interrupted = True
+
+        def _compress_context(self, messages, _system, *, approx_tokens, manual=False):
+            assert manual is True
+            return messages, "system"
+
+    class InlineLoop:
+        async def run_in_executor(self, _executor, callback):
+            return callback()
+
+    monkeypatch.setattr("run_agent.AIAgent", FailedAgent)
+    monkeypatch.setattr("gateway.run._resolve_runtime_agent_kwargs", lambda: {"api_key": "test"})
+    monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "model")
+    monkeypatch.setattr("gateway.run.asyncio.get_event_loop", lambda: InlineLoop())
+
+    result = await runner._handle_compress_command(_event("/compress"))
+
+    assert result == "Compression did not complete. Transcript preserved."
+    assert rewritten == []
+    assert key not in runner._running_agents
 
 
 
