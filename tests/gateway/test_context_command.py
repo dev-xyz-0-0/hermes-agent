@@ -210,6 +210,10 @@ async def test_gateway_manual_compress_failure_preserves_transcript(monkeypatch)
         def __init__(self, **kwargs):
             self.session_id = kwargs["session_id"]
             self._interrupted = False
+            self.context_compressor = SimpleNamespace(
+                last_compaction_outcome="summary_failed",
+                last_summary_failure="timeout",
+            )
 
         @property
         def is_interrupted(self):
@@ -233,9 +237,26 @@ async def test_gateway_manual_compress_failure_preserves_transcript(monkeypatch)
 
     result = await runner._handle_compress_command(_event("/compress"))
 
-    assert result == "Compression did not complete. Transcript preserved."
+    assert result == "Compression not committed: summary_failed (timeout). Transcript preserved."
     assert rewritten == []
     assert key not in runner._running_agents
+
+
+def test_manual_compression_abort_message_reports_derived_message_requirement():
+    from gateway.run import GatewayRunner
+
+    compressor = SimpleNamespace(
+        last_compaction_outcome="insufficient_messages",
+        last_summary_failure=None,
+        minimum_messages_to_compress=25,
+    )
+
+    result = GatewayRunner._manual_compression_abort_message(compressor, 18)
+
+    assert result == (
+        "Compression skipped: insufficient conversation history "
+        "(18 messages; at least 25 required). Transcript unchanged."
+    )
 
 
 

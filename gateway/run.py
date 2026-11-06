@@ -5168,6 +5168,31 @@ class GatewayRunner:
             logger.warning("Failed to save tool_progress mode: %s", e)
             return f"{descriptions[new_mode]}\n_(could not save to config: {e})_"
 
+    @staticmethod
+    def _manual_compression_abort_message(compressor, message_count: int) -> str:
+        """Render bounded, non-sensitive feedback for an aborted compression."""
+        outcome = str(getattr(compressor, "last_compaction_outcome", "") or "not_committed")
+        if outcome == "insufficient_messages":
+            required = getattr(compressor, "minimum_messages_to_compress", None)
+            if not isinstance(required, int) or required <= 0:
+                required = message_count + 1
+            return (
+                "Compression skipped: insufficient conversation history "
+                f"({message_count} messages; at least {required} required). Transcript unchanged."
+            )
+        if outcome == "no_compressible_middle":
+            return "Compression skipped: no compressible conversation segment. Transcript unchanged."
+        if outcome == "cancelled":
+            return "Compression cancelled. Transcript preserved."
+
+        failure = str(getattr(compressor, "last_summary_failure", "") or "")
+        safe_failures = {
+            "authentication_or_quota", "context_overflow", "empty_output", "network",
+            "overload", "timeout", "truncated_output", "unknown",
+        }
+        detail = f" ({failure})" if failure in safe_failures else ""
+        return f"Compression not committed: {outcome}{detail}. Transcript preserved."
+
     async def _handle_compress_command(self, event: MessageEvent) -> str:
         """Handle /compress command -- manually compress conversation context."""
         source = event.source
@@ -5232,7 +5257,9 @@ class GatewayRunner:
             # transaction-abort signal.  Do not rewrite the transcript from
             # the gateway's reduced manual-compression view in that case.
             if compressed is msgs:
-                return "Compression did not complete. Transcript preserved."
+                return self._manual_compression_abort_message(
+                    tmp_agent.context_compressor, original_count,
+                )
 
             # _compress_context already calls end_session() on the old session
             # (preserving its full transcript in SQLite) and creates a new

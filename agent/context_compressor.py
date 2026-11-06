@@ -225,6 +225,11 @@ class ContextCompressor:
             self.transcript_outcome = "preserved"
             return generation
 
+    @property
+    def minimum_messages_to_compress(self) -> int:
+        """Minimum provider-visible messages required to retain both boundaries."""
+        return self.protect_first_n + self.protect_last_n + 2
+
     def _claim_recovery(self, attempt: int, *, new_generation: bool) -> Optional[int]:
         """Atomically claim the sole recovery permit."""
         with self._attempt_lock:
@@ -900,13 +905,19 @@ Write only the summary body. Do not include any preamble or prefix."""
         original_messages = messages
         attempt = self._begin_logical_attempt()
         n_messages = len(messages)
-        if n_messages <= self.protect_first_n + self.protect_last_n + 1:
+        if n_messages < self.minimum_messages_to_compress:
             if not self.quiet_mode:
                 logger.warning(
                     "Cannot compress: only %d messages (need > %d)",
                     n_messages,
-                    self.protect_first_n + self.protect_last_n + 1,
+                    self.minimum_messages_to_compress - 1,
                 )
+            self._owned_update(
+                attempt, last_compaction_outcome="insufficient_messages",
+                primary_attempt_status="skipped", stall_detection_outcome="not_attempted",
+                commit_fence_state="unavailable", compression_cancellation_state="inactive",
+                transcript_outcome="preserved",
+            )
             return messages
 
         display_tokens = current_tokens if current_tokens else self.last_prompt_tokens or estimate_messages_tokens_rough(messages)
@@ -926,7 +937,13 @@ Write only the summary body. Do not include any preamble or prefix."""
         compress_end = self._find_tail_cut_by_tokens(messages, compress_start)
 
         if compress_start >= compress_end:
-            return messages
+            self._owned_update(
+                attempt, last_compaction_outcome="no_compressible_middle",
+                primary_attempt_status="skipped", stall_detection_outcome="not_attempted",
+                commit_fence_state="unavailable", compression_cancellation_state="inactive",
+                transcript_outcome="preserved",
+            )
+            return original_messages
 
         turns_to_summarize = messages[compress_start:compress_end]
 
