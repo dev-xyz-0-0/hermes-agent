@@ -106,7 +106,17 @@ class TestCompress:
     def test_too_few_messages_returns_unchanged(self, compressor):
         msgs = self._make_messages(4)  # protect_first=2 + protect_last=2 + 1 = 5 needed
         result = compressor.compress(msgs)
-        assert result == msgs
+        assert result is msgs
+        assert compressor.last_compaction_outcome == "insufficient_messages"
+        assert compressor.primary_attempt_status == "skipped"
+
+    def test_no_compressible_middle_returns_unchanged_with_distinct_outcome(self, compressor):
+        msgs = self._make_messages(compressor.minimum_messages_to_compress)
+        with patch.object(compressor, "_find_tail_cut_by_tokens", return_value=compressor.protect_first_n):
+            result = compressor.compress(msgs)
+        assert result is msgs
+        assert compressor.last_compaction_outcome == "no_compressible_middle"
+        assert compressor.primary_attempt_status == "skipped"
 
     def test_no_provider_preserves_transcript(self, compressor):
         msgs = [{"role": "system", "content": "System prompt"}] + self._make_messages(10)
