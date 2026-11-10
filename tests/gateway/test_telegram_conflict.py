@@ -108,6 +108,7 @@ async def test_polling_conflict_retries_before_fatal(monkeypatch):
 
     assert ok is True
     bot.delete_webhook.assert_awaited_once_with(drop_pending_updates=False)
+    assert updater.start_polling.await_args.kwargs["bootstrap_retries"] == 5
     assert callable(captured["error_callback"])
 
     conflict = type("Conflict", (Exception,), {})
