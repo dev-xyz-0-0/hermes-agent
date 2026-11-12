@@ -77,6 +77,7 @@ class TestApprovalRequiredBlocksLegacyActions:
         assert result["success"] is False
         assert "approval_required" in result["error"]
         assert "draft" in result["error"].lower()
+        assert "blocked-create-skill" in result["error"]
 
     def test_edit_blocked(self):
         skill_manage(action="create", name="to-edit-skill", content=VALID_CONTENT)
@@ -84,6 +85,7 @@ class TestApprovalRequiredBlocksLegacyActions:
         raw = skill_manage(action="edit", name="to-edit-skill", content=VALID_CONTENT)
         result = json.loads(raw)
         assert result["success"] is False
+        assert "to-edit-skill" in result["error"]
 
     def test_patch_blocked(self):
         skill_manage(action="create", name="to-patch-skill", content=VALID_CONTENT)
@@ -101,6 +103,7 @@ class TestApprovalRequiredBlocksLegacyActions:
         )
         result = json.loads(raw)
         assert result["success"] is False
+        assert "to-write-file-skill" in result["error"]
 
     def test_remove_file_blocked(self):
         skill_manage(action="create", name="to-remove-file-skill", content=VALID_CONTENT)
@@ -112,6 +115,7 @@ class TestApprovalRequiredBlocksLegacyActions:
         raw = skill_manage(action="remove_file", name="to-remove-file-skill", file_path="references/a.md")
         result = json.loads(raw)
         assert result["success"] is False
+        assert "to-remove-file-skill" in result["error"]
 
     def test_delete_is_not_gated(self):
         """Removing a skill isn't introducing untrusted content -- delete
@@ -144,6 +148,36 @@ class TestApprovalRequiredBlocksLegacyActions:
         raw = skill_manage(action="drafts_list")
         assert json.loads(raw)["success"] is True
 
+
+class TestApprovalRequiredErrorTarget:
+    """The blocked-action error names the skill it was blocked for, falling
+    back to file_path, then a placeholder, so the message is actionable
+    even when name is omitted."""
+
+    def test_name_appears_in_error(self):
+        skill_manage(action="create", name="to-patch-skill", content=VALID_CONTENT)
+        _set_policy("approval_required")
+        raw = skill_manage(action="patch", name="to-patch-skill", old_string="Body", new_string="New")
+        result = json.loads(raw)
+        assert "to-patch-skill" in result["error"]
+
+    def test_file_path_used_when_name_absent(self):
+        _set_policy("approval_required")
+        raw = skill_manage(
+            action="write_file", name=None,
+            file_path="references/a.md", file_content="x",
+        )
+        result = json.loads(raw)
+        assert "references/a.md" in result["error"]
+
+    def test_placeholder_when_neither_given(self):
+        _set_policy("approval_required")
+        raw = skill_manage(action="write_file", name=None, file_path=None, file_content="x")
+        result = json.loads(raw)
+        assert "<no name/file_path given>" in result["error"]
+
+
+class TestApprovalRequiredBlocksLegacyActionsMisc:
     def test_agent_cannot_change_policy_via_skill_manage(self):
         """No skill_manage action reads or writes skills.creation_policy --
         an agent has no path to disable the policy through ordinary
