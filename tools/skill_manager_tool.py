@@ -762,10 +762,11 @@ def skill_manage(
     if action in _GATED_LEGACY_ACTIONS:
         from agent.skill_paths import get_skill_creation_policy
         if get_skill_creation_policy() == "approval_required":
+            target = name or file_path or "<no name/file_path given>"
             return tool_error(
                 f"skills.creation_policy is 'approval_required' -- action "
-                f"'{action}' is disabled. Use the draft lifecycle instead: "
-                "draft -> validate -> approve -> publish.",
+                f"'{action}' on skill '{target}' is disabled. Use the draft "
+                "lifecycle instead: draft -> validate -> approve -> publish.",
                 success=False,
             )
 
