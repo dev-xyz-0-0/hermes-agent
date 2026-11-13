@@ -317,31 +317,60 @@ intentional deviations in the relevant PR.
 
 ## 10. Database migrations
 
-- [ ] Add internal schema version metadata.
-- [ ] Detect pre-PR2 schema.
-- [ ] Detect pre-PR3 global-unique schema.
-- [ ] Detect current schema.
-- [ ] Make new migrations idempotent.
-- [ ] Preserve FTS triggers and foreign keys during rebuilds.
-- [ ] Validate FK/FTS parity before commit.
-- [ ] Leave original DB usable on migration failure.
-- [ ] Do not silently delete legacy banks or relationships.
-- [ ] Document downgrade behavior.
+- [x] Add internal schema version metadata. (`schema_metadata` table +
+      `CURRENT_SCHEMA_VERSION` in `plugins/memory/holographic/store.py`;
+      versioning scheme documented at the constant's definition.)
+- [x] Detect pre-PR2 schema. (`MemoryStore._detect_schema_generation`.)
+- [x] Detect pre-PR3 global-unique schema. (same method.)
+- [x] Detect current schema. (same method.)
+- [x] Make new migrations idempotent. (`_finalize_schema_version` is a
+      true no-op once the version row matches; `_migrate_drop_global_
+      content_unique` re-checks `_has_unique_on_content_alone()` on every
+      open and is a no-op once it is gone.)
+- [x] Preserve FTS triggers and foreign keys during rebuilds. (triggers
+      and the pre-existing `idx_facts_trust`/`idx_facts_category`/
+      `idx_fact_sources_fact_id`/namespace indexes are explicitly dropped
+      and recreated bound to the new table — see the fix for the
+      RENAME-keeps-old-index/trigger-binding pitfall in
+      `_migrate_drop_global_content_unique`.)
+- [x] Validate FK/FTS parity before commit. (`_validate_facts_rebuild`:
+      `PRAGMA foreign_key_check` plus facts/`facts_fts`/`fact_sources`
+      row-count parity, run before `self._conn.commit()`.)
+- [x] Leave original DB usable on migration failure. (explicit `BEGIN`
+      wraps the whole rebuild — see the fix below for why this was
+      required — so any exception, including a
+      `MigrationValidationError` from the validation gate, rolls back the
+      entire rebuild and leaves the original `facts`/`fact_entities`/
+      `fact_sources` tables and data untouched.)
+- [x] Do not silently delete legacy banks or relationships. (no code path
+      added this phase deletes `memory_banks` or `entity_relationships`
+      rows; the relationships migration only ever creates the table empty
+      on a database that never had it — see the relationship-scope
+      migration tests.)
+- [x] Document downgrade behavior. (docstring on the `schema_metadata`
+      table in `_SCHEMA`: both it and `entity_relationships` are additive
+      and never queried by older code, so older code tolerates them;
+      downgrading a database's *content* back to a pre-PR2/pre-PR3 shape
+      is explicitly not supported or attempted.)
 
 ### Migration tests
 
-- [ ] Fresh DB creates latest schema.
-- [ ] Pre-PR2 fixture migrates.
-- [ ] Pre-PR3 fixture migrates.
-- [ ] Current DB migration is a no-op/idempotent.
-- [ ] Facts and categories survive.
-- [ ] Active/superseded state and revision links survive.
-- [ ] Provenance survives.
-- [ ] FTS search works after migration.
-- [ ] Tombstones survive.
-- [ ] Relationship scope migration is correct.
-- [ ] Injected migration failure preserves the original DB.
-- [ ] Reopen after successful migration remains healthy.
+All in `tests/plugins/memory/test_holographic_migrations.py`, reusing the
+Phase 0 `pre_pr2_db`/`pre_pr3_db`/`current_schema_mixed_status_db` fixtures
+from `tests/plugins/memory/conftest.py`.
+
+- [x] Fresh DB creates latest schema.
+- [x] Pre-PR2 fixture migrates.
+- [x] Pre-PR3 fixture migrates.
+- [x] Current DB migration is a no-op/idempotent.
+- [x] Facts and categories survive.
+- [x] Active/superseded state and revision links survive.
+- [x] Provenance survives.
+- [x] FTS search works after migration.
+- [x] Tombstones survive.
+- [x] Relationship scope migration is correct.
+- [x] Injected migration failure preserves the original DB.
+- [x] Reopen after successful migration remains healthy.
 
 ## 11. Phase 7 — Optional local viewer
 

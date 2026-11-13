@@ -111,6 +111,26 @@ CREATE TABLE IF NOT EXISTS memory_banks (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Phase 10 (demo-reference integration, "Database migrations") — explicit
+-- internal schema-version tracking. See CURRENT_SCHEMA_VERSION below for the
+-- versioning scheme and MemoryStore._detect_schema_generation for how a
+-- database that predates this table entirely (every pre-PR2/pre-PR3
+-- database does, by definition) is still correctly classified.
+--
+-- Downgrade note: this table is purely additive. Older plugin code (any
+-- version before this phase) has no SQL statement anywhere that references
+-- `schema_metadata` — it neither SELECTs, INSERTs, UPDATEs, nor DROPs it —
+-- so reopening a migrated database with OLDER code is safe: the table is
+-- silently ignored, exactly like `entity_relationships` is ignored by code
+-- older than Phase 5. The reverse is NOT supported: this phase's migration
+-- logic does not attempt to convert a current-schema database back into a
+-- pre-PR2/pre-PR3 shape, and no rollback path for that exists or is
+-- planned.
+CREATE TABLE IF NOT EXISTS schema_metadata (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 -- Phase 5 (demo-reference integration) — namespace-scoped entity
 -- relationships. Unlike `fact_entities`/`entities` (which remain shared,
 -- global-ID resources — see _resolve_entity), relationship OWNERSHIP is
@@ -152,6 +172,39 @@ CREATE INDEX IF NOT EXISTS idx_entity_relationships_target ON entity_relationshi
 -- startup via `executescript` — referencing a not-yet-existing column here
 -- would raise before the ALTER TABLE migration ever runs.
 """
+
+# ---------------------------------------------------------------------------
+# Schema versioning (Phase 10 — "Database migrations")
+# ---------------------------------------------------------------------------
+# Versioning scheme: a single monotonically-increasing integer, stored as
+# TEXT in schema_metadata['schema_version']. Bump it by exactly 1 whenever
+# this module's on-disk schema changes in a way future code needs to detect
+# directly (new table/column/constraint that isn't already self-describing
+# via PRAGMA table_info/index_list introspection). "1" is the version as of
+# this phase — the FIRST version this plugin tracks explicitly. Every
+# database that predates this constant's introduction (every pre-PR2,
+# pre-PR3, and "current-as-of-Phase-6" database) simply has no
+# schema_metadata row at all; MemoryStore._detect_schema_generation()
+# disambiguates those by introspecting the actual facts/entity_relationships
+# table shapes (never by trusting the row's absence alone to mean any one
+# specific generation), and _finalize_schema_version() backfills the row
+# once the database is confirmed current.
+CURRENT_SCHEMA_VERSION = "1"
+
+
+class MigrationValidationError(RuntimeError):
+    """Raised when a destructive schema migration fails its pre-commit
+    safety gate (``PRAGMA foreign_key_check`` and/or a facts/FTS row-count
+    parity check).
+
+    Always raised *before* the migration's transaction is committed, and
+    always from inside a ``try`` block whose ``except`` clause calls
+    ``self._conn.rollback()`` — so raising this leaves the on-disk database
+    exactly as it was before the migration attempt started. See
+    ``MemoryStore._migrate_drop_global_content_unique`` and
+    ``MemoryStore._validate_facts_rebuild``.
+    """
+
 
 # Trust adjustment constants
 _HELPFUL_DELTA   =  0.05
@@ -350,7 +403,17 @@ class MemoryStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
         except sqlite3.DatabaseError:
             pass
+        # Classify the on-disk schema BEFORE `executescript(_SCHEMA)` below
+        # creates `facts` et al. for a brand-new database file — otherwise
+        # a fresh database would already look "current" by the time
+        # `_detect_schema_generation()` ran. Purely from introspection
+        # (PRAGMA table_info/index_list), never from the mere presence/
+        # absence of schema_metadata alone. Exposed as an attribute (not
+        # persisted) so tests can assert the detector's classification
+        # directly against the Phase 0 pre_pr2_db/pre_pr3_db fixtures.
+        was_fresh = not self._table_exists("facts")
         self._conn.executescript(_SCHEMA)
+        self._last_detected_schema_generation = "fresh" if was_fresh else self._detect_schema_generation()
         # Migrate: add columns if missing (safe, idempotent, for existing databases).
         # SQLite backfills a DEFAULT value into pre-existing rows on ADD COLUMN,
         # so legacy facts become status='active' automatically — no data rewrite.
@@ -386,12 +449,95 @@ class MemoryStore:
         self._conn.commit()
         self._migrate_drop_global_content_unique()
         self._migrate_entity_relationships()
+        self._finalize_schema_version()
 
     def _table_exists(self, name: str) -> bool:
         row = self._conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
         ).fetchone()
         return row is not None
+
+    def _has_unique_on_content_alone(self) -> bool:
+        """True if `facts` still carries the pre-PR3 global UNIQUE(content)
+        constraint (an implicit index from the old inline column
+        constraint). Shared by `_detect_schema_generation` and
+        `_migrate_drop_global_content_unique` so both use exactly the same
+        test."""
+        for idx in self._conn.execute("PRAGMA index_list(facts)").fetchall():
+            if not idx["unique"]:
+                continue
+            cols = [r["name"] for r in self._conn.execute(f"PRAGMA index_info({idx['name']})").fetchall()]
+            if cols == ["content"]:
+                return True
+        return False
+
+    def _detect_schema_generation(self) -> str:
+        """Classify the on-disk schema purely from introspection.
+
+        Returns one of:
+          - ``"fresh"``    — no `facts` table yet (brand-new database file).
+          - ``"pre_pr2"``  — the oldest shape: global UNIQUE(content) and
+            none of PR2's status/provenance columns yet.
+          - ``"pre_pr3"``  — PR2's status/provenance columns already exist
+            (added by ALTER TABLE, possibly by this very call if `facts`
+            was just classified "pre_pr2" moments ago and the ALTERs below
+            already ran once in a prior open) but the global
+            UNIQUE(content) constraint and `namespace` column are not both
+            resolved yet.
+          - ``"current"``  — neither legacy trait remains: no content-alone
+            unique index, and `namespace` is present.
+
+        Never trusts `schema_metadata` — a real pre-PR2/pre-PR3 database
+        predates that table's existence entirely, so this always
+        introspects `PRAGMA table_info(facts)` / `PRAGMA index_list(facts)`
+        directly, per implementation-plan.md section 7.
+        """
+        if not self._table_exists("facts"):
+            return "fresh"
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(facts)").fetchall()}
+        has_pr2_columns = "status" in columns and "superseded_by" in columns
+        has_namespace = "namespace" in columns
+        unique_on_content_alone = self._has_unique_on_content_alone()
+        if not has_pr2_columns:
+            # A database with the global-unique constraint already gone
+            # but still missing PR2's columns should not exist in practice
+            # (PR2 shipped before PR3), but if it ever did, there is
+            # nothing destructive left to do for it here beyond the
+            # column ALTERs _init_db already runs unconditionally, so it
+            # is reported the same as a true pre-PR2 database.
+            return "pre_pr2"
+        if unique_on_content_alone or not has_namespace:
+            return "pre_pr3"
+        return "current"
+
+    def _finalize_schema_version(self) -> None:
+        """Write schema_metadata['schema_version'] once the database is
+        confirmed current — a true no-op (zero writes) if it already holds
+        CURRENT_SCHEMA_VERSION, which is what keeps re-opening an
+        already-current database from registering as a change on every
+        single startup (see the migration-idempotency test)."""
+        row = self._conn.execute(
+            "SELECT value FROM schema_metadata WHERE key = 'schema_version'"
+        ).fetchone()
+        if row is not None and row[0] == CURRENT_SCHEMA_VERSION:
+            return
+        self._conn.execute(
+            "INSERT INTO schema_metadata (key, value) VALUES ('schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (CURRENT_SCHEMA_VERSION,),
+        )
+        self._conn.commit()
+
+    def get_schema_version(self) -> "str | None":
+        """Public accessor for the tracked schema version (None if this
+        database has never been finalized as current — should not happen
+        for any database opened through this class, since __init__ always
+        calls _finalize_schema_version() before returning)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM schema_metadata WHERE key = 'schema_version'"
+            ).fetchone()
+            return row[0] if row is not None else None
 
     def _migrate_entity_relationships(self) -> None:
         """Defensive, idempotent migration for `entity_relationships`.
@@ -454,6 +600,111 @@ class MemoryStore:
         except sqlite3.OperationalError:
             self._conn.rollback()
 
+    # DDL for the three rebuilt tables, issued as individual `.execute()`
+    # calls (NEVER via `executescript()`) inside `_migrate_drop_global_
+    # content_unique`. `executescript()` forces an implicit COMMIT of any
+    # pending transaction before it runs — which would silently commit the
+    # preceding RENAME/DROP TRIGGER statements out from under the
+    # surrounding try/except, defeating the whole point of wrapping the
+    # rebuild in one rollback-able transaction. Individual `.execute()`
+    # calls (including DDL — SQLite's DDL is fully transactional) do not
+    # have that quirk, so the entire rebuild below commits or rolls back
+    # as one unit. Keep these in sync with the `facts`/`fact_entities`/
+    # `fact_sources` definitions in `_SCHEMA` above.
+    _REBUILD_FACTS_SQL = """
+        CREATE TABLE facts (
+            fact_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            content         TEXT NOT NULL,
+            category        TEXT DEFAULT 'general',
+            tags            TEXT DEFAULT '',
+            trust_score     REAL DEFAULT 0.5,
+            retrieval_count INTEGER DEFAULT 0,
+            helpful_count   INTEGER DEFAULT 0,
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            hrr_vector      BLOB,
+            status          TEXT DEFAULT 'active',
+            superseded_by   INTEGER,
+            source_type     TEXT DEFAULT '',
+            extraction_method TEXT DEFAULT '',
+            confidence      REAL DEFAULT 1.0,
+            namespace       TEXT DEFAULT ''
+        )
+    """
+    _REBUILD_FACT_ENTITIES_SQL = """
+        CREATE TABLE fact_entities (
+            fact_id   INTEGER REFERENCES facts(fact_id),
+            entity_id INTEGER REFERENCES entities(entity_id),
+            PRIMARY KEY (fact_id, entity_id)
+        )
+    """
+    _REBUILD_FACT_SOURCES_SQL = """
+        CREATE TABLE fact_sources (
+            source_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+            fact_id    INTEGER NOT NULL REFERENCES facts(fact_id) ON DELETE CASCADE,
+            via        TEXT DEFAULT '',
+            platform   TEXT DEFAULT '',
+            chat_id    TEXT DEFAULT '',
+            thread_id  TEXT DEFAULT '',
+            session_id TEXT DEFAULT '',
+            author     TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """
+    _REBUILD_FACTS_AI_TRIGGER_SQL = """
+        CREATE TRIGGER facts_ai AFTER INSERT ON facts BEGIN
+            INSERT INTO facts_fts(rowid, content, tags) VALUES (new.fact_id, new.content, new.tags);
+        END
+    """
+    _REBUILD_FACTS_AD_TRIGGER_SQL = """
+        CREATE TRIGGER facts_ad AFTER DELETE ON facts BEGIN
+            INSERT INTO facts_fts(facts_fts, rowid, content, tags) VALUES ('delete', old.fact_id, old.content, old.tags);
+        END
+    """
+    _REBUILD_FACTS_AU_TRIGGER_SQL = """
+        CREATE TRIGGER facts_au AFTER UPDATE ON facts BEGIN
+            INSERT INTO facts_fts(facts_fts, rowid, content, tags) VALUES ('delete', old.fact_id, old.content, old.tags);
+            INSERT INTO facts_fts(rowid, content, tags) VALUES (new.fact_id, new.content, new.tags);
+        END
+    """
+
+    def _validate_facts_rebuild(self, expected_facts: int, expected_fact_sources: int) -> None:
+        """Pre-commit safety gate for the facts-table rebuild.
+
+        Must be called after every INSERT/DROP statement of the rebuild has
+        already executed, but BEFORE `self._conn.commit()`. Raising
+        `MigrationValidationError` here is caught by the caller's `except`
+        clause, which rolls back the ENTIRE rebuild transaction (the
+        RENAMEs, the DROP TRIGGERs, the table recreation, the data copies,
+        and the DROP TABLEs of the renamed originals) — so the on-disk
+        database ends up exactly as it was before
+        `_migrate_drop_global_content_unique` was called. The caller is
+        free to retry on a later open (this whole method is idempotent:
+        the content-alone unique index — the trigger for running any of
+        this — is still present after a rollback, so the next `_init_db`
+        call attempts the rebuild again from scratch).
+        """
+        fk_violations = self._conn.execute("PRAGMA foreign_key_check").fetchall()
+        if fk_violations:
+            raise MigrationValidationError(
+                f"foreign_key_check failed after facts rebuild: {len(fk_violations)} violation(s)"
+            )
+        actual_facts = int(self._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0])
+        if actual_facts != expected_facts:
+            raise MigrationValidationError(
+                f"facts row count changed during rebuild: expected {expected_facts}, got {actual_facts}"
+            )
+        actual_fts = int(self._conn.execute("SELECT COUNT(*) FROM facts_fts_docsize").fetchone()[0])
+        if actual_fts != expected_facts:
+            raise MigrationValidationError(
+                f"facts_fts parity failed after rebuild: {expected_facts} fact(s) but {actual_fts} indexed"
+            )
+        actual_sources = int(self._conn.execute("SELECT COUNT(*) FROM fact_sources").fetchone()[0])
+        if actual_sources != expected_fact_sources:
+            raise MigrationValidationError(
+                f"fact_sources row count changed during rebuild: expected {expected_fact_sources}, got {actual_sources}"
+            )
+
     def _migrate_drop_global_content_unique(self) -> None:
         """One-time rebuild: content must be unique per-namespace, not globally.
 
@@ -468,34 +719,80 @@ class MemoryStore:
         was verified empirically; rebuilding `facts` alone leaves dangling
         FK references that fail on the next insert). Idempotent: a no-op
         once the content-only unique index is gone.
+
+        The whole rebuild — RENAMEs, trigger drop/recreate, data copy, and
+        final DROP TABLEs — runs as a single SQLite transaction, gated by
+        `_validate_facts_rebuild()` (PRAGMA foreign_key_check plus a
+        facts/FTS/fact_sources row-count parity check) immediately before
+        the commit. Any failure there — or any other exception during the
+        rebuild — rolls back the whole transaction via the `except` clause
+        below, leaving the original `facts`/`fact_entities`/`fact_sources`
+        tables (and the pre-existing data in them) completely untouched.
         """
-        unique_on_content_alone = False
-        for idx in self._conn.execute("PRAGMA index_list(facts)").fetchall():
-            if not idx["unique"]:
-                continue
-            cols = [r["name"] for r in self._conn.execute(f"PRAGMA index_info({idx['name']})").fetchall()]
-            if cols == ["content"]:
-                unique_on_content_alone = True
-                break
-        if not unique_on_content_alone:
+        if not self._has_unique_on_content_alone():
             return
 
         fk_was_on = bool(self._conn.execute("PRAGMA foreign_keys").fetchone()[0])
         self._conn.execute("PRAGMA foreign_keys=OFF")
         try:
+            old_facts_count = int(self._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0])
+            old_fact_sources_count = (
+                int(self._conn.execute("SELECT COUNT(*) FROM fact_sources").fetchone()[0])
+                if self._table_exists("fact_sources") else 0
+            )
+
+            # Explicit BEGIN: Python's sqlite3 module only auto-opens an
+            # implicit transaction before DML (INSERT/UPDATE/DELETE/
+            # REPLACE) statements, never before DDL. Without this, each
+            # ALTER/CREATE/DROP statement below would run in SQLite's own
+            # autocommit mode and `self._conn.rollback()` in the `except`
+            # clause would have nothing pending to undo — silently leaving
+            # a partially rebuilt (and, worse, partially EMPTIED) `facts`
+            # table on a validation failure instead of the untouched
+            # original. This BEGIN is what makes the whole block one real,
+            # rollback-able transaction.
+            self._conn.execute("BEGIN")
+
             self._conn.execute("ALTER TABLE facts RENAME TO facts_pre_ns_unique")
             self._conn.execute("ALTER TABLE fact_entities RENAME TO fact_entities_pre_ns_unique")
             self._conn.execute("ALTER TABLE fact_sources RENAME TO fact_sources_pre_ns_unique")
             # RENAME rewrites trigger/FK bodies to point at the renamed table
             # (verified empirically) — same as the FK issue above. Drop the
-            # triggers explicitly so _SCHEMA's CREATE TRIGGER IF NOT EXISTS
-            # below actually (re)creates them bound to the NEW `facts`,
-            # instead of silently no-op'ing against the misbound old name.
+            # triggers explicitly so the recreated ones below actually bind
+            # to the NEW `facts`, instead of silently no-op'ing against the
+            # misbound old name.
             self._conn.execute("DROP TRIGGER IF EXISTS facts_ai")
             self._conn.execute("DROP TRIGGER IF EXISTS facts_ad")
             self._conn.execute("DROP TRIGGER IF EXISTS facts_au")
+            # Same issue as the triggers: RENAME keeps each index's NAME
+            # attached to the renamed-away table, not the new one. Without
+            # dropping them explicitly here, the `CREATE INDEX IF NOT
+            # EXISTS` calls below would silently no-op against the
+            # old table's indexes — and then `DROP TABLE
+            # facts_pre_ns_unique`/`..._fact_sources_pre_ns_unique` further
+            # down would delete those indexes entirely, leaving the NEW
+            # `facts`/`fact_sources` tables with none of them. Verified
+            # empirically.
+            for old_index in (
+                "idx_facts_trust", "idx_facts_category", "idx_fact_sources_fact_id",
+                "idx_facts_namespace", "idx_facts_content_namespace",
+            ):
+                self._conn.execute(f"DROP INDEX IF EXISTS {old_index}")
 
-            self._conn.executescript(_SCHEMA)  # recreates facts/fact_entities/fact_sources/triggers fresh
+            # Recreate facts/fact_entities/fact_sources + FTS triggers via
+            # individual `.execute()` calls — see the class-level
+            # `_REBUILD_*_SQL` docstring above for why NOT `executescript()`.
+            self._conn.execute(self._REBUILD_FACTS_SQL)
+            self._conn.execute(self._REBUILD_FACT_ENTITIES_SQL)
+            self._conn.execute(self._REBUILD_FACT_SOURCES_SQL)
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_trust ON facts(trust_score DESC)")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category)")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_sources_fact_id ON fact_sources(fact_id)")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_namespace ON facts(namespace)")
+            self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_content_namespace ON facts(content, namespace)")
+            self._conn.execute(self._REBUILD_FACTS_AI_TRIGGER_SQL)
+            self._conn.execute(self._REBUILD_FACTS_AD_TRIGGER_SQL)
+            self._conn.execute(self._REBUILD_FACTS_AU_TRIGGER_SQL)
 
             self._conn.execute("""
                 INSERT INTO facts (fact_id, content, category, tags, trust_score,
@@ -517,6 +814,8 @@ class MemoryStore:
             # facts_fts is an external-content FTS5 index over `facts` — the
             # table it pointed at is gone, so resync it from the new one.
             self._conn.execute("INSERT INTO facts_fts(facts_fts) VALUES('rebuild')")
+
+            self._validate_facts_rebuild(old_facts_count, old_fact_sources_count)
             self._conn.commit()
         except Exception:
             self._conn.rollback()
