@@ -27,6 +27,7 @@ from utils import is_truthy_value
 from . import backup as backup_module
 from . import capture, consolidation
 from . import holographic as hrr
+from . import telemetry as telemetry_module
 from .retrieval import FactRetriever
 from .store import MemoryStore, content_hash
 
@@ -574,6 +575,22 @@ class HolographicMemoryProvider(MemoryProvider):
         self._backup_retention = max(0, int(self._config.get("backup_retention", 14)))
         self._metrics: Dict[str, int] = {}
 
+        # Phase 8 (demo-reference integration) — optional, bounded,
+        # content-free retrieval telemetry. Off by default (config table
+        # default is "false" in implementation-plan.md); see telemetry.py's
+        # module docstring for the full schema/privacy rationale.
+        self._retrieval_telemetry = is_truthy_value(self._config.get("retrieval_telemetry"), default=False)
+        self._retrieval_telemetry_retention = telemetry_module.DEFAULT_RETENTION
+        _raw_retention = self._config.get("retrieval_telemetry_retention")
+        if _raw_retention is not None:
+            try:
+                self._retrieval_telemetry_retention = max(1, min(100000, int(_raw_retention)))
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Holographic: invalid retrieval_telemetry_retention %r, falling back to the default.",
+                    _raw_retention,
+                )
+
         self._warned_numpy_degraded = False
         self._hrr_available = hrr._HAS_NUMPY
         self._session_id = ""
@@ -761,6 +778,17 @@ class HolographicMemoryProvider(MemoryProvider):
                 "description": "Keep the N most recent backups per namespace after each manual backup (0 = keep all)",
                 "default": str(self._config.get("backup_retention", 14)),
             },
+            {
+                "key": "retrieval_telemetry",
+                "description": "Record content-free retrieval telemetry (component scores, rank, feedback) for future offline weight-learning evaluation. Never records prompts, fact content, names, chat IDs, raw namespaces, or credentials; observation-only, never adjusts retrieval weights at runtime",
+                "default": str(self._config.get("retrieval_telemetry", "false")).lower(),
+                "choices": ["true", "false"],
+            },
+            {
+                "key": "retrieval_telemetry_retention",
+                "description": "Maximum retrieval_events rows retained (oldest pruned first on each write); only relevant when retrieval_telemetry is enabled",
+                "default": str(self._config.get("retrieval_telemetry_retention", telemetry_module.DEFAULT_RETENTION)),
+            },
         ]
 
     def initialize(self, session_id: str, **kwargs) -> None:
@@ -797,6 +825,8 @@ class HolographicMemoryProvider(MemoryProvider):
             temporal_decay_half_life=temporal_decay,
             hrr_weight=hrr_weight,
             hrr_dim=hrr_dim,
+            telemetry_enabled=self._retrieval_telemetry,
+            telemetry_retention=self._retrieval_telemetry_retention,
         )
         self._session_id = session_id
         self._platform = str(kwargs.get("platform") or "")
@@ -1684,6 +1714,21 @@ class HolographicMemoryProvider(MemoryProvider):
                 int(args["fact_id"]), helpful=helpful, namespace=self._namespace,
             )
             self._metric("feedback_helpful" if helpful else "feedback_unhelpful")
+            # Phase 8 — purely additive: link this feedback to the most
+            # recent pending retrieval-telemetry event for this fact, if
+            # telemetry is enabled. Never changes `result`'s shape/fields
+            # and never raises into the caller — a failure here must not
+            # affect the existing fact_feedback response contract pinned by
+            # the Phase 0 baseline-compat snapshot test.
+            if self._retrieval_telemetry and self._store is not None:
+                try:
+                    event_id = telemetry_module.find_latest_pending_event_id(
+                        self._store, fact_id=int(args["fact_id"]), namespace=self._namespace,
+                    )
+                    if event_id:
+                        telemetry_module.record_feedback(self._store, event_id, helpful)
+                except Exception:
+                    logger.debug("Holographic: failed to link feedback to retrieval telemetry", exc_info=True)
             return json.dumps(result)
         except KeyError as exc:
             self._metric("feedback_errors")

@@ -171,6 +171,42 @@ CREATE INDEX IF NOT EXISTS idx_entity_relationships_target ON entity_relationshi
 -- `namespace` column yet, and this script runs unconditionally on every
 -- startup via `executescript` — referencing a not-yet-existing column here
 -- would raise before the ALTER TABLE migration ever runs.
+
+-- Phase 8 (demo-reference integration, "Retrieval telemetry") — optional,
+-- content-free retrieval-event log. See telemetry.py's module docstring for
+-- the full column-by-column privacy rationale. Summary: every column here
+-- is either an opaque identifier (event_id is a random UUID, never derived
+-- from query text; namespace_digest is the same one-way SHA-1 digest
+-- diagnostics.py's _namespace_digest already uses for standard-output
+-- namespace counts), a bare already-local integer (fact_id — meaningless
+-- outside this one database file and already exposed by every other
+-- fact_store action), a numeric score/multiplier/rank, a nullable boolean
+-- feedback flag, a timestamp, or an algorithm-version string. No prompts,
+-- fact text, entity/person names, chat IDs, raw namespaces, or credentials
+-- are ever written here. Off by default (HolographicMemoryProvider.
+-- _retrieval_telemetry defaults false) and, even when enabled, bounded by a
+-- row-count cap enforced on every insert (see MemoryStore.
+-- prune_retrieval_events / the retrieval_telemetry_retention config key).
+-- Purely additive and optional, like entity_relationships/schema_metadata
+-- above: older code that doesn't know about this table simply never
+-- queries it.
+CREATE TABLE IF NOT EXISTS retrieval_events (
+    event_id            TEXT PRIMARY KEY,
+    namespace_digest    TEXT NOT NULL DEFAULT '',
+    fact_id             INTEGER,
+    fts_score           REAL,
+    jaccard_score       REAL,
+    hrr_score           REAL,
+    temporal_multiplier REAL,
+    trust_multiplier    REAL,
+    final_rank          INTEGER,
+    helpful             INTEGER,
+    algorithm_version   TEXT NOT NULL DEFAULT '1',
+    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_retrieval_events_fact_ns ON retrieval_events(fact_id, namespace_digest);
+CREATE INDEX IF NOT EXISTS idx_retrieval_events_created_at ON retrieval_events(created_at);
 """
 
 # ---------------------------------------------------------------------------
@@ -1778,6 +1814,113 @@ class MemoryStore:
                 )
             self._maybe_commit()
             return cur.rowcount
+
+    # ------------------------------------------------------------------
+    # Retrieval telemetry (Phase 8 — raw storage primitives; see
+    # telemetry.py for the content-free event schema and orchestration).
+    # ------------------------------------------------------------------
+
+    def insert_retrieval_event(
+        self,
+        *,
+        event_id: str,
+        namespace_digest: str,
+        fact_id: int,
+        fts_score: float | None,
+        jaccard_score: float | None,
+        hrr_score: float | None,
+        temporal_multiplier: float | None,
+        trust_multiplier: float | None,
+        final_rank: int,
+        algorithm_version: str,
+    ) -> None:
+        """Insert one content-free retrieval-event row. ``event_id`` is a
+        caller-supplied random UUID (never derived from query text)."""
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO retrieval_events
+                    (event_id, namespace_digest, fact_id, fts_score, jaccard_score,
+                     hrr_score, temporal_multiplier, trust_multiplier, final_rank,
+                     helpful, algorithm_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                """,
+                (
+                    event_id, namespace_digest or "", int(fact_id),
+                    fts_score, jaccard_score, hrr_score,
+                    temporal_multiplier, trust_multiplier, int(final_rank),
+                    algorithm_version,
+                ),
+            )
+            self._maybe_commit()
+
+    def prune_retrieval_events(self, max_rows: int) -> int:
+        """Row-count-cap retention: delete the oldest rows beyond
+        ``max_rows`` (ordered by created_at, then rowid as a tiebreak for
+        same-timestamp inserts). Returns the number of rows deleted.
+
+        Row-count cap chosen over age-based pruning because it gives a
+        deterministic, directly-testable bound ("never more than N rows")
+        regardless of insert rate or wall-clock time, which matters for the
+        retention test (insert > cap, assert <= cap) required by
+        checklist.md section 12.
+        """
+        if max_rows <= 0:
+            return 0
+        with self._lock:
+            total = self._conn.execute("SELECT COUNT(*) FROM retrieval_events").fetchone()[0]
+            overflow = int(total) - int(max_rows)
+            if overflow <= 0:
+                return 0
+            cur = self._conn.execute(
+                """
+                DELETE FROM retrieval_events WHERE rowid IN (
+                    SELECT rowid FROM retrieval_events
+                    ORDER BY created_at ASC, rowid ASC
+                    LIMIT ?
+                )
+                """,
+                (overflow,),
+            )
+            self._maybe_commit()
+            return cur.rowcount
+
+    def set_retrieval_feedback(self, event_id: str, helpful: bool) -> bool:
+        """Set the helpful/unhelpful flag on exactly one event, by its
+        opaque event_id. Returns True iff a row was updated."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE retrieval_events SET helpful = ? WHERE event_id = ?",
+                (1 if helpful else 0, event_id),
+            )
+            self._maybe_commit()
+            return cur.rowcount > 0
+
+    def find_latest_pending_retrieval_event(
+        self, fact_id: int, namespace_digest: str,
+    ) -> str | None:
+        """The most recently recorded event for ``(fact_id, namespace_digest)``
+        that has no feedback yet, or None.
+
+        Used to link an explicit fact_feedback('helpful'/'unhelpful') call to
+        the retrieval event that most plausibly produced it, without ever
+        touching an event that already has feedback recorded (so a second,
+        unrelated feedback call for the same fact doesn't silently overwrite
+        an earlier, already-answered event).
+        """
+        if not self._table_exists("retrieval_events"):
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT event_id FROM retrieval_events
+                WHERE fact_id = ? AND namespace_digest = ? AND helpful IS NULL
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                (int(fact_id), namespace_digest or ""),
+            ).fetchone()
+            return str(row["event_id"]) if row else None
 
     # ------------------------------------------------------------------
     # Utilities

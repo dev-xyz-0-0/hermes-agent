@@ -499,26 +499,75 @@ tests total.
 
 ## 12. Phase 8 — Retrieval telemetry
 
-- [ ] Do not copy demo adaptive-weight heuristic directly.
-- [ ] Define content-free retrieval event schema.
-- [ ] Include component scores, multipliers, rank, feedback, and algorithm
-      version.
-- [ ] Use opaque namespace/fact identifiers.
-- [ ] Exclude prompts, fact text, names, chat IDs, and credentials.
-- [ ] Keep telemetry disabled by default or explicitly opt-in.
-- [ ] Enforce bounded retention.
-- [ ] Keep telemetry profile-scoped.
-- [ ] Do not change weights during an active conversation.
-- [ ] Defer learned-weight rollout to a separate reviewed design.
+- [x] Do not copy demo adaptive-weight heuristic directly. (`telemetry.py`'s
+      module docstring states this explicitly; the module only ever writes
+      events — nothing reads them back to adjust a weight/threshold. See
+      `TestNoWeightMutation` in
+      `tests/plugins/memory/test_holographic_telemetry.py`, which asserts
+      no `FactRetriever` weight attribute name even appears in
+      `telemetry.py`'s source.)
+- [x] Define content-free retrieval event schema. (New `retrieval_events`
+      table in `store.py`'s `_SCHEMA`; full column-by-column rationale in
+      `telemetry.py`'s module docstring.)
+- [x] Include component scores, multipliers, rank, feedback, and algorithm
+      version. (`fts_score`, `jaccard_score`, `hrr_score`,
+      `temporal_multiplier`, `trust_multiplier`, `final_rank` (1-based
+      position in the returned, post-limit list — not raw score),
+      `helpful` (nullable), `algorithm_version`.)
+- [x] Use opaque namespace/fact identifiers. (`namespace_digest` reuses
+      `diagnostics._namespace_digest` verbatim — the same digest already
+      used for standard diagnostic output. `fact_id` is kept as a bare
+      local integer, same as every other `fact_store` action already
+      returns; see telemetry.py's docstring for why that was judged safe
+      rather than also digesting it.)
+- [x] Exclude prompts, fact text, names, chat IDs, and credentials. (No
+      column holds any of these — verified by
+      `TestEventSchemaIsContentFree` in the new test file, which seeds a
+      real secret-shaped/named fact in a real chat namespace and asserts
+      none of it appears in any column of any produced row.)
+- [x] Keep telemetry disabled by default or explicitly opt-in.
+      (`retrieval_telemetry` config key defaults `"false"`, matching the
+      plan's config table; `FactRetriever.telemetry_enabled` defaults
+      `False` too.)
+- [x] Enforce bounded retention. (Row-count cap, enforced on every insert
+      via `MemoryStore.prune_retrieval_events` — oldest rows deleted first
+      by `created_at`/rowid. Configurable via `retrieval_telemetry_retention`
+      (clamped 1-100000, default `telemetry.DEFAULT_RETENTION` = 1000).
+      Row-count chosen over age-based pruning for a deterministic,
+      directly-testable bound independent of wall-clock time — see
+      `prune_retrieval_events`'s docstring.)
+- [x] Keep telemetry profile-scoped. (Lives in the same per-profile SQLite
+      file as every other table here — `store.py`'s `_SCHEMA` — never a
+      separate global store. See `TestProfileIsolation`.)
+- [x] Do not change weights during an active conversation. (Phase 8 is
+      observation-only: no code path anywhere in this phase reads
+      `retrieval_events` back into a scoring weight/threshold constant. See
+      `TestNoWeightMutation`.)
+- [x] Defer learned-weight rollout to a separate reviewed design.
+      (`telemetry.py`'s module docstring points at implementation-plan.md
+      section 14, "Deferred Follow-ups" — "Offline learned retrieval-weight
+      recommendations" — as the explicit follow-up this phase does not
+      implement.)
 
 ### Telemetry tests
 
-- [ ] Event schema contains no content or raw identity.
-- [ ] Retention bound is enforced.
-- [ ] Profiles remain isolated.
-- [ ] Disabled telemetry writes nothing.
-- [ ] Helpful/unhelpful feedback links to the correct opaque event.
-- [ ] Telemetry failures do not break retrieval.
+All in `tests/plugins/memory/test_holographic_telemetry.py` (16 tests).
+
+- [x] Event schema contains no content or raw identity.
+      (`TestEventSchemaIsContentFree`.)
+- [x] Retention bound is enforced. (`TestRetentionBound`.)
+- [x] Profiles remain isolated. (`TestProfileIsolation`.)
+- [x] Disabled telemetry writes nothing. (`TestDisabledByDefault`.)
+- [x] Helpful/unhelpful feedback links to the correct opaque event.
+      (`TestFeedbackLinking` — includes a case with two pending events for
+      different facts, and a case with two events for the SAME fact where
+      the first is already answered, confirming the already-answered one
+      is never silently overwritten.)
+- [x] Telemetry failures do not break retrieval.
+      (`TestTelemetryFailuresNeverBreakRetrieval` — monkeypatches
+      `telemetry.record_retrieval_event` to always raise and confirms
+      `search()`/`probe()` still return the correct, unaffected result with
+      no exception propagating.)
 
 ## 13. Documentation
 

@@ -40,6 +40,27 @@ _PRODUCTION_HOME = Path("/home/ubuntu/.hermes")
 _PRODUCTION_DB = _PRODUCTION_HOME / "memory_store.db"
 
 
+def _resolve_production_db_if_accessible() -> "Path | None":
+    """Best-effort resolve of the literal production DB path.
+
+    `Path.exists()`/`.resolve()` only swallow `FileNotFoundError`/
+    `NotADirectoryError` internally (Python 3.11+) -- not `PermissionError`.
+    On some CI runners an ancestor directory of `/home/ubuntu/.hermes` exists
+    but isn't stat-able by the job's user, so this filesystem check itself
+    can raise `PermissionError`. Treat that as "can't tell" (and therefore
+    not a match) rather than letting it crash the test: if we have no access
+    to the path, we can't be writing to it either. The literal string
+    comparison against `_PRODUCTION_DB` (done separately, with no filesystem
+    access) still always fires regardless of this.
+    """
+    try:
+        if _PRODUCTION_DB.exists():
+            return _PRODUCTION_DB.resolve()
+    except OSError:
+        pass
+    return None
+
+
 def _assert_safe_db_path(db_path: "str | Path", tmp_path: Path) -> Path:
     """Fail the test outright if `db_path` is not safely inside tmp_path.
 
@@ -48,7 +69,11 @@ def _assert_safe_db_path(db_path: "str | Path", tmp_path: Path) -> Path:
     """
     resolved = Path(db_path).expanduser().resolve()
     tmp_resolved = tmp_path.resolve()
-    assert resolved != _PRODUCTION_DB.resolve() if _PRODUCTION_DB.exists() else True, (
+    assert str(resolved) != str(_PRODUCTION_DB), (
+        f"Refusing to use the literal production database path string: {resolved}"
+    )
+    _prod_resolved = _resolve_production_db_if_accessible()
+    assert _prod_resolved is None or resolved != _prod_resolved, (
         f"Refusing to use production database path: {resolved}"
     )
     assert str(resolved).startswith(str(tmp_resolved) + os.sep) or resolved == tmp_resolved, (
@@ -75,10 +100,11 @@ def _forbid_production_db(monkeypatch):
     def _guarded_connect(database, *args, **kwargs):
         if isinstance(database, (str, Path)) and str(database) not in (":memory:",):
             resolved = Path(database).expanduser().resolve()
-            if resolved == _PRODUCTION_DB.resolve() if _PRODUCTION_DB.exists() else False:
-                raise AssertionError(f"BLOCKED: attempted to open production database {resolved}")
             if str(resolved) == str(_PRODUCTION_DB):
                 raise AssertionError(f"BLOCKED: attempted to open production database path {resolved}")
+            _prod_resolved = _resolve_production_db_if_accessible()
+            if _prod_resolved is not None and resolved == _prod_resolved:
+                raise AssertionError(f"BLOCKED: attempted to open production database {resolved}")
         return real_connect(database, *args, **kwargs)
 
     monkeypatch.setattr(sqlite3, "connect", _guarded_connect)
@@ -620,7 +646,9 @@ class TestT12ProductionIsolation:
         _init(provider, tmp_path)
         resolved = Path(provider._store.db_path).resolve()
         assert str(resolved).startswith(str(tmp_path.resolve()))
-        assert resolved != _PRODUCTION_DB.resolve() if _PRODUCTION_DB.exists() else True
+        assert str(resolved) != str(_PRODUCTION_DB)
+        _prod_resolved = _resolve_production_db_if_accessible()
+        assert _prod_resolved is None or resolved != _prod_resolved
         assert "ubuntu" not in str(resolved)
         provider.shutdown()
 

@@ -62,6 +62,27 @@ _PRODUCTION_HOME = Path("/home/ubuntu/.hermes")
 _PRODUCTION_DB = _PRODUCTION_HOME / "memory_store.db"
 
 
+def _resolve_production_db_if_accessible() -> "Path | None":
+    """Best-effort resolve of the literal production DB path.
+
+    `Path.exists()`/`.resolve()` only swallow `FileNotFoundError`/
+    `NotADirectoryError` internally (Python 3.11+) -- not `PermissionError`.
+    On some CI runners an ancestor directory of `/home/ubuntu/.hermes` exists
+    but isn't stat-able by the job's user, so this filesystem check itself
+    can raise `PermissionError`. Treat that as "can't tell" (and therefore
+    not a match) rather than letting it crash the test: if we have no access
+    to the path, we can't be writing to it either. The literal string
+    comparison against `_PRODUCTION_DB` (done separately, with no filesystem
+    access) still always fires regardless of this.
+    """
+    try:
+        if _PRODUCTION_DB.exists():
+            return _PRODUCTION_DB.resolve()
+    except OSError:
+        pass
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Database safety guard (Step 2E)
 # ---------------------------------------------------------------------------
@@ -74,16 +95,23 @@ def _assert_safe_db_path(db_path: "str | Path", tmp_path: Path) -> Path:
     safe-looking path cannot redirect writes to production.
     """
     raw = Path(db_path).expanduser()
+    # Literal string check first, with no filesystem access at all, so a
+    # test that deliberately passes the production path string is caught
+    # even if `is_symlink()`/`resolve()` on that exact path would themselves
+    # raise PermissionError (an unreadable ancestor directory).
+    assert str(raw) != str(_PRODUCTION_DB), (
+        f"Refusing to use the literal production database path string: {raw}"
+    )
     assert not raw.is_symlink(), f"Refusing a symlinked database path: {raw}"
 
     resolved = raw.resolve()
     assert str(resolved) != str(_PRODUCTION_DB), (
         f"Refusing to use the literal production database path string: {resolved}"
     )
-    if _PRODUCTION_DB.exists():
-        assert resolved != _PRODUCTION_DB.resolve(), (
-            f"Refusing to use production database path: {resolved}"
-        )
+    _prod_resolved = _resolve_production_db_if_accessible()
+    assert _prod_resolved is None or resolved != _prod_resolved, (
+        f"Refusing to use production database path: {resolved}"
+    )
 
     tmp_resolved = tmp_path.resolve()
     assert resolved.is_relative_to(tmp_resolved), (

@@ -23,9 +23,11 @@ _ACTIVE_CLAUSE = "status != 'superseded'"
 
 try:
     from . import holographic as hrr
+    from . import telemetry as _telemetry
     from .store import bank_name as _bank_name
 except ImportError:
     import holographic as hrr  # type: ignore[no-redef]
+    import telemetry as _telemetry  # type: ignore[no-redef]
     from store import bank_name as _bank_name  # type: ignore[no-redef]
 
 
@@ -40,10 +42,18 @@ class FactRetriever:
         jaccard_weight: float = 0.3,
         hrr_weight: float = 0.3,
         hrr_dim: int = 1024,
+        telemetry_enabled: bool = False,
+        telemetry_retention: int = _telemetry.DEFAULT_RETENTION,
     ):
         self.store = store
         self.half_life = temporal_decay_half_life
         self.hrr_dim = hrr_dim
+        # Phase 8 — optional, bounded, content-free retrieval telemetry.
+        # Off by default; see telemetry.py's module docstring for the full
+        # schema/privacy rationale and FactRetriever._record_telemetry for
+        # the failure-swallowing guarantee.
+        self.telemetry_enabled = telemetry_enabled
+        self.telemetry_retention = telemetry_retention
 
         # Auto-redistribute weights if numpy unavailable
         if hrr_weight > 0 and not hrr._HAS_NUMPY:
@@ -86,6 +96,10 @@ class FactRetriever:
         # Stage 2: Rerank with Jaccard + trust + optional decay
         query_tokens = self._tokenize(query)
         scored = []
+        # Phase 8 telemetry: per-fact component breakdown, keyed by fact_id,
+        # captured here (where every component is actually computed) rather
+        # than reconstructed later from the combined `score`.
+        telemetry_components: dict[int, dict] = {}
 
         for fact in candidates:
             content_tokens = self._tokenize(fact["content"])
@@ -108,14 +122,24 @@ class FactRetriever:
                         + self.jaccard_weight * jaccard
                         + self.hrr_weight * hrr_sim)
 
+            trust_multiplier = fact["trust_score"]
             # Trust weighting
-            score = relevance * fact["trust_score"]
+            score = relevance * trust_multiplier
 
             # Optional temporal decay
+            temporal_multiplier = 1.0
             if self.half_life > 0:
-                score *= self._temporal_decay(fact.get("updated_at") or fact.get("created_at"))
+                temporal_multiplier = self._temporal_decay(fact.get("updated_at") or fact.get("created_at"))
+                score *= temporal_multiplier
 
             fact["score"] = score
+            telemetry_components[fact["fact_id"]] = {
+                "fts_score": fts_score,
+                "jaccard_score": jaccard,
+                "hrr_score": hrr_sim,
+                "temporal_multiplier": temporal_multiplier,
+                "trust_multiplier": trust_multiplier,
+            }
             scored.append(fact)
 
         # Sort by score descending, return top limit
@@ -147,7 +171,34 @@ class FactRetriever:
         # Strip raw HRR bytes — callers expect JSON-serializable dicts
         for fact in results:
             fact.pop("hrr_vector", None)
+
+        # Phase 8 telemetry: best-effort, observation-only, never allowed to
+        # affect what this call returns — see telemetry.py's module
+        # docstring and _record_telemetry below.
+        if self.telemetry_enabled and results:
+            self._record_telemetry(results, telemetry_components, namespace)
+
         return results
+
+    def _record_telemetry(self, results: list[dict], components: dict, namespace: str | None) -> None:
+        """Write retrieval telemetry for `results`, swallowing any failure.
+
+        Called only after `results` is fully computed and already safe to
+        return, so a telemetry write failure (DB locked, disk full, a bug in
+        telemetry.py, anything) can never change or block the caller's
+        result. This is the one enforcement point for that guarantee —
+        every call site just needs `telemetry_enabled` to gate it.
+        """
+        try:
+            _telemetry.record_retrieval_event(
+                self.store,
+                namespace=namespace or "",
+                results=results,
+                components=components,
+                retention=self.telemetry_retention,
+            )
+        except Exception:
+            logger.debug("Holographic retrieval telemetry write failed", exc_info=True)
 
     def probe(
         self,

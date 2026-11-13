@@ -78,6 +78,8 @@ class TestProviderConfigDefaults:
             "backup_enabled", "backup_retention",
             # Phase 3 (demo-reference integration) — fuzzy consolidation evidence gate.
             "fuzzy_dedup_enabled", "fuzzy_dedup_threshold",
+            # Phase 8 (demo-reference integration) — retrieval telemetry.
+            "retrieval_telemetry", "retrieval_telemetry_retention",
         }
         assert keys == expected
 
