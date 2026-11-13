@@ -5180,6 +5180,30 @@ For more help on a command:
     )
     memory_verify.add_argument("--json", action="store_true", help="Emit machine-parsable JSON only")
     memory_verify.add_argument("--backup-path", dest="backup_path", default=None, help="Run health diagnostics against this backup database (and verify its checksum/integrity)")
+    memory_restore = memory_sub.add_parser(
+        "restore",
+        help="Restore the live Holographic DB from a native backup (DESTRUCTIVE; dry-run by default)",
+        description=(
+            "Restores a native Holographic memory-*.db backup (with its .json sidecar) onto\n"
+            "the active profile's live database. Full-DB replace, not a merge. Dry-run (the\n"
+            "default) performs zero writes: it verifies the backup, diagnoses the backup DB\n"
+            "and the live DB independently, and reports a facts/active/memory_banks diff plus\n"
+            "whether --apply would be allowed. --apply re-verifies everything, takes a safety\n"
+            "copy of the current live DB first (never deleted by this command), sweeps any\n"
+            "facts tombstoned on the live DB since the backup was taken (so a forgotten fact\n"
+            "is never silently reactivated), and reports post-restore health. Never exposed\n"
+            "to the model/fact_store tool — operator CLI only."
+        ),
+    )
+    memory_restore.add_argument("--from", dest="backup_from", required=True,
+                                 help="Path to the native backup .db file (its .json sidecar must sit alongside it)")
+    memory_restore.add_argument("--dry-run", dest="dry_run", action="store_true", default=True,
+                                 help="Report the restore plan/diff/gates without writing (default)")
+    memory_restore.add_argument("--apply", dest="dry_run", action="store_false",
+                                 help="Actually restore (destructive; takes a safety copy first)")
+    memory_restore.add_argument("--allow-backup-warnings", action="store_true", default=False,
+                                 help="Allow --apply when the backup's health has warnings (not errors) — errors always block")
+    memory_restore.add_argument("--json", action="store_true", help="Emit machine-parsable JSON only")
     memory_viewer = memory_sub.add_parser(
         "viewer",
         help="Start the optional, read-only, loopback-only Holographic memory diagnostic viewer",

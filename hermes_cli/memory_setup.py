@@ -533,6 +533,8 @@ def memory_command(args) -> None:
         cmd_backfill_relationships(args)
     elif sub == "verify":
         cmd_verify(args)
+    elif sub == "restore":
+        cmd_restore(args)
     elif sub == "viewer":
         cmd_viewer(args)
     else:
@@ -804,6 +806,88 @@ def cmd_backfill_relationships(args) -> None:
     _sys.exit(result.exit_code)
 
 
+def cmd_restore(args) -> None:
+    """`hermes memory restore --from PATH [--dry-run|--apply] [--allow-backup-warnings]`.
+
+    DESTRUCTIVE in --apply mode: replaces the active profile's live
+    Holographic database with a native backup. Dry-run (the default)
+    performs zero writes — see maintenance.restore()'s docstring for the
+    full dry-run/apply contract. Never exposed to fact_store/the model.
+    """
+    import json as _json
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    from plugins.memory.holographic import maintenance as _maintenance
+
+    db_path = _holographic_db_path()
+    as_json = bool(getattr(args, "json", False))
+    dry_run = bool(getattr(args, "dry_run", True))
+    allow_backup_warnings = bool(getattr(args, "allow_backup_warnings", False))
+    backup_from = _Path(getattr(args, "backup_from"))
+
+    _print_maintenance_target(db_path, as_json=as_json, apply=not dry_run)
+
+    try:
+        result = _maintenance.restore(
+            db_path,
+            backup_path=backup_from,
+            hermes_home=get_hermes_home(),
+            dry_run=dry_run,
+            allow_backup_warnings=allow_backup_warnings,
+        )
+    except _maintenance.MaintenanceLockError as exc:
+        if as_json:
+            print(_json.dumps({"ok": False, "error": str(exc)}))
+        else:
+            print(f"\n  {exc}\n")
+        _sys.exit(_maintenance.EXIT_LOCKED)
+
+    _emit_restore_result(result, as_json=as_json)
+    _sys.exit(result.exit_code)
+
+
+def _emit_restore_result(result, *, as_json: bool) -> None:
+    import json as _json
+
+    if as_json:
+        print(_json.dumps(result.to_dict(), indent=2))
+        return
+
+    print(f"  Operation: restore  ({'dry-run' if result.dry_run else 'applied'})")
+    print(f"  From:      {result.from_path}")
+    print(f"  Target:    {result.db_path}")
+    print(f"  Status:    {'OK' if result.ok else 'FAILED/BLOCKED'}")
+    if result.backup_verify is not None:
+        print(f"  Backup verify: {'ok' if result.backup_verify['ok'] else result.backup_verify.get('reason', 'failed')}")
+
+    if result.dry_run:
+        if result.diff:
+            print("\n  Diff (backup vs live):")
+            for key, d in result.diff.items():
+                print(f"    {key}: backup={d['backup']} live={d['live']} delta={d['delta']}")
+        print(f"\n  Tombstones on live DB: {result.tombstones_live_count}")
+        print(f"  Apply allowed: {result.gates.get('apply_allowed')}")
+        for reason in result.gates.get("block_reasons", []):
+            print(f"    blocked: {reason}")
+        print("\n  No changes made. Re-run with --apply to restore.\n")
+    else:
+        if result.safety_copy_path:
+            print(f"  Safety copy: {result.safety_copy_path}")
+        print(f"  Tombstoned facts not reactivated: {result.reactivated_blocked}")
+        if result.post_health is not None:
+            print(f"  Post-restore health exit code: {result.post_health['exit_code']}")
+        for reason in result.gates.get("block_reasons", []):
+            print(f"    blocked: {reason}")
+        print()
+
+    if result.issues:
+        print("  Issues:")
+        for issue in result.issues:
+            print(f"    {issue}")
+        print()
+
+
 def _emit_maintenance_result(result, *, as_json: bool) -> None:
     import json as _json
 
@@ -846,7 +930,10 @@ def cmd_verify(args) -> None:
 
         print(f"\n  Holographic memory verify ({display_hermes_home()})")
         print("  " + "─" * 40)
-        print(f"  Database: {db_path}")
+        print(f"  Target:   {report.target}")
+        print(f"  Database: {report.db_path}")
+        if report.live_db_path:
+            print(f"  (live database: {report.live_db_path})")
         print(f"  Status:   {'OK' if report.ok else 'ISSUES FOUND'}")
         for key, value in report.counts.items():
             print(f"  {key}: {value}")
