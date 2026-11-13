@@ -5146,7 +5146,7 @@ For more help on a command:
         "health", help="Read-only Holographic memory health diagnostics (never mutates the database)",
     )
     memory_health.add_argument("--json", action="store_true", help="Emit machine-parsable JSON only")
-    memory_health.add_argument("--backup-path", dest="backup_path", default=None, help="Also verify this backup file's checksum/integrity")
+    memory_health.add_argument("--backup-path", dest="backup_path", default=None, help="Run health diagnostics against this backup database (and verify its checksum/integrity)")
     memory_benchmark = memory_sub.add_parser(
         "benchmark", help="Read-only Holographic memory retrieval benchmark against a gold set",
     )
@@ -5179,7 +5179,7 @@ For more help on a command:
         "verify", help="Read-only Holographic memory verification (alias for `health`)",
     )
     memory_verify.add_argument("--json", action="store_true", help="Emit machine-parsable JSON only")
-    memory_verify.add_argument("--backup-path", dest="backup_path", default=None, help="Also verify this backup file's checksum/integrity")
+    memory_verify.add_argument("--backup-path", dest="backup_path", default=None, help="Run health diagnostics against this backup database (and verify its checksum/integrity)")
     memory_viewer = memory_sub.add_parser(
         "viewer",
         help="Start the optional, read-only, loopback-only Holographic memory diagnostic viewer",

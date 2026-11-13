@@ -583,7 +583,10 @@ def cmd_health(args) -> None:
 
         print(f"\n  Holographic memory health ({display_hermes_home()})")
         print("  " + "─" * 40)
-        print(f"  Database: {db_path}")
+        print(f"  Target:   {report.target}")
+        print(f"  Database: {report.db_path}")
+        if report.live_db_path:
+            print(f"  (live database: {report.live_db_path})")
         print(f"  Status:   {'OK' if report.ok else 'ISSUES FOUND'}")
         for key, value in report.counts.items():
             print(f"  {key}: {value}")

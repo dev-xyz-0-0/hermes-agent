@@ -319,6 +319,57 @@ class TestBackupVerification:
         assert diagnostics.CODE_BACKUP_INVALID in codes
         assert report.backup["ok"] is False
 
+    def test_backup_path_diagnostics_use_backup_db_not_live(self, tmp_path):
+        live = tmp_path / "live.sqlite"
+        store = MemoryStore(db_path=live, hrr_dim=32)
+        store.add_fact("live only fact", category="general", namespace="")
+        store.close()
+
+        # Stale backup snapshot with its own bank-count mismatch that does
+        # not exist on live.
+        stale = tmp_path / "stale.sqlite"
+        s2 = MemoryStore(db_path=stale, hrr_dim=32)
+        s2.add_fact("stale fact", category="project", namespace="")
+        s2._conn.execute("UPDATE memory_banks SET fact_count = fact_count + 5")
+        s2._conn.commit()
+        s2.close()
+
+        info = backup_module.create_backup(str(stale), str(tmp_path / "backups"))
+
+        report = diagnostics.run_diagnostics(live, backup_path=info.path)
+
+        assert report.backup == {"ok": True, "reason": ""}
+        # Counts/issues must reflect the backup (stale), not live.
+        assert report.counts["facts"] == 1
+        codes = {i.code for i in report.issues}
+        assert diagnostics.CODE_BANK_COUNT_MISMATCH in codes
+
+        # Live itself is clean when diagnosed alone.
+        live_report = diagnostics.run_diagnostics(live)
+        assert diagnostics.CODE_BANK_COUNT_MISMATCH not in {i.code for i in live_report.issues}
+
+    def test_backup_path_live_unaffected_by_backup_diagnosis(self, tmp_path):
+        """A dirty live DB stays dirty, and a clean backup can report clean,
+        independently of each other — proves counts/issues are not mixed."""
+        live = tmp_path / "live.sqlite"
+        store = MemoryStore(db_path=live, hrr_dim=32)
+        store.add_fact("live fact", category="general", namespace="")
+        store._conn.execute("UPDATE memory_banks SET fact_count = fact_count + 5")
+        store._conn.commit()
+        store.close()
+
+        clean_backup_source = tmp_path / "clean.sqlite"
+        s2 = MemoryStore(db_path=clean_backup_source, hrr_dim=32)
+        s2.add_fact("clean fact", category="general", namespace="")
+        s2.close()
+        info = backup_module.create_backup(str(clean_backup_source), str(tmp_path / "backups2"))
+
+        backup_report = diagnostics.run_diagnostics(live, backup_path=info.path)
+        assert diagnostics.CODE_BANK_COUNT_MISMATCH not in {i.code for i in backup_report.issues}
+
+        live_report = diagnostics.run_diagnostics(live)
+        assert diagnostics.CODE_BANK_COUNT_MISMATCH in {i.code for i in live_report.issues}
+
 
 class TestNamespaceRedaction:
     def test_standard_output_never_shows_raw_namespace_or_content(self, tmp_path):

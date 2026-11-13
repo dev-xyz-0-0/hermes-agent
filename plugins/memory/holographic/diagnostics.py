@@ -99,6 +99,9 @@ class DiagnosticReport:
     backup: "dict[str, Any] | None" = None
     algorithm_version: str = ALGORITHM_VERSION
     schema_version: str = SCHEMA_VERSION
+    target: str = "live"
+    db_path: "str | None" = None
+    live_db_path: "str | None" = None
 
     @property
     def exit_code(self) -> int:
@@ -114,6 +117,9 @@ class DiagnosticReport:
             "algorithm_version": self.algorithm_version,
             "schema_version": self.schema_version,
             "exit_code": self.exit_code,
+            "target": self.target,
+            "db_path": self.db_path,
+            "live_db_path": self.live_db_path,
             "issues": [i.to_dict() for i in self.issues],
             "counts": self.counts,
             "namespaces": self.namespaces,
@@ -405,20 +411,53 @@ def run_diagnostics(
     *,
     backup_path: "str | Path | None" = None,
 ) -> DiagnosticReport:
-    """Run every read-only health check against ``db_path``.
+    """Run every read-only health check against ``db_path`` — or, when
+    ``backup_path`` is given, against the backup file itself.
 
-    Opens the database with SQLite's ``mode=ro`` URI flag — the single
-    strongest guarantee available that this function cannot write to the
-    database, independent of any bug in the checks below.
+    When ``backup_path`` is set, this diagnoses **that backup file**, not
+    ``db_path``: the backup's own checksum/integrity is verified first (via
+    ``backup.verify_backup``), and if that passes, every check below (and
+    every count) runs against the backup, never mixing in the live DB's
+    state. ``db_path`` is only used to report ``live_db_path`` for context.
+    If verification fails, diagnostics stop there — the (unverified) backup
+    file is never opened for further checks, so a corrupt backup can't
+    produce a misleadingly clean report.
+
+    Opens the diagnosed database with SQLite's ``mode=ro`` URI flag — the
+    single strongest guarantee available that this function cannot write to
+    the database, independent of any bug in the checks below.
     """
-    db_path = Path(db_path)
-    if not db_path.exists():
+    live_db_path = Path(db_path)
+    target = "live"
+    diagnose_path = live_db_path
+    backup_result = None
+
+    if backup_path is not None:
+        target = "backup"
+        diagnose_path = Path(backup_path)
+        verify = backup_module.verify_backup(str(diagnose_path))
+        backup_result = {"ok": verify.ok, "reason": verify.reason}
+        if not verify.ok:
+            return DiagnosticReport(
+                ok=False,
+                issues=[DiagnosticIssue(CODE_BACKUP_INVALID, "error", f"backup invalid: {verify.reason}")],
+                backup=backup_result,
+                target=target,
+                db_path=str(diagnose_path),
+                live_db_path=str(live_db_path),
+            )
+
+    if not diagnose_path.exists():
         return DiagnosticReport(
             ok=False,
-            issues=[DiagnosticIssue(CODE_DATABASE_NOT_FOUND, "error", f"database not found: {db_path}")],
+            issues=[DiagnosticIssue(CODE_DATABASE_NOT_FOUND, "error", f"database not found: {diagnose_path}")],
+            backup=backup_result,
+            target=target,
+            db_path=str(diagnose_path),
+            live_db_path=str(live_db_path) if target == "backup" else None,
         )
 
-    uri = f"file:{db_path}?mode=ro"
+    uri = f"file:{diagnose_path}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     try:
         conn.row_factory = sqlite3.Row
@@ -449,14 +488,14 @@ def run_diagnostics(
     finally:
         conn.close()
 
-    backup_result = None
-    if backup_path is not None:
-        verify = backup_module.verify_backup(str(backup_path))
-        backup_result = {"ok": verify.ok, "reason": verify.reason}
-        if not verify.ok:
-            issues.append(DiagnosticIssue(CODE_BACKUP_INVALID, "error", f"backup invalid: {verify.reason}"))
-
     ok = not any(i.severity == "error" for i in issues)
     return DiagnosticReport(
-        ok=ok, issues=issues, counts=counts, namespaces=namespaces, backup=backup_result,
+        ok=ok,
+        issues=issues,
+        counts=counts,
+        namespaces=namespaces,
+        backup=backup_result,
+        target=target,
+        db_path=str(diagnose_path),
+        live_db_path=str(live_db_path) if target == "backup" else None,
     )
