@@ -215,7 +215,58 @@ a substitute for it.
 
 ---
 
-## 4. Post-change validation (after any `--apply` above)
+## 4. Restore from backup (destructive)
+
+This is a different kind of operation from everything in section 3: it's a
+full-DB *replace* from an existing backup, not an in-place recompute, and
+the golden rule still applies — dry-run first, review the diff, then
+explicit `--apply`. Never skip straight to `--apply` here, and never ask an
+agent to restore production without showing you the dry-run output first.
+
+```bash
+hermes memory health --backup-path /path/to/backup.db --json   # P0: this backup's own health
+hermes memory restore --from /path/to/backup.db --json         # dry-run: plan + diff + gates, zero writes
+# review gates.apply_allowed and the diff, and stop gateway writers for this profile
+hermes memory restore --from /path/to/backup.db --apply --json
+```
+
+> "Dry-run a restore from `<backup path>` against production and show me
+> the diff between the backup and live, the tombstone count, and whether
+> apply would be allowed."
+> *(review — check `diff`, `tombstones_live_count`, `gates.apply_allowed`,
+> and `gates.block_reasons`; stop any gateway/other process using this
+> profile's database)*
+> "Apply it."
+
+- Backup verification failures and backup-health **error**-severity issues
+  always block apply, with no override.
+- Backup-health **warning**-severity issues also block apply unless you
+  explicitly pass `--allow-backup-warnings` — don't pass that flag reflexively
+  just to get past a block; read the warning first.
+- Apply takes a timestamped safety copy of the current live database before
+  touching anything, and never auto-deletes it. If post-restore health comes
+  back dirty (`post_health` in the apply result), stop — do not chain
+  further `--apply` commands to "fix" it; restore manually from the safety
+  copy and investigate:
+  ```bash
+  cp -a /path/to/memory_store.db.pre-restore-TIMESTAMP.bak /path/to/memory_store.db
+  rm -f /path/to/memory_store.db-wal /path/to/memory_store.db-shm
+  hermes memory health --json
+  ```
+- Only native Holographic `memory-*.db` + `.json` sidecar backups are
+  supported here — never pass an encrypted skills-pack snapshot (`*.enc`)
+  to `--from`; that's a different tool (`hermes_backup.py restore`) with a
+  different (migration-to-fresh-destination) contract.
+
+> "Never restore production without showing me the dry-run diff and gates
+> first. Never pass --allow-backup-warnings without telling me why the
+> backup has a warning. Stop and tell me if post-restore health looks worse
+> than before — don't try another restore or any other --apply command to
+> fix it yourself."
+
+---
+
+## 5. Post-change validation (after any `--apply` above)
 
 > "Now that you've applied `<command>`, run `hermes memory health --json`
 > again and confirm it's still clean. Then run the benchmark again if one
@@ -229,7 +280,8 @@ hermes memory benchmark --gold-set ./gold.json --json   # if available
 
 If health reports anything new, or namespace leakage is nonzero, treat that
 as a production incident, not a follow-up item — stop and restore from the
-backup taken in section 2 rather than attempting a live fix.
+backup taken in section 2 (see section 4, `hermes memory restore`) rather
+than attempting a live fix.
 
 > "If the post-change health check or benchmark looks worse than before,
 > stop immediately and tell me — don't try to fix it yourself, and don't
@@ -237,17 +289,20 @@ backup taken in section 2 rather than attempting a live fix.
 
 ---
 
-## 5. Things to never ask an agent to do against production
+## 6. Things to never ask an agent to do against production
 
 - "Run raw SQL against the production database." — no tool/command exposes
   this, by design; don't try to work around that.
 - "Restore production from backup without showing me the plan first." —
-  restore is destructive; always review the backup's verification result
+  restore is destructive; always review the dry-run diff/gates (section 4)
   and get explicit confirmation before overwriting a live database.
+- "Just pass --allow-backup-warnings so the restore goes through." — that
+  flag exists to let an operator override a *reviewed* warning, not to
+  brush past one without reading it first.
 - "Skip the dry-run and just apply `<command>` to save time." — don't.
   Every write command's --apply step exists specifically for production
-  use; the dry-run/review/apply pattern in section 3 is the point, not
-  overhead.
+  use; the dry-run/review/apply pattern in section 3 (and section 4 for
+  restore) is the point, not overhead.
 - "Bind the viewer to a non-loopback host so I can access it remotely." —
   unsupported outright (no auth/CSRF exists yet); don't attempt a
   workaround like SSH-tunneling around this without separately confirming

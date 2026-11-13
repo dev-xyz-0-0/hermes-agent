@@ -49,7 +49,7 @@ The legacy `auto_extract` mechanism (if enabled instead of/alongside `auto_captu
 - **Fuzzy duplicate evidence** — deterministic character N-gram evidence that catches paraphrases token-overlap alone misses, without merging conflicting values (see [Fuzzy Duplicate Evidence in Consolidation](#fuzzy-duplicate-evidence-in-consolidation)).
 - **Transactional batch ingestion** — an internal/operator-only API for atomic, bounded, provenance-complete multi-fact writes (see [Batch Ingestion](#batch-ingestion)).
 - **Namespace-scoped entity relationships** — a bounded graph service with BFS traversal limits, populated by an explicit operator backfill command, not automatic extraction (see [Entity Relationships](#entity-relationships)).
-- **Operator maintenance commands** — `health`, `benchmark`, `rebuild-vectors`, `rebuild-banks`, `backfill-relationships`, `verify`, and `viewer`, all local, profile-aware, and never exposed to the model or gateway (see [Operator Maintenance Commands](#operator-maintenance-commands)).
+- **Operator maintenance commands** — `health`, `benchmark`, `rebuild-vectors`, `rebuild-banks`, `backfill-relationships`, `verify`, `restore`, and `viewer`, all local, profile-aware, and never exposed to the model or gateway (see [Operator Maintenance Commands](#operator-maintenance-commands)).
 - **Optional local diagnostic viewer** — loopback-only, read-only, opaque-by-default (see [Local Diagnostic Viewer](#local-diagnostic-viewer)).
 - **Optional retrieval telemetry** — content-free, bounded-retention scoring telemetry for future offline weight evaluation, off by default (see [Retrieval Telemetry](#retrieval-telemetry)).
 
@@ -567,22 +567,82 @@ SHA-256 checksum sidecar and `0600` permissions. `backup_retention` prunes
 older backups automatically after each manual backup.
 
 **Restore is deliberately NOT a `fact_store` tool action** — it's exposed
-only as `HolographicMemoryProvider.restore_from_backup(path)`, a method for
-an operator (or a future `hermes memory restore` CLI command, which does
-**not** currently exist) to call directly, never from chat. A
-prompt-injected or confused model triggering a restore could silently
-reactivate facts the user explicitly forgot; that decision belongs to a
-human.
+only as `HolographicMemoryProvider.restore_from_backup(path)` (library/
+provider level) and `hermes memory restore` (the P1 operator CLI below),
+never from chat. A prompt-injected or confused model triggering a restore
+could silently reactivate facts the user explicitly forgot; that decision
+belongs to a human.
+
+### `hermes memory restore` (operator CLI)
+
+```bash
+hermes memory restore --from PATH [--dry-run | --apply] [--allow-backup-warnings] [--json]
+hermes -p NAME memory restore --from PATH ...
+```
+
+Full-DB replace (not a merge), dry-run by default — mirrors the
+dry-run/apply/lock/backup shape of the other maintenance commands, but with
+a richer result shape since there's a destination DB to diff against and a
+set of hard gates to report, not just planned counts.
+
+**Dry-run** (default, zero writes): verifies the backup's checksum/
+integrity, diagnoses the backup DB and the live DB *independently* (P0
+semantics — never mixes their counts/issues into each other), reports a
+`facts`/`active`/`memory_banks` diff between them, counts tombstones on the
+live DB (`tombstones_live_count` — these block the matching fact from being
+reactivated by the restore), and computes the exact same apply-gate logic
+`--apply` will use (`gates.apply_allowed`, `gates.block_reasons`). Safe to
+run against a target that doesn't exist yet (a fresh profile) — `live_health`
+is `null` and the diff is skipped, nothing else changes.
+
+**Apply gates (hard-block, no live mutation on any of these):**
+1. `--from` missing/unreadable → exit `3` (cannot run)
+2. Backup fails checksum/integrity verification → exit `2`
+3. Backup health has **error**-severity issues → exit `2`
+4. Backup health has **warning**-severity issues and `--allow-backup-warnings`
+   was not passed → exit `1` (pass the flag to proceed anyway; errors always
+   block regardless of the flag)
+
+**Apply** (only once gates pass): acquires the maintenance lock, re-verifies
+the backup inside it (TOCTOU-safe), re-reads live tombstones, then delegates
+the actual file-level work to the pre-existing `backup.restore_backup()`
+primitive described below — safety-copies the current live DB first (kept
+indefinitely, never auto-deleted), sweeps any tombstoned fact out of the
+staged backup before it ever touches the live file, and atomically replaces
+the target. Reports `safety_copy_path`, `reactivated_blocked`, and
+`post_health` (a full `hermes memory health`-equivalent diagnosis of the
+now-restored live DB). No auto-rollback on a dirty post-health result in v1
+— recover manually from `safety_copy_path` if needed (see the Operator
+procedure below).
+
+Exit codes match the rest of the maintenance commands: `0` ok, `1`
+warnings-only (e.g. dry-run with `apply_allowed: false` purely due to
+backup-health warnings), `2` errors, `3` cannot run, `4` maintenance lock
+held. Stop the gateway/any other process holding this profile's DB open
+before `--apply` — a live WAL writer during the file swap is unsafe (v1 does
+not detect this automatically).
+
+Only handles native Holographic `memory-*.db` + `.json` sidecar backups
+(the ones `fact_store {"action": "backup"}` / maintenance commands create).
+It does **not** restore skills-pack's encrypted cross-host snapshots — that
+remains a separate tool (`hermes_backup.py restore`, migration-to-fresh-
+destination only).
 
 **Operator procedure:**
 
 1. **Create a backup** via chat or the memory tool: `fact_store {"action": "backup"}`. Note the path it reports under `$HERMES_HOME/backups/holographic/<namespace>/`.
-2. **Verify its integrity** by checking the SHA-256 checksum sidecar written alongside it — `restore_from_backup()` does this automatically, but you can verify independently before relying on an old backup.
-3. **Stop processes accessing the database** — close the live store (end the Hermes/gateway process using it) before restoring; restore does a file-level swap, which an open WAL connection could otherwise corrupt.
-4. **Invoke the supported restore interface** — there is no CLI command for this today; call `HolographicMemoryProvider.restore_from_backup(path)` directly (e.g. from a short Python script or REPL run by an operator with filesystem access).
-5. **Verify restored data** — after restore completes, run `fact_store {"action": "stats"}` or `{"action": "diagnostics"}` against the restored database and spot-check expected facts with `{"action": "list"}` / `{"action": "search"}`.
-6. **Forgotten-fact tombstones are handled automatically** — restore reads every `forgotten_facts` tombstone (recorded whenever a fact is explicitly removed, across all namespaces) *before* touching the live file, and re-deletes any matching row the backup would otherwise reintroduce, so a backup taken before an explicit forget can't bring that fact back.
-7. **If restoration fails** — `restore_from_backup()` verifies the backup's checksum and runs `PRAGMA integrity_check` twice (on the backup itself, then again on the staged copy) *before* touching anything live, and keeps a timestamped safety copy of the pre-restore database indefinitely. If a failure is reported, the live database should be untouched; recover by inspecting that safety copy and the error raised, rather than retrying blindly.
+2. **Check the backup's own health**: `hermes memory health --backup-path PATH --json` (P0) — diagnoses the backup file itself, not the live DB.
+3. **Dry-run the restore**: `hermes memory restore --from PATH --json` — review `diff`, `tombstones_live_count`, and `gates.apply_allowed`/`block_reasons`.
+4. **Stop processes accessing the database** — close the live store (end the Hermes/gateway process using it) before restoring; restore does a file-level swap, which an open WAL connection could otherwise corrupt.
+5. **Apply**: `hermes memory restore --from PATH --apply --json`. Note the `safety_copy_path` it reports.
+6. **Verify restored data** — run `hermes memory health --json` (included as `post_health` in the apply result already) and spot-check expected facts via `fact_store {"action": "list"}` / `{"action": "search"}`.
+7. **Forgotten-fact tombstones are handled automatically** — restore reads every `forgotten_facts` tombstone (recorded whenever a fact is explicitly removed, across all namespaces) *before* touching the live file, and re-deletes any matching row the backup would otherwise reintroduce, so a backup taken before an explicit forget can't bring that fact back.
+8. **If restoration fails** — the backup's checksum and `PRAGMA integrity_check` are verified twice (on the backup itself, then again on the staged copy) *before* touching anything live, and a timestamped safety copy of the pre-restore database is kept indefinitely. If a failure is reported, the live database should be untouched; recover by inspecting that safety copy and the reported issue, rather than retrying blindly. Manual rollback:
+   ```bash
+   cp -a /path/to/memory_store.db.pre-restore-TIMESTAMP.bak /path/to/memory_store.db
+   rm -f /path/to/memory_store.db-wal /path/to/memory_store.db-shm
+   hermes memory health --json
+   ```
 
 ## Namespace-Scoped HRR Banks
 
@@ -919,6 +979,7 @@ hermes memory rebuild-vectors [--dry-run | --apply] [--json]
 hermes memory rebuild-banks [--dry-run | --apply] [--json]
 hermes memory backfill-relationships (--dry-run | --apply) [--json]
 hermes memory verify [--json] [--backup-path PATH]
+hermes memory restore --from PATH [--dry-run | --apply] [--allow-backup-warnings] [--json]
 hermes memory viewer [--host HOST] [--port N] [--show-raw-identity]
 
 hermes -p NAME memory <subcommand> ...   # named profile, any of the above
@@ -964,6 +1025,15 @@ paths scan for the deterministic co-occurrence candidates described in
 verifies first, same as the rebuild commands. Result `counts`:
 `candidates_planned`/`namespaces_affected` (dry-run) or
 `relationships_written` (apply).
+
+**`restore`** — see [Backup and Restore](#backup-and-restore) above for the
+full contract (gates, dry-run diff shape, apply result shape, exit codes).
+Unlike the other write commands, it takes `--from PATH` (required) rather
+than operating on a fixed implicit target, and its JSON result isn't the
+shared `MaintenanceResult` shape — it has its own richer `diff`/`gates`/
+`plan`/`post_health` fields, since there's a destination database to
+compare against and apply-blocking gates to report, not just planned
+counts.
 
 **`verify`** — a thin alias for `health`'s underlying checks
 (`maintenance.verify()` calls `diagnostics.run_diagnostics()` directly), kept

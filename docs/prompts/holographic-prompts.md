@@ -229,12 +229,30 @@ hermes memory rebuild-banks --apply           # reconcile: rebuild every active 
 hermes memory backfill-relationships --dry-run    # report planned candidate relationships
 hermes memory backfill-relationships --apply      # write co-occurrence relationships
 hermes memory backfill-relationships --apply --json
+
+hermes memory restore --from ./backup.db                                # dry-run: diff + gates, zero writes
+hermes memory restore --from ./backup.db --apply                        # destructive: full-DB replace with safety copy
+hermes memory restore --from ./backup.db --apply --allow-backup-warnings
 ```
 
 Every `--apply` path acquires a maintenance lock, then creates and verifies a
 backup before writing anything — if backup verification fails, nothing is
-written and the command exits non-zero. All three are idempotent: running
-`--apply` twice in a row converges to the same end state, not duplicate work.
+written and the command exits non-zero. The first three are idempotent:
+running `--apply` twice in a row converges to the same end state, not
+duplicate work.
+
+`restore` is different in kind from the other three: it's a full-DB
+*replace* from an existing backup, not an in-place recompute, so it takes
+`--from PATH` and reports a diff/gates/safety-copy-path rather than simple
+planned counts. Dry-run (default) verifies the backup, diagnoses the
+backup DB and the live DB independently, and reports whether `--apply`
+would even be allowed — backup verification failures and backup-health
+*errors* always block; backup-health *warnings* block unless
+`--allow-backup-warnings` is passed. `--apply` takes a safety copy of the
+live DB first (never auto-deleted) and sweeps any since-forgotten facts out
+of the restored data before it touches the live file. See
+`plugins/memory/holographic/README.md`'s "Backup and Restore" section for
+the full contract, exit codes, and manual-rollback steps.
 
 ### Local diagnostic viewer (read-only, loopback-only)
 
