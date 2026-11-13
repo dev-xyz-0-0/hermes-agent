@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "holographic-memory"
+version = "0.16.0"
+description = "Local-first persistent memory engine for AI agents — SQLite + HRR vector algebra"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Nous Research & contributors"}
+]
+keywords = ["agent", "memory", "holographic", "hrr", "sqlite", "ai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+numpy = ["numpy>=1.24"]
+fastapi = ["fastapi>=0.109", "uvicorn>=0.27"]
+mcp = ["fastmcp>=0.4"]
+all = ["numpy>=1.24", "fastapi>=0.109", "uvicorn>=0.27", "fastmcp>=0.4"]
+
+[project.urls]
+Homepage = "https://github.com/bysc1000/holographic-memory"
+Repository = "https://github.com/bysc1000/holographic-memory"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["holographic_memory*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml", "*.md", "*.html"]

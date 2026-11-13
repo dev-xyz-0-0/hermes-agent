@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environment
+venv/
+.venv/
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+*.db  # SQLite DBs are generated at runtime
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Coverage
+htmlcov/
+.coverage
+coverage.xml

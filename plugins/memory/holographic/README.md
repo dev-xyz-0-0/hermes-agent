@@ -449,6 +449,80 @@ Attribution is an approximate token-overhead measurement, not a stored-fact
 count. Diagnostic output never includes recalled facts, prompt contents,
 credentials, resolved namespaces, or database paths.
 
+### `hermes memory health` and `hermes memory benchmark` (operator CLI)
+
+These are separate from the model-callable `fact_store {"action":
+"diagnostics"}` tool action above: they are operator-only `hermes memory`
+subcommands, read-only, never exposed to the model and never wired into
+gateway slash commands or Telegram/Slack command menus.
+
+```bash
+hermes memory health [--json] [--backup-path PATH]
+hermes -p NAME memory health [--json]
+
+hermes memory benchmark --gold-set PATH [--json]
+hermes -p NAME memory benchmark --gold-set PATH [--json]
+```
+
+Both commands resolve the target database through the normal
+`HERMES_HOME`/profile mechanism (the global `-p`/`--profile` flag, handled
+in `hermes_cli/main.py` before any module import) — there is no separate
+`--profile` flag on the subcommand itself, and neither command accepts a
+raw chat namespace or chat identity argument. `--json` output never
+includes decorative/banner text; the entire stdout payload is a single
+JSON object.
+
+**`hermes memory health`** runs `plugins/memory/holographic/diagnostics.py`
+against the resolved database, opened with SQLite's `mode=ro` URI flag so
+the connection itself cannot write, independent of any bug in the checks.
+It checks: `PRAGMA integrity_check` and `foreign_key_check`; expected
+tables/columns/indexes/FTS triggers; FTS5 index/facts parity (compared
+against the FTS5 shadow `_docsize` table, not a plain row count, which is
+unreliable for an external-content FTS5 table); orphaned `fact_entities`/
+`fact_sources` rows; invalid or cyclic `superseded_by` chains; malformed or
+wrong-dimension HRR vector blobs; `memory_banks` dimension/count validity;
+facts with an invalid `status` or an out-of-range `trust_score`; and, when
+`--backup-path` is given, that backup's checksum/integrity via
+`backup.py`'s existing `verify_backup()`. JSON fields: `ok`,
+`algorithm_version`, `schema_version`, `exit_code`, `issues` (each with a
+stable `code`/`severity`/`message`/`count` — e.g. `FTS_PARITY_MISMATCH`,
+`ORPHAN_FACT_ENTITY`, `INVALID_SUPERSEDED_BY`, `SUPERSESSION_CYCLE`,
+`MALFORMED_HRR_VECTOR`, `BANK_COUNT_MISMATCH`, `INVALID_FACT_STATUS`,
+`INVALID_TRUST_SCORE`, `BACKUP_INVALID`), `counts` (facts/active/superseded/
+entities/tombstones/memory_banks), `namespaces` (per-namespace counts only
+— each namespace is reported as `""` for unscoped/CLI facts or a short
+opaque SHA-1 digest, never the raw `platform:chat_id` string), and
+`backup`. Exit codes are stable: `0` = clean, `1` = warnings only, `2` =
+errors found, `3` = could not run (e.g. database not found).
+
+**`hermes memory benchmark`** runs
+`plugins/memory/holographic/benchmark.py` against the resolved database and
+an operator-supplied gold-set JSON file (see
+`tests/fixtures/holographic/gold_set.json` for the format: a `corpus` of
+facts and a list of `cases`, each a `query` → `expected_fact_id` mapping).
+It is read-only with respect to production state: `retrieval_count` and
+`updated_at` are snapshotted before running any queries and restored
+afterward in a `finally` block, so repeated runs never inflate retrieval
+counters, and trust scores/feedback counters are never touched by any code
+path it calls. JSON fields: `algorithm_version`, `schema_version`,
+`database`, `gold_set`, `numpy_available`, `top_k`, `query_count`,
+`recall_at_1`, `recall_at_5`, `mean_reciprocal_rank`, `empty_result_rate`,
+`query_error_rate`, `namespace_leakage_count` (always expected to be `0`;
+a nonzero value means a result's fact belonged to a different namespace
+than the query was scoped to), `latency_ms` (`p50`/`p95`), `strategy_breakdown`
+(`fts_only`/`jaccard_only`/`hrr_only`/`default` — isolated retrieval-weight
+configurations, to see each strategy's individual contribution),
+`temporal_decay` (`disabled`/`enabled`), and `per_query` detail. Exit codes:
+`0` on success, `2` on a malformed gold set, `3` if the database does not
+exist.
+
+These commands are an original implementation inspired by (not imported
+from) the retrieval-quality and health-check ideas in
+`demo-reference/holographic-memory-main/scripts/holographic_benchmark.py`
+and `.../holographic_memory_health.py`. **No code under `demo-reference/`
+is imported by `plugins/memory/holographic/` or any other runtime module —
+it exists purely as read-only reference material for this integration.**
+
 ## Backup and Restore
 
 `fact_store {"action": "backup"}` snapshots the live database using

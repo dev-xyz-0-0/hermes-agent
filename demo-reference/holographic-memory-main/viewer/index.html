@@ -1,0 +1,1518 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5">
+<title>🧠 Hermes Memory Viewer</title>
+<script src="https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  /* Dark theme */
+  --bg: #0d1117; --surface: #161b22; --border: #30363d;
+  --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+  --green: #3fb950; --orange: #d29922; --red: #f85149;
+  --purple: #bc8cff; --pink: #f778ba; --card-bg: #1c2128;
+  --hover: rgba(88,166,255,.06); --shadow: rgba(0,0,0,.3);
+  --graph-bg: #161b22;
+}
+[data-theme="light"] {
+  --bg: #f6f8fa; --surface: #ffffff; --border: #d0d7de;
+  --text: #1f2328; --muted: #656d76; --accent: #0969da;
+  --green: #1a7f37; --orange: #9a6700; --red: #cf222e;
+  --purple: #8250df; --pink: #c61b7e; --card-bg: #ffffff;
+  --hover: rgba(9,105,218,.06); --shadow: rgba(0,0,0,.08);
+  --graph-bg: #ffffff;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Oxygen,sans-serif;
+  background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5;
+  transition: background .2s, color .2s;
+}
+
+/* Header */
+header {
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 12px 24px; display: flex; align-items: center; gap: 12px;
+  position: sticky; top: 0; z-index: 100; transition: background .2s;
+}
+header h1 { font-size: 18px; font-weight: 600; white-space: nowrap; }
+header .header-right { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+.theme-btn {
+  background: none; border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 10px; cursor: pointer; font-size: 16px; line-height: 1;
+  color: var(--text); transition: all .15s;
+}
+.theme-btn:hover { border-color: var(--accent); background: var(--hover); }
+.status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); white-space: nowrap; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.status-dot.ok { background: var(--green); }
+.status-dot.err { background: var(--red); }
+.status-dot.loading { background: var(--orange); animation: pulse 1s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+.last-updated { font-size: 11px; color: var(--muted); white-space: nowrap; }
+
+/* Container */
+.container { max-width: 1400px; margin: 0 auto; padding: 16px 20px; }
+
+/* Stats cards */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 16px; }
+.card {
+  background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 14px 12px; text-align: center; transition: transform .15s, box-shadow .15s;
+}
+.card:hover { transform: translateY(-1px); box-shadow: 0 4px 12px var(--shadow); }
+.card .value { font-size: 26px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+.card .label { font-size: 11px; color: var(--muted); margin-top: 2px; text-transform: uppercase; letter-spacing: .4px; }
+.card.green .value { color: var(--green); }
+.card.orange .value { color: var(--orange); }
+.card.purple .value { color: var(--purple); }
+.card.pink .value { color: var(--pink); }
+.card .sub { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+/* Tabs */
+.tabs {
+  display: flex; gap: 2px; margin-bottom: 16px; border-bottom: 1px solid var(--border);
+  overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar { display: none; }
+.tab {
+  padding: 8px 14px; cursor: pointer; border: none; background: none;
+  color: var(--muted); font-size: 13px; border-bottom: 2px solid transparent;
+  transition: all .15s; white-space: nowrap; font-weight: 500;
+}
+.tab:hover { color: var(--text); background: var(--hover); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-content { display: none; animation: fadeIn .25s ease; }
+.tab-content.active { display: block; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+/* Charts */
+.charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+@media (max-width: 800px) { .charts-row { grid-template-columns: 1fr; } }
+.chart-box {
+  background: var(--card-bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 14px; transition: box-shadow .15s;
+}
+.chart-box:hover { box-shadow: 0 2px 8px var(--shadow); }
+.chart-box h3 {
+  font-size: 12px; color: var(--muted); margin-bottom: 10px;
+  text-transform: uppercase; letter-spacing: .5px;
+}
+.chart-box canvas { max-height: 240px; max-width: 100%; }
+.chart-row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+@media (max-width: 900px) { .chart-row-3 { grid-template-columns: 1fr; } }
+
+/* Fact list */
+.fact-list {
+  background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px;
+  margin-bottom: 14px;
+}
+.fact-list h3 {
+  font-size: 12px; color: var(--muted); padding: 10px 14px;
+  border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: .5px;
+}
+.fact-item {
+  padding: 8px 14px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: flex-start; gap: 8px; cursor: pointer;
+  transition: background .1s;
+}
+.fact-item:last-child { border-bottom: none; }
+.fact-item:hover { background: var(--hover); }
+.fact-id { color: var(--muted); font-size: 11px; min-width: 28px; font-family: monospace; text-align: right; flex-shrink: 0; }
+.fact-content { flex: 1; font-size: 13px; word-break: break-word; min-width: 0; }
+.fact-meta { display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--muted); flex-shrink: 0; flex-wrap: wrap; }
+.tag {
+  display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px;
+  background: rgba(88,166,255,.12); color: var(--accent); font-weight: 500;
+}
+.tag.green { background: rgba(63,185,80,.12); color: var(--green); }
+.tag.orange { background: rgba(210,153,34,.12); color: var(--orange); }
+.tag.purple { background: rgba(188,140,255,.12); color: var(--purple); }
+.tag.pink { background: rgba(247,120,186,.12); color: var(--pink); }
+.tag.red { background: rgba(248,81,73,.12); color: var(--red); }
+
+/* Search */
+.search-box { display: flex; gap: 8px; margin-bottom: 14px; }
+.search-box input {
+  flex: 1; padding: 10px 14px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--surface); color: var(--text);
+  font-size: 14px; transition: border-color .15s;
+}
+.search-box input:focus { outline: none; border-color: var(--accent); }
+.search-box button {
+  padding: 10px 20px; border: none; border-radius: 8px;
+  background: var(--accent); color: #fff; cursor: pointer;
+  font-size: 14px; font-weight: 500; transition: opacity .15s;
+}
+.search-box button:hover { opacity: .85; }
+
+/* Table */
+.table-wrap { overflow-x: auto; border-radius: 8px; border: 1px solid var(--border); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th {
+  text-align: left; padding: 8px 10px; background: var(--surface);
+  border-bottom: 1px solid var(--border); color: var(--muted); font-weight: 500;
+  cursor: pointer; user-select: none; white-space: nowrap;
+}
+th:hover { color: var(--text); }
+td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+tr:hover td { background: var(--hover); }
+tr.expanded td { background: var(--hover); }
+.expanded-row { display: none; }
+tr.expanded + .expanded-row { display: table-row; }
+.expanded-row td {
+  padding: 10px 14px; background: rgba(88,166,255,.03);
+  font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+}
+
+/* Entity graph */
+.graph-wrap {
+  background: var(--card-bg); border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden; position: relative;
+}
+.graph-wrap #graph { width: 100%; height: 450px; background: var(--graph-bg); }
+.graph-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 4px; z-index: 10;
+}
+.graph-controls button {
+  padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--text); cursor: pointer;
+  font-size: 12px; transition: all .15s;
+}
+.graph-controls button:hover { border-color: var(--accent); background: var(--hover); }
+.graph-legend {
+  display: flex; gap: 12px; padding: 8px 14px; flex-wrap: wrap;
+  border-top: 1px solid var(--border); font-size: 11px; color: var(--muted);
+}
+.graph-legend .legend-item { display: flex; align-items: center; gap: 4px; }
+.graph-legend .legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+
+/* Fullscreen */
+.graph-wrap.fullscreen {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 9999; border-radius: 0; border: none;
+}
+.graph-wrap.fullscreen #graph { height: 100vh; }
+
+/* Pagination */
+.pagination { display: flex; justify-content: center; gap: 4px; padding: 10px; align-items: center; }
+.pagination button {
+  padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--text); cursor: pointer; font-size: 12px;
+  transition: all .1s;
+}
+.pagination button:hover { background: var(--card-bg); }
+.pagination button:disabled { opacity: .35; cursor: default; }
+.pagination .page-info { color: var(--muted); font-size: 12px; margin: 0 6px; }
+
+/* Filters */
+.filters { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.filters select, .filters input[type="number"] {
+  padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--text); font-size: 12px; transition: border-color .15s;
+}
+.filters select:focus, .filters input:focus { outline: none; border-color: var(--accent); }
+
+/* Entity list */
+.entity-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(180px,1fr));
+  gap: 6px; margin-bottom: 12px;
+}
+.entity-chip {
+  padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); cursor: pointer; display: flex;
+  justify-content: space-between; align-items: center; transition: all .15s;
+}
+.entity-chip:hover { border-color: var(--accent); background: var(--hover); }
+.entity-chip.active { border-color: var(--accent); background: var(--hover); }
+.entity-chip .name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.entity-chip .count {
+  font-size: 10px; color: var(--muted); background: var(--card-bg);
+  padding: 1px 7px; border-radius: 10px; flex-shrink: 0;
+}
+
+/* Benchmark table */
+.bench-table { width: auto; min-width: 350px; }
+.bench-table td:last-child { text-align: right; font-family: monospace; }
+.bench-row-best { background: rgba(63,185,80,.08) !important; }
+.bench-row-best td { background: inherit; }
+
+/* Empty state */
+.empty { text-align: center; padding: 40px 20px; color: var(--muted); }
+.empty .icon { font-size: 36px; margin-bottom: 8px; }
+.empty p { font-size: 13px; }
+
+/* Loading overlay */
+.loading-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(13,17,23,.75); display: flex; align-items: center;
+  justify-content: center; z-index: 999; transition: opacity .2s;
+}
+.loading-overlay.hidden { opacity: 0; pointer-events: none; }
+.spinner {
+  width: 32px; height: 32px; border: 3px solid var(--border);
+  border-top-color: var(--accent); border-radius: 50%; animation: spin .7s infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Scroll results */
+.scroll-results { max-height: 350px; overflow-y: auto; }
+
+/* Tiers */
+.tier-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px,1fr)); gap: 10px; margin-bottom: 16px; }
+.tier-card {
+  background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 16px; cursor: pointer; text-align: center; transition: all .15s;
+}
+.tier-card:hover { transform: translateY(-1px); border-color: var(--accent); box-shadow: 0 4px 12px var(--shadow); }
+.tier-card.active { border-color: var(--accent); background: var(--hover); }
+.tier-card .tier-name { font-size: 14px; font-weight: 600; color: var(--text); }
+.tier-card .tier-count { font-size: 28px; font-weight: 700; color: var(--accent); margin: 6px 0; }
+.tier-card .tier-desc { font-size: 11px; color: var(--muted); }
+.tier-card.working .tier-count { color: var(--red); }
+.tier-card.episodic .tier-count { color: var(--orange); }
+.tier-card.semantic .tier-count { color: var(--green); }
+.tier-card.procedural .tier-count { color: var(--purple); }
+
+/* Activity type badges */
+.activity-op {
+  display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px;
+  font-weight: 600; text-transform: uppercase;
+}
+.activity-op.add { background: rgba(63,185,80,.15); color: var(--green); }
+.activity-op.update { background: rgba(210,153,34,.15); color: var(--orange); }
+
+/* Button group */
+.btn-group { display: flex; gap: 4px; margin-bottom: 10px; flex-wrap: wrap; }
+.btn-group .btn {
+  padding: 5px 12px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--muted); cursor: pointer;
+  font-size: 12px; transition: all .15s;
+}
+.btn-group .btn:hover { color: var(--text); border-color: var(--accent); }
+.btn-group .btn.active { color: var(--accent); border-color: var(--accent); background: var(--hover); }
+
+/* Responsive */
+@media (max-width: 700px) {
+  header { padding: 10px 14px; flex-wrap: wrap; }
+  header h1 { font-size: 16px; }
+  .status { font-size: 12px; }
+  .container { padding: 10px 12px; }
+  .stats { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .card .value { font-size: 22px; }
+  .tab { padding: 6px 10px; font-size: 12px; }
+  .tier-grid { grid-template-columns: repeat(2, 1fr); }
+  .entity-grid { grid-template-columns: repeat(auto-fill, minmax(140px,1fr)); }
+  .charts-row { grid-template-columns: 1fr; }
+  .last-updated { display: none; }
+}
+@media (max-width: 480px) {
+  .stats { grid-template-columns: 1fr 1fr; gap: 6px; }
+  .card { padding: 10px; }
+  .card .value { font-size: 18px; }
+  .filters { flex-direction: column; }
+  .search-box { flex-direction: column; }
+}
+
+/* Tooltip */
+[data-tooltip] { position: relative; cursor: help; }
+[data-tooltip]:hover::after {
+  content: attr(data-tooltip); position: absolute; bottom: calc(100% + 4px);
+  left: 50%; transform: translateX(-50%);
+  padding: 4px 8px; background: var(--text); color: var(--bg);
+  border-radius: 4px; font-size: 11px; white-space: nowrap; z-index: 50;
+  pointer-events: none;
+}
+
+/* Section header */
+.section-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px; flex-wrap: wrap; gap: 8px;
+}
+.section-header h3 { font-size: 13px; color: var(--muted); font-weight: 500; }
+.section-header .badge {
+  font-size: 11px; color: var(--muted); background: var(--surface);
+  padding: 2px 8px; border-radius: 10px;
+}
+
+/* Modal */
+.modal-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,.65); display: flex; align-items: center;
+  justify-content: center; z-index: 9999; transition: opacity .2s;
+}
+.modal-overlay.hidden { opacity: 0; pointer-events: none; }
+.modal-content {
+  background: var(--card-bg); border: 1px solid var(--border);
+  border-radius: 12px; max-width: 640px; width: 90vw;
+  max-height: 80vh; display: flex; flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0,0,0,.4);
+}
+.modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+}
+.modal-title { font-size: 15px; font-weight: 600; color: var(--text); }
+.modal-close {
+  background: none; border: none; color: var(--muted);
+  font-size: 22px; cursor: pointer; padding: 0 4px; line-height: 1;
+}
+.modal-close:hover { color: var(--text); }
+.modal-body {
+  padding: 18px; overflow-y: auto; font-size: 14px;
+  line-height: 1.7; white-space: pre-wrap; word-break: break-word;
+  color: var(--text); flex: 1;
+}
+.modal-footer {
+  display: flex; gap: 8px; justify-content: flex-end;
+  padding: 12px 18px; border-top: 1px solid var(--border);
+}
+.modal-btn {
+  padding: 7px 16px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--surface); color: var(--text);
+  cursor: pointer; font-size: 13px; transition: all .15s;
+}
+.modal-btn:hover { border-color: var(--accent); background: var(--hover); }
+.modal-close-btn { background: transparent; }
+.modal-close-btn:hover { border-color: var(--red); color: var(--red); }
+</style>
+</head>
+<body>
+
+<noscript>
+  <div style="padding:40px;text-align:center;font-family:sans-serif;background:#0d1117;color:#e6edf3;min-height:100vh">
+    <h1 style="font-size:24px;margin-bottom:16px">🧠 Hermes Memory Viewer</h1>
+    <p>JavaScript is required to use this viewer.</p>
+    <p style="margin-top:8px;color:#8b949e">The API endpoints are available directly: <a href="/api/health" style="color:#58a6ff">/api/health</a></p>
+  </div>
+</noscript>
+
+<header>
+  <h1>🧠 Hermes Memory Viewer</h1>
+  <div class="header-right">
+    <span class="last-updated" id="lastUpdated"></span>
+    <div class="status">
+      <span class="status-dot loading" id="statusDot"></span>
+      <span id="statusText">Connecting...</span>
+    </div>
+    <button class="theme-btn" id="themeToggle" onclick="toggleTheme()" title="Toggle theme">🌙</button>
+  </div>
+</header>
+
+<div class="container" id="app">
+  <!-- Stats -->
+  <div class="stats" id="statsRow"></div>
+
+  <!-- Tabs -->
+  <div class="tabs" id="tabNav">
+    <button class="tab" data-tab="dashboard">📊 概览</button>
+    <button class="tab" data-tab="facts">📝 事实</button>
+    <button class="tab" data-tab="entities">🔗 实体</button>
+    <button class="tab" data-tab="search">🔍 搜索</button>
+    <button class="tab" data-tab="benchmark">📈 基准</button>
+    <button class="tab" data-tab="timeline">📅 时间线</button>
+    <button class="tab" data-tab="tiers">💎 层级</button>
+    <button class="tab" data-tab="activity">⚡ 动态</button>
+  </div>
+
+  <!-- Dashboard -->
+  <div class="tab-content" id="tab-dashboard">
+    <div class="charts-row">
+      <div class="chart-box"><h3>📂 分类分布</h3><canvas id="chartCategories"></canvas></div>
+      <div class="chart-box"><h3>⭐ 信任分布</h3><canvas id="chartTrust"></canvas></div>
+    </div>
+    <div class="charts-row">
+      <div class="chart-box"><h3>📋 分类统计</h3><canvas id="chartCategoryDetail"></canvas></div>
+      <div class="chart-box"><h3>💎 层级分布</h3><canvas id="chartTierPie"></canvas></div>
+    </div>
+    <div class="fact-list">
+      <h3>🕐 最近事实</h3>
+      <div id="recentFacts"></div>
+    </div>
+  </div>
+
+  <!-- Facts -->
+  <div class="tab-content" id="tab-facts">
+    <div class="filters">
+      <select id="factCategory">
+        <option value="">All Categories</option>
+        <option value="user_pref">user_pref</option>
+        <option value="project">project</option>
+        <option value="tool">tool</option>
+        <option value="general">general</option>
+      <select id="factCategory"><option value="">全部分类</option><option value="user_pref">user_pref</option><option value="project">project</option><option value="tool">tool</option><option value="general">general</option></select>
+      <input type="number" id="factMinTrust" placeholder="最低信任" min="0" max="1" step="0.1" value="0">
+      <select id="factSort"><option value="id">排序: ID</option><option value="trust">排序: 信任</option><option value="updated">排序: 更新</option></select>
+      <select id="factOrder"><option value="desc">↓ 降序</option><option value="asc">↑ 升序</option></select>
+      <input type="text" id="factTagFilter" placeholder="标签过滤 (如 tier:working)" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:12px;width:180px">
+    </div>
+    <div class="table-wrap">
+      <table><thead><tr>
+        <th style="width:40px">ID</th><th>内容</th><th style="width:70px">分类</th>
+        <th style="width:50px">信任</th><th style="width:35px">次</th><th style="width:75px">更新</th>
+      </tr></thead><tbody id="factsBody"></tbody></table>
+    </div>
+    <div class="pagination" id="factsPagination"></div>
+  </div>
+
+  <!-- Entities -->
+  <div class="tab-content" id="tab-entities">
+    <div class="section-header">
+      <h3>实体</h3>
+      <span class="badge" id="entityCount"></span>
+    </div>
+    <div class="entity-grid" id="entityGrid"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+      <div>
+        <div class="section-header">
+          <h3 id="graphTitle">Click an entity to see its network</h3>
+        </div>
+        <div class="graph-wrap" id="graphContainer">
+          <div class="graph-controls">
+            <button onclick="toggleGraphFullscreen()" title="Toggle fullscreen">⛶</button>
+            <button onclick="fitGraph()" title="Fit to view">⊞</button>
+          </div>
+          <div id="graph" style="height:450px"></div>
+          <div class="graph-legend" id="graphLegend">
+            <span class="legend-item"><span class="legend-dot" style="background:#58a6ff"></span> Selected</span>
+            <span class="legend-item"><span class="legend-dot" style="background:#3fb950"></span> user_pref</span>
+            <span class="legend-item"><span class="legend-dot" style="background:#d29922"></span> project</span>
+            <span class="legend-item"><span class="legend-dot" style="background:#bc8cff"></span> tool</span>
+            <span class="legend-item"><span class="legend-dot" style="background:#8b949e"></span> general</span>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="section-header"><h3>Probe Results</h3></div>
+        <div class="scroll-results" id="probeResults"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Search -->
+  <div class="tab-content" id="tab-search">
+    <div class="search-box">
+      <input type="text" id="searchInput" placeholder="搜索记忆... 例如 'Claude Code', 'project config', 'Python'">
+      <button onclick="doSearch()">搜索</button>
+    </div>
+    <div id="searchResults"></div>
+  </div>
+
+  <!-- Benchmark -->
+  <div class="tab-content" id="tab-benchmark">
+    <div id="benchmarkContent"></div>
+  </div>
+
+  <!-- Timeline -->
+  <div class="tab-content" id="tab-timeline">
+    <div class="section-header">
+      <h3>📅 记忆时间线</h3>
+      <span class="badge" id="timelineCount"></span>
+    </div>
+    <div class="charts-row">
+      <div class="chart-box"><h3>每日事实数</h3><canvas id="chartTimeline"></canvas></div>
+      <div class="chart-box"><h3>每日平均信任</h3><canvas id="chartTimelineTrust"></canvas></div>
+    </div>
+    <div class="fact-list">
+      <h3>📋 每日事实明细</h3>
+      <div id="timelineFacts"></div>
+    </div>
+  </div>
+
+  <!-- Tiers / Crystals -->
+  <div class="tab-content" id="tab-tiers">
+    <div class="section-header">
+      <h3>💎 记忆层级（水晶）</h3>
+      <span class="badge" id="tierTotalBadge"></span>
+    </div>
+    <div class="tier-grid" id="tierGrid"></div>
+    <div class="charts-row">
+      <div class="chart-box"><h3>层级分布</h3><canvas id="chartTierDist"></canvas></div>
+      <div class="chart-box"><h3>层级趋势</h3><canvas id="chartTierTimeline"></canvas></div>
+    </div>
+    <div class="fact-list">
+      <h3 id="tierFactTitle">📝 层级：<span id="tierSelectedName">全部</span></h3>
+      <div id="tierFactsList"></div>
+    </div>
+    <div class="pagination" id="tierPagination"></div>
+  </div>
+
+  <!-- Activity / Audit -->
+  <div class="tab-content" id="tab-activity">
+    <div class="section-header">
+      <h3>⚡ 实时动态</h3>
+      <span class="badge" id="activityCount"></span>
+    </div>
+    <div class="btn-group" id="activityFilters">
+      <button class="btn active" data-op="all" onclick="switchActivityFilter('all')">全部</button>
+      <button class="btn" data-op="add" onclick="switchActivityFilter('add')">➕ 新增</button>
+      <button class="btn" data-op="update" onclick="switchActivityFilter('update')">🔄 更新</button>
+    </div>
+    <div class="fact-list">
+      <h3>最近操作</h3>
+      <div id="activityList"></div>
+    </div>
+    <div class="pagination" id="activityPagination"></div>
+  </div>
+</div>
+
+<div class="loading-overlay" id="loadingOverlay"><div class="spinner"></div></div>
+
+<!-- Fact Detail Modal -->
+<div class="modal-overlay hidden" id="factModal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <span class="modal-title" id="modalTitle">Fact Detail</span>
+      <button class="modal-close" onclick="closeFactModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-footer">
+      <button class="modal-btn" onclick="copyFactContent()">📋 复制</button>
+      <button class="modal-btn modal-close-btn" onclick="closeFactModal()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// API & State
+// ============================================================
+const API = '';
+let charts = {};
+let graphFullscreen = false;
+let selectedTier = null;
+let activityFilter = 'all';
+
+// Activity pagination state
+let actState = { offset: 0, total: 0 };
+let tierState = { offset: 0, total: 0 };
+let factState = { offset: 0, total: 0 };
+
+async function get(path) {
+  const r = await fetch(API + path);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function escape(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function timeAgo(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr + (dateStr.includes('T') ? '' : 'T00:00:00'));
+  const now = new Date();
+  const diff = Math.floor((now - d) / 1000);
+  if (diff < 60) return '刚刚';
+  if (diff < 3600) return Math.floor(diff/60) + '分钟前';
+  if (diff < 86400) return Math.floor(diff/3600) + '小时前';
+  if (diff < 604800) return Math.floor(diff/86400) + '天前';
+  return dateStr.slice(0,10);
+}
+
+function updateLastUpdated() {
+  const now = new Date();
+  document.getElementById('lastUpdated').textContent = '🕐 ' +
+    now.toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'});
+}
+
+// ============================================================
+// Theme
+// ============================================================
+function getCssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function setTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('hermes-viewer-theme', theme);
+  document.getElementById('themeToggle').textContent = theme === 'dark' ? '🌙' : '☀️';
+}
+
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme');
+  setTheme(current === 'dark' ? 'light' : 'dark');
+}
+
+// Load saved theme
+const savedTheme = localStorage.getItem('hermes-viewer-theme') || 'dark';
+setTheme(savedTheme);
+
+// ============================================================
+// Hash Routing
+// ============================================================
+const TAB_ORDER = ['dashboard','facts','entities','search','benchmark','timeline','tiers','activity'];
+const TAB_NAMES = {
+  dashboard:'📊 概览', facts:'📝 事实', entities:'🔗 实体',
+  search:'🔍 搜索', benchmark:'📈 基准', timeline:'📅 时间线',
+  tiers:'💎 层级', activity:'⚡ 动态'
+};
+
+function switchTab(tabName) {
+  if (!tabName || !TAB_ORDER.includes(tabName)) tabName = 'dashboard';
+  // Update tab buttons
+  document.querySelectorAll('.tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.tab === tabName);
+  });
+  // Update tab content
+  document.querySelectorAll('.tab-content').forEach(t => {
+    t.classList.toggle('active', t.id === 'tab-' + tabName);
+  });
+}
+
+let _initialized = false;
+
+function handleHash() {
+  const hash = window.location.hash.replace('#', '') || 'dashboard';
+  switchTab(hash);
+  // Trigger tab-specific reloads
+  const tab = hash;
+  if (tab === 'activity') loadActivity();
+  if (tab === 'tiers') loadTiers();
+  if (tab === 'timeline') loadTimelineTab();
+  if (tab === 'dashboard') {
+    if (!_initialized) {
+      _initialized = true;
+      init();
+    }
+  }
+}
+
+window.addEventListener('hashchange', handleHash);
+
+// Tab click -> hash update
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', function() {
+    window.location.hash = '#' + this.dataset.tab;
+  });
+});
+
+// ============================================================
+// Init
+// ============================================================
+async function init() {
+  try {
+    const health = await get('/api/health');
+    document.getElementById('statusDot').className = 'status-dot ok';
+    document.getElementById('statusText').textContent =
+      `${health.facts_total} facts · ${health.entities_total} entities · ok`;
+
+    renderStats(health);
+    renderDashboard(health);
+    loadFacts();
+    loadEntities();
+    renderBenchmark();
+    updateLastUpdated();
+    setInterval(updateLastUpdated, 30000);
+
+    // Initial hash routing
+    handleHash();
+  } catch (e) {
+    document.getElementById('statusDot').className = 'status-dot err';
+    document.getElementById('statusText').textContent = 'Error: ' + e.message;
+  }
+  document.getElementById('loadingOverlay').classList.add('hidden');
+}
+
+// ============================================================
+// Stats
+// ============================================================
+function renderStats(h) {
+  const cats = Object.keys(h.categories||{}).length;
+  const r5 = h.benchmark?.r_at_5;
+  document.getElementById('statsRow').innerHTML = [
+    {label:'事实',val:h.facts_total,cls:'green'},
+    {label:'实体',val:h.entities_total,cls:''},
+    {label:'关系',val:h.relationships_total,cls:'purple'},
+    {label:'分类',val:cats,cls:'orange'},
+    {label:'记忆库',val:h.memory_banks,cls:'pink'},
+    {label:'平均信任',val:h.avg_trust != null ? h.avg_trust.toFixed(2) : '—',cls:''},
+    {label:r5 != null ? `R@5` : '基准',val:r5 != null ? (r5*100).toFixed(0)+'%' : '—',cls:'green'},
+    {label:'数据库',val:((h.db_size_mb||0).toFixed(1))+' MB',cls:''},
+  ].map(s => {
+    const val = s.val ?? '—';
+    const cls = s.cls || '';
+    return `<div class="card ${cls}"><div class="value">${val}</div><div class="label">${s.label}</div></div>`;
+  }).join('');
+}
+
+// ============================================================
+// Dashboard
+// ============================================================
+async function renderDashboard(health) {
+  // Categories pie
+  const cats = health.categories || {};
+  const catLabels = Object.keys(cats);
+  const catData = Object.values(cats);
+  const catColors = ['#58a6ff','#3fb950','#d29922','#bc8cff','#f85149','#f778ba'];
+  if (charts.cat) charts.cat.destroy();
+  charts.cat = new Chart(document.getElementById('chartCategories'), {
+    type:'pie',
+    data: { labels: catLabels, datasets: [{ data: catData, backgroundColor: catColors.slice(0,catLabels.length), borderWidth: 0 }] },
+    options: { responsive: true, plugins: { legend: { position:'bottom', labels: { color:'#8b949e', boxWidth: 10, padding: 8 } } }, color: '#8b949e' }
+  });
+
+  // Trust distribution
+  const trust = health.trust_distribution || [];
+  if (charts.trust) charts.trust.destroy();
+  charts.trust = new Chart(document.getElementById('chartTrust'), {
+    type:'bar',
+    data: { labels: trust.map(t => t.bucket+'%'),      datasets: [{ label:'事实数', data: trust.map(t => t.count),backgroundColor: '#58a6ff', borderRadius: 4 }] },
+    options: {
+      responsive: true,
+      scales: { y: { beginAtZero: true, grid: { color:'#30363d' }, ticks: { color:'#8b949e' } }, x: { grid: { display:false }, ticks: { color:'#8b949e' } } },
+      plugins: { legend: { display: false } }, color: '#8b949e'
+    }
+  });
+
+    // 分类统计
+    try {
+      const cd = await get('/api/categories');
+      const catsDetail = cd.categories || [];
+      if (charts.cd) charts.cd.destroy();
+    charts.cd = new Chart(document.getElementById('chartCategoryDetail'), {
+      type:'bar',
+      data: {
+        labels: catsDetail.map(c => c.category),
+        datasets: [
+          { label:'平均信任', data: catsDetail.map(c => c.avg_trust), backgroundColor: '#58a6ff', borderRadius: 4, yAxisID: 'y' },
+          { label:'平均检索', data: catsDetail.map(c => c.avg_retrieval), backgroundColor: '#d29922', borderRadius: 4, yAxisID: 'y1' },
+        ]
+      },
+      options: {
+        responsive: true,
+        scales: {
+          y: { beginAtZero: true, max: 1, position:'left', grid:{color:'#30363d'}, ticks:{color:'#8b949e'} },
+          y1: { beginAtZero: true, position:'right', grid:{display:false}, ticks:{color:'#8b949e'} },
+          x: { grid:{display:false}, ticks:{color:'#8b949e'} }
+        },
+        plugins: { legend: { labels:{color:'#8b949e',boxWidth:12} } }, color: '#8b949e'
+      }
+    });
+  } catch(e) { console.error('Category detail chart failed', e); }
+
+  // Tier pie on dashboard
+  try {
+    const tierData = await get('/api/tiers');
+    const tierAggs = tierData.tiers || [];
+    const labels = tierAggs.map(t => t.tier);
+    const dataVals = tierAggs.map(t => t.count);
+    if (dataVals.length > 0 && dataVals.some(d => d > 0)) {
+      const tcolors = { working:'#f85149', episodic:'#d29922', semantic:'#3fb950', procedural:'#bc8cff' };
+      if (charts.tp) charts.tp.destroy();
+      charts.tp = new Chart(document.getElementById('chartTierPie'), {
+        type:'doughnut',
+        data: { labels, datasets: [{ data: dataVals, backgroundColor: labels.map(l => tcolors[l]||'#58a6ff'), borderWidth: 0 }] },
+        options: { responsive: true, plugins: { legend: { position:'bottom', labels:{color:'#8b949e',boxWidth:10,padding:8} } }, color: '#8b949e' }
+      });
+    } else {
+      document.getElementById('chartTierPie').parentElement.innerHTML =
+        '<div class="empty"><p>No tier tags found</p></div>';
+    }
+  } catch(e) { console.error('Tier pie load failed', e); }
+
+  // Recent facts
+  const recent = health.recent_facts || [];
+  renderFactList('recentFacts', recent);
+}
+
+// ============================================================
+// Fact List Renderer
+// ============================================================
+function renderFactList(id, facts, showTags) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (!facts || facts.length === 0) {
+    el.innerHTML = '<div class="empty"><div class="icon">📭</div><p>No facts found</p></div>';
+    return;
+  }
+  el.innerHTML = facts.map(f => {
+    const content = f.content || f.fact_content || '';
+    const tags = f.tags || '';
+    const cat = f.category || '';
+    const trust = (f.trust_score ?? f.trust ?? 0);
+    const date = (f.updated_at || f.created_at || f.created || '').slice(0, 10);
+    const fid = f.fact_id ?? f.id ?? '?';
+    return `<div class="fact-item fade-in" data-fid="${fid}" data-content="${escape(content)}">
+      <span class="fact-id">#${fid}</span>
+      <div class="fact-content">${escape(content.slice(0,200))}${content.length>200?'…':''}</div>
+      <div class="fact-meta">
+        <span class="tag ${cat==='user_pref'?'green':cat==='project'?'orange':cat==='tool'?'purple':''}">${cat||'—'}</span>
+        <span>⭐ ${trust.toFixed(2)}</span>
+        ${showTags && tags ? `<span class="tag">${escape(tags.replace(/,/g,' · '))}</span>` : ''}
+        <span>${date}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+let _modalFactContent = '';
+
+function showFactDetail(id, content) {
+  _modalFactContent = content || '';
+  document.getElementById('modalTitle').textContent = `📝 事实 #${id}`;
+  document.getElementById('modalBody').textContent = content || '(空)';
+  document.getElementById('factModal').classList.remove('hidden');
+}
+
+function closeFactModal() {
+  document.getElementById('factModal').classList.add('hidden');
+}
+
+function copyFactContent() {
+  navigator.clipboard.writeText(_modalFactContent).then(() => {
+    const btn = document.querySelector('#factModal .modal-btn:first-child');
+    const orig = btn.textContent;
+    btn.textContent = '✅ 已复制！';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  }).catch(() => {
+    // Fallback for older browsers
+    const ta = document.createElement('textarea');
+    ta.value = _modalFactContent;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  });
+}
+
+// Event delegation for fact-item clicks
+document.addEventListener('click', function(e) {
+  const item = e.target.closest('.fact-item');
+  if (item && item.dataset.fid) {
+    showFactDetail(parseInt(item.dataset.fid), item.dataset.content);
+  }
+});
+
+// ============================================================
+// Facts Tab
+// ============================================================
+async function loadFacts() {
+  const cat = document.getElementById('factCategory').value;
+  const trust = document.getElementById('factMinTrust').value || 0;
+  const sort = document.getElementById('factSort').value;
+  const order = document.getElementById('factOrder').value;
+  const tag = document.getElementById('factTagFilter').value.trim();
+
+  try {
+    let url = `/api/facts?category=${cat}&min_trust=${trust}&sort=${sort}&order=${order}&offset=${factState.offset}&limit=50`;
+    if (tag) url += `&tag=${encodeURIComponent(tag)}`;
+    const r = await get(url);
+    factState.total = r.total;
+    const tbody = document.getElementById('factsBody');
+    tbody.innerHTML = r.facts.map(f => {
+      const tags = f.tags || '';
+      return `<tr onclick="toggleFactExpand(this)" style="cursor:pointer">
+        <td>${f.fact_id}</td>
+        <td>${escape((f.content||'').slice(0,120))}${(f.content||'').length>120?'…':''}</td>
+        <td><span class="tag">${f.category}</span></td>
+        <td>${(f.trust_score??0).toFixed(2)}</td>
+        <td>${f.retrieval_count||0}</td>
+        <td>${(f.updated_at||'').slice(0,10)}</td>
+      </tr>
+      <tr class="expanded-row"><td colspan="6">
+        <strong>Tags:</strong> ${tags ? escape(tags) : '—'}<br>
+        <strong>Content:</strong><br>${escape(f.content||'')}
+      </td></tr>`;
+    }).join('');
+    renderPagination('factsPagination', factState.offset, r.total, 50, (o) => { factState.offset = o; loadFacts(); });
+  } catch(e) { console.error('Facts tab load failed', e); }
+}
+
+function toggleFactExpand(tr) { tr.classList.toggle('expanded'); }
+
+// ============================================================
+// Pagination
+// ============================================================
+function renderPagination(id, offset, total, limit, cb) {
+  const pages = Math.ceil(total / limit) || 1;
+  const current = Math.floor(offset / limit) + 1;
+  const el = document.getElementById(id);
+  if (!el) return;
+  // Store callback on element, not window
+  el._paginateCb = cb;
+  el.dataset.paginate = 'true';
+  el.dataset.offset = offset;
+  el.dataset.limit = limit;
+  el.dataset.total = total;
+  el.innerHTML =
+    `<button data-offset="0" ${offset===0?'disabled':''}>««</button>
+     <button data-offset="${Math.max(0,offset-limit)}" ${offset===0?'disabled':''}>«</button>
+     <span class="page-info">${current} / ${pages} (${total})</span>
+     <button data-offset="${offset+limit}" ${offset+limit>=total?'disabled':''}>»</button>
+     <button data-offset="${(pages-1)*limit}" ${offset+limit>=total?'disabled':''}>»»</button>`;
+}
+
+// Pagination click handler via event delegation
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('[data-paginate] button');
+  if (!btn) return;
+  const container = btn.closest('[data-paginate]');
+  if (!container) return;
+  const newOffset = parseInt(btn.dataset.offset);
+  if (!isNaN(newOffset) && typeof container._paginateCb === 'function') {
+    container._paginateCb(newOffset);
+  }
+});
+
+// Fact filter listeners
+document.getElementById('factCategory').addEventListener('change', ()=>{factState.offset=0;loadFacts();});
+document.getElementById('factMinTrust').addEventListener('change', ()=>{factState.offset=0;loadFacts();});
+document.getElementById('factSort').addEventListener('change', ()=>{factState.offset=0;loadFacts();});
+document.getElementById('factOrder').addEventListener('change', ()=>{factState.offset=0;loadFacts();});
+document.getElementById('factTagFilter').addEventListener('change', ()=>{factState.offset=0;loadFacts();});
+
+// ============================================================
+// Entities Tab
+// ============================================================
+let currentGraph = null;
+let selectedEntityId = null;
+
+async function loadEntities() {
+  try {
+    const r = await get('/api/entities?min_facts=1&limit=200');
+    const grid = document.getElementById('entityGrid');
+    const entities = r.entities || [];
+    document.getElementById('entityCount').textContent = entities.length + ' 个实体';
+    grid.innerHTML = entities.map(e =>
+      `<div class="entity-chip ${e.entity_id === selectedEntityId ? 'active' : ''}" data-name="${escape(e.name)}" onclick="selectEntity(${e.entity_id},'${escape(e.name)}')">
+         <span class="name">${escape(e.name)}</span>
+         <span class="count">${e.fact_count}</span>
+       </div>`
+    ).join('');
+    if (entities.length > 0 && !selectedEntityId) {
+      selectEntity(entities[0].entity_id, entities[0].name);
+    }
+  } catch(e) { console.error('Entities tab load failed', e); }
+}
+
+async function selectEntity(id, name) {
+  selectedEntityId = id;
+  document.getElementById('graphTitle').textContent = `🔗 ${name} 的关系网络`;
+  document.getElementById('probeResults').innerHTML = '<div class="empty"><div class="spinner" style="margin:0 auto"></div></div>';
+
+  // Highlight active chip
+  document.querySelectorAll('.entity-chip').forEach(c => c.classList.remove('active'));
+  document.querySelectorAll('.entity-chip').forEach(c => {
+    if (c.dataset.name === name) {
+      c.classList.add('active');
+    }
+  });
+
+  try {
+    const [graph, probe] = await Promise.all([
+      get(`/api/entities/${id}/graph?depth=2`),
+      get(`/api/entities/${encodeURIComponent(name)}/probe?limit=10`)
+    ]);
+
+    // Render graph with enhanced options
+    if (currentGraph) { currentGraph.destroy(); currentGraph = null; }
+    const container = document.getElementById('graph');
+    if (graph.nodes && graph.nodes.length > 0) {
+      // Category-to-color mapping
+      const catColors = {
+        'user_pref': '#3fb950', 'project': '#d29922',
+        'tool': '#bc8cff', 'general': '#8b949e'
+      };
+      const defaultColor = '#8b949e';
+
+      const nodes = new vis.DataSet(graph.nodes.map(n => ({
+        id: n.id,
+        label: n.label || n.name || n.id,
+        title: (n.name||n.id) + (n.fact_count ? `\n${n.fact_count} facts` : ''),
+        shape: 'dot',
+        size: Math.min(35, 12 + (n.fact_count||0) * 3),
+        color: {
+          background: n.id === id ? '#58a6ff' : (catColors[n.category] || defaultColor),
+          border: n.id === id ? '#fff' : (catColors[n.category] ? '#ffffff66' : '#66666666')
+        },
+        font: { color: '#e6edf3', size: 11, strokeWidth: 2, strokeColor: '#0d1117' },
+        borderWidth: n.id === id ? 3 : 1.5
+      })));
+      const edges = new vis.DataSet((graph.edges||[]).map(e => ({
+        from: e.from || e.source,
+        to: e.to || e.target,
+        label: e.label || e.relationship_type || '',
+        color: { color: '#30363d', highlight: '#58a6ff', opacity: 0.7 },
+        font: { color: '#8b949e', size: 10, strokeWidth: 0 },
+        arrows: { to: { enabled: true, scaleFactor: 0.5 } },
+        width: 0.5 + (e.strength||1) * 1.5,
+        smooth: { type: 'continuous' }
+      })));
+
+      const options = {
+        physics: {
+          solver: 'forceAtlas2Based',
+          forceAtlas2Based: {
+            gravitationalConstant: -60,
+            centralGravity: 0.004,
+            springLength: 180,
+            springConstant: 0.02,
+            damping: 0.4
+          },
+          stabilization: { iterations: 150 }
+        },
+        interaction: {
+          hover: true,
+          tooltipDelay: 150,
+          navigationButtons: true,
+          keyboard: true
+        },
+        nodes: { borderWidth: 1.5 },
+        edges: { smooth: { type: 'continuous' } },
+        background: getCssVar('--graph-bg') || '#161b22',
+        layout: { improvedLayout: true }
+      };
+      currentGraph = new vis.Network(container, { nodes, edges }, options);
+
+      // Update legend
+      const categories = new Set();
+      graph.nodes.forEach(n => { if (n.category) categories.add(n.category); });
+      updateGraphLegend(categories);
+    } else {
+      container.innerHTML = '<div class="empty"><div class="icon">🔗</div><p>No relationships for this entity</p></div>';
+    }
+
+    // Render probe results
+    const pr = probe.results || [];
+    document.getElementById('probeResults').innerHTML = pr.length === 0
+      ? '<div class="empty"><p>No probe results</p></div>'
+      : pr.map(f =>
+          `<div class="fact-item fade-in">
+             <span class="fact-id">#${f.fact_id}</span>
+             <div class="fact-content">${escape((f.content||'').slice(0,300))}</div>
+             <div class="fact-meta"><span>⭐ ${(f.trust_score||f.trust||0).toFixed(2)}</span></div>
+           </div>`
+        ).join('');
+
+  } catch(e) {
+    document.getElementById('graph').innerHTML = `<div class="empty"><div class="icon">⚠️</div><p>${e.message}</p></div>`;
+    document.getElementById('probeResults').innerHTML = '';
+  }
+}
+
+function updateGraphLegend(categories) {
+  const catColors = {
+    'user_pref': '#3fb950', 'project': '#d29922',
+    'tool': '#bc8cff', 'general': '#8b949e'
+  };
+  let html = '<span class="legend-item"><span class="legend-dot" style="background:#58a6ff"></span> Selected</span>';
+  categories.forEach(cat => {
+    const color = catColors[cat] || '#8b949e';
+    html += `<span class="legend-item"><span class="legend-dot" style="background:${color}"></span> ${cat}</span>`;
+  });
+  document.getElementById('graphLegend').innerHTML = html;
+}
+
+function toggleGraphFullscreen() {
+  const wrap = document.getElementById('graphContainer');
+  graphFullscreen = !graphFullscreen;
+  wrap.classList.toggle('fullscreen', graphFullscreen);
+  if (currentGraph) {
+    currentGraph.redraw();
+    setTimeout(() => currentGraph.fit(), 100);
+  }
+}
+
+function fitGraph() {
+  if (currentGraph) currentGraph.fit();
+}
+
+// Theme change rebuilds graph
+document.addEventListener('DOMContentLoaded', () => {
+  const obs = new MutationObserver(() => {
+    if (currentGraph) {
+      const container = document.getElementById('graph');
+      const bg = getCssVar('--graph-bg') || '#161b22';
+      container.style.background = bg;
+      currentGraph.setOptions({ background: bg });
+    }
+  });
+  obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+});
+
+// ============================================================
+// Search Tab
+// ============================================================
+document.getElementById('searchInput').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') doSearch();
+});
+
+async function doSearch() {
+  const q = document.getElementById('searchInput').value.trim();
+  if (!q) return;
+  const el = document.getElementById('searchResults');
+  el.innerHTML = '<div class="empty"><div class="spinner" style="margin:0 auto"></div></div>';
+  try {
+    const r = await get(`/api/facts/search?q=${encodeURIComponent(q)}&limit=30`);
+    const results = r.results || [];
+    if (results.length === 0) {
+      el.innerHTML = '<div class="empty"><div class="icon">🔍</div><p>No results for "'+escape(q)+'"</p></div>';
+      return;
+    }
+    el.innerHTML = results.map(f =>
+      `<div class="fact-item fade-in">
+         <span class="fact-id">#${f.fact_id}</span>
+         <div class="fact-content">${escape((f.content||'').slice(0,300))}${(f.content||'').length>300?'…':''}</div>
+         <div class="fact-meta">
+           <span>Score: ${(f.score||0).toFixed(4)}</span>
+           <span>⭐ ${(f.trust_score||0).toFixed(2)}</span>
+           <span>${f.category||''}</span>
+         </div>
+       </div>`
+    ).join('');
+  } catch(e) { el.innerHTML = `<div class="empty"><div class="icon">⚠️</div><p>${e.message}</p></div>`; }
+}
+
+// ============================================================
+// Benchmark Tab
+// ============================================================
+async function renderBenchmark() {
+  const el = document.getElementById('benchmarkContent');
+  try {
+    const r = await get('/api/benchmark');
+    const b = r.methods;
+    if (!b) {
+      el.innerHTML = '<div class="empty"><div class="icon">📈</div><p>No benchmark results found. Run <code>python3 scripts/holographic_benchmark.py</code></p></div>';
+      return;
+    }
+    const order = ['all_5_default','fts5_only','jaccard_only','hrr_only','graph_only','vector_only'];
+    const labels = {'all_5_default':'混合（默认）','fts5_only':'FTS5','jaccard_only':'Jaccard','hrr_only':'HRR','graph_only':'图 BFS¹','vector_only':'向量ⁱ'};
+    const best = Math.max(...order.map(k => b[k]?.r_at_5||0));
+    el.innerHTML =
+      `<div class="chart-box" style="margin-bottom:14px">
+         <h3>Test: ${r.test_case_count||'?'} cases · ${r.facts_total||'?'} facts in store · ${(r.generated_at||'').slice(0,16)||''}</h3>
+       </div>
+       <div class="table-wrap" style="max-width:600px">
+       <table class="bench-table">
+         <thead><tr><th>Method</th><th>R@5</th><th>Hits</th><th>Latency (ms)</th></tr></thead>
+         <tbody>
+           ${order.map(k => {
+             const m = b[k]; if (!m) return '';
+             const isBest = m.r_at_5 >= best;
+             return `<tr class="${isBest?'bench-row-best':''}">
+               <td>${labels[k]||k}</td>
+               <td><strong>${(m.r_at_5*100).toFixed(1)}%</strong></td>
+               <td>${m.hits}/${m.total}</td>
+               <td>${(m.avg_latency_ms||0).toFixed(2)}</td>
+             </tr>`;
+           }).join('')}
+         </tbody>
+       </table>
+       </div>
+       <div style="margin-top:10px;font-size:11px;color:var(--muted);line-height:1.6">
+         <p>¹ graph_only 实际测量残差 FTS5+HRR（FactRetriever 仅接受 3 个权重）。</p>
+         <p>ⁱ vector_only 基于 FTS5 候选池，非独立 BGE 向量检索。</p>
+          <p>默认权重: FTS5=0.40 + Jaccard=0.30 + HRR=0.30</p>
+       </div>`;
+  } catch(e) {
+    el.innerHTML = `<div class="empty"><div class="icon">⚠️</div><p>${e.message}</p></div>`;
+  }
+}
+
+// ============================================================
+// Timeline Tab (NEW)
+// ============================================================
+async function loadTimelineTab() {
+  try {
+    const tl = await get('/api/timeline');
+    const days = tl.days || [];
+    document.getElementById('timelineCount').textContent = days.length + ' 天';
+
+    // Facts per day
+    if (charts.tl) charts.tl.destroy();
+    charts.tl = new Chart(document.getElementById('chartTimeline'), {
+      type:'bar',
+      data: {
+        labels: days.map(d => d.day.slice(5)),
+        datasets: [{ label:'事实数', data: days.map(d => d.count), backgroundColor: '#3fb950', borderRadius: 3 }]
+      },
+      options: {
+        responsive: true,
+        scales: {
+          y: { beginAtZero: true, grid:{color:'#30363d'}, ticks:{color:'#8b949e'} },
+          x: { grid:{display:false}, ticks:{color:'#8b949e', maxTicksLimit: 20} }
+        },
+        plugins: { legend: { display: false } }, color: '#8b949e'
+      }
+    });
+
+    // Avg trust per day
+    if (charts.tlt) charts.tlt.destroy();
+    charts.tlt = new Chart(document.getElementById('chartTimelineTrust'), {
+      type:'line',
+      data: {
+        labels: days.map(d => d.day.slice(5)),
+        datasets: [{
+          label:'平均信任', data: days.map(d => d.avg_trust),
+          borderColor: '#58a6ff', backgroundColor: 'rgba(88,166,255,.1)',
+          fill: true, tension: 0.3, pointRadius: 3
+        }]
+      },
+      options: {
+        responsive: true,
+        scales: {
+          y: { beginAtZero: true, max: 1, grid:{color:'#30363d'}, ticks:{color:'#8b949e'} },
+          x: { grid:{display:false}, ticks:{color:'#8b949e', maxTicksLimit: 20} }
+        },
+        plugins: { legend: { display: false } }, color: '#8b949e'
+      }
+    });
+
+    // Day-by-day fact list (session grouping)
+    const el = document.getElementById('timelineFacts');
+    if (days.length === 0) {
+      el.innerHTML = '<div class="empty"><div class="icon">📅</div><p>No timeline data</p></div>';
+      return;
+    }
+
+    // Load facts grouped by day using the dedicated by_day API
+    // (eliminates Bug 1: sequential /api/facts calls all returned the same 20 facts)
+    el.innerHTML = '';
+    for (const day of days.slice(-10).reverse()) {  // Last 10 days
+      try {
+        const r = await get(`/api/facts/by_day?date=${day.day}&limit=20`);
+        const dayFacts = r.facts || [];
+        if (dayFacts.length === 0) continue;
+
+        const section = document.createElement('div');
+        section.style.cssText = 'padding:8px 0;border-bottom:1px solid var(--border);';
+        section.innerHTML = `
+          <div style="padding:0 14px;margin-bottom:6px;display:flex;align-items:center;gap:8px">
+            <strong style="font-size:13px;color:var(--text)">📅 ${day.day}</strong>
+            <span class="badge">${dayFacts.length} facts · avg trust ${day.avg_trust?.toFixed(2)}</span>
+          </div>
+          ${dayFacts.map(f =>
+            `<div class="fact-item" data-fid="${f.fact_id}" data-content="${escape(f.content||'')}">
+               <span class="fact-id">#${f.fact_id}</span>
+               <div class="fact-content">${escape((f.content||'').slice(0,150))}</div>
+               <div class="fact-meta">
+                 <span class="tag">${f.category}</span>
+                 <span>⭐ ${(f.trust_score||0).toFixed(2)}</span>
+               </div>
+             </div>`
+          ).join('')}
+        `;
+        el.appendChild(section);
+      } catch(e) { console.error('Timeline day fetch failed for', day.day, e); }
+    }
+
+  } catch(e) {
+    document.getElementById('chartTimeline').parentElement.innerHTML =
+      '<div class="empty"><div class="icon">📅</div><p>Failed to load timeline</p></div>';
+  }
+}
+
+// ============================================================
+// Tiers / Crystals Tab (NEW)
+// ============================================================
+async function loadTiers() {
+  try {
+    const data = await get('/api/tiers');
+    const tierAggs = data.tiers || [];
+    const timeline = data.timeline || [];
+
+    const tcounts = {};
+    tierAggs.forEach(t => { tcounts[t.tier] = t.count; });
+    const total = Object.values(tcounts).reduce((a,b) => a+b, 0);
+    document.getElementById('tierTotalBadge').textContent = total + ' 条分层记忆';
+
+    // Render tier cards
+    const tdescs = {
+      working: 'Active, short-term context. Recently observed.',
+      episodic: 'Event-based memories with temporal context.',
+      semantic: 'Generalized knowledge, facts, and concepts.',
+      procedural: 'How-to knowledge, processes, and workflows.'
+    };
+    const tcolors = { working:'#f85149', episodic:'#d29922', semantic:'#3fb950', procedural:'#bc8cff' };
+
+    const grid = document.getElementById('tierGrid');
+    grid.innerHTML = Object.entries(tcounts).map(([tier, count]) =>
+      `<div class="tier-card ${tier} ${selectedTier === tier ? 'active' : ''}"
+           data-tier="${tier}"
+           onclick="selectTier('${tier}')">
+         <div class="tier-name">${tier.charAt(0).toUpperCase() + tier.slice(1)}</div>
+         <div class="tier-count">${count}</div>
+         <div class="tier-desc">${tdescs[tier]||''}</div>
+       </div>`
+    ).join('');
+
+    // Tier distribution chart
+    if (charts.td) charts.td.destroy();
+    const labels = Object.keys(tcounts);
+    const dataVals = Object.values(tcounts);
+    if (dataVals.some(d => d > 0)) {
+      charts.td = new Chart(document.getElementById('chartTierDist'), {
+        type:'doughnut',
+        data: {
+          labels,
+          datasets: [{ data: dataVals, backgroundColor: labels.map(l => tcolors[l]||'#58a6ff'), borderWidth: 2, borderColor: 'var(--card-bg)' }]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { position:'bottom', labels:{color:'#8b949e',boxWidth:10,padding:8} }
+          },
+          color: '#8b949e'
+        }
+      });
+    }
+
+    // Tier timeline (from /api/tiers aggregated data)
+    if (timeline.length > 0) {
+      if (charts.tt) charts.tt.destroy();
+      const sortedDays = timeline.map(d => d.date).sort();
+      charts.tt = new Chart(document.getElementById('chartTierTimeline'), {
+        type:'bar',
+        data: {
+          labels: sortedDays.map(d => d.slice(5)),
+          datasets: Object.keys(tcolors).map(name => ({
+            label: name,
+            data: sortedDays.map(d => timeline.find(entry => entry.date === d)?.tiers?.[name] || 0),
+            backgroundColor: tcolors[name] || '#58a6ff',
+            borderRadius: 2
+          }))
+        },
+        options: {
+          responsive: true,
+          scales: {
+            x: { stacked: true, grid:{display:false}, ticks:{color:'#8b949e',maxTicksLimit:15} },
+            y: { stacked: true, beginAtZero: true, grid:{color:'#30363d'}, ticks:{color:'#8b949e'} }
+          },
+          plugins: { legend: { labels:{color:'#8b949e',boxWidth:12} } },
+          color: '#8b949e'
+        }
+      });
+    }
+
+    // Load facts for selected tier (or first tier)
+    if (!selectedTier) {
+      const first = Object.keys(tcounts).find(k => tcounts[k] > 0);
+      selectedTier = first || 'working';
+    }
+    loadTierFacts(selectedTier);
+
+  } catch(e) {
+    console.error('Tiers load failed', e);
+    document.getElementById('tierGrid').innerHTML = '<div class="empty"><p>Failed to load tiers</p></div>';
+  }
+}
+
+function selectTier(tier) {
+  selectedTier = tier;
+  document.querySelectorAll('.tier-card').forEach(c => c.classList.remove('active'));
+  document.querySelectorAll('.tier-card').forEach(c => {
+    if (c.dataset.tier === tier) c.classList.add('active');
+  });
+  tierState.offset = 0;
+  loadTierFacts(tier);
+}
+
+async function loadTierFacts(tier) {
+  if (!tier) return;
+  document.getElementById('tierSelectedName').textContent = tier;
+  try {
+    const tag = 'tier:' + tier;
+    const r = await get(`/api/facts?tag=${encodeURIComponent(tag)}&sort=updated&order=desc&offset=${tierState.offset}&limit=50`);
+    tierState.total = r.total;
+    renderFactList('tierFactsList', r.facts, true);
+    renderPagination('tierPagination', tierState.offset, r.total, 50, (o) => {
+      tierState.offset = o;
+      loadTierFacts(tier);
+    });
+  } catch(e) {
+    document.getElementById('tierFactsList').innerHTML = '<div class="empty"><p>Error loading facts</p></div>';
+  }
+}
+
+// ============================================================
+// Activity Tab (NEW)
+// ============================================================
+function switchActivityFilter(filter) {
+  activityFilter = filter;
+  document.querySelectorAll('#activityFilters .btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.op === filter);
+  });
+  actState.offset = 0;
+  loadActivity();
+}
+
+async function loadActivity() {
+  const el = document.getElementById('activityList');
+  try {
+    const url = activityFilter === 'all'
+      ? `/api/activity?offset=${actState.offset}&limit=50`
+      : `/api/activity?op_type=${activityFilter}&offset=${actState.offset}&limit=50`;
+    const r = await get(url);
+    const activities = r.activities || [];
+    actState.total = r.total || 0;
+    document.getElementById('activityCount').textContent = actState.total + ' 条记录';
+
+    if (activities.length === 0) {
+      el.innerHTML = '<div class="empty"><div class="icon">⚡</div><p>No activity yet</p></div>';
+      renderPagination('activityPagination', actState.offset, actState.total, 50, (o) => { actState.offset = o; loadActivity(); });
+      return;
+    }
+
+    el.innerHTML = activities.map(a => {
+      const isUpdate = a.created_at !== a.updated_at;
+      const opClass = isUpdate ? 'update' : 'add';
+      const opLabel = isUpdate ? 'Update' : 'Add';
+      return `<div class="fact-item fade-in">
+        <span class="fact-id">#${a.fact_id}</span>
+        <div class="fact-content">
+          <span class="activity-op ${opClass}">${opLabel}</span>
+          ${escape((a.content||'').slice(0,200))}${(a.content||'').length>200?'…':''}
+        </div>
+        <div class="fact-meta">
+          <span class="tag ${a.category==='user_pref'?'green':a.category==='project'?'orange':a.category==='tool'?'purple':''}">${a.category}</span>
+          <span>⭐ ${(a.trust_score||0).toFixed(2)}</span>
+          <span title="${a.updated_at||''}">${timeAgo(a.updated_at || a.created_at)}</span>
+        </div>
+      </div>`;
+    }).join('');
+
+    renderPagination('activityPagination', actState.offset, actState.total, 50, (o) => {
+      actState.offset = o;
+      loadActivity();
+    });
+  } catch(e) {
+    el.innerHTML = '<div class="empty"><div class="icon">⚠️</div><p>' + e.message + '</p></div>';
+  }
+}
+
+// ============================================================
+// Live refresh on Activity tab
+// ============================================================
+let activityRefreshInterval = null;
+
+// Observe tab switches for auto-refresh
+const origHandleHash = handleHash;
+const _origSwitchTab = switchTab;
+// We'll handle refresh in the hash change
+window.addEventListener('hashchange', () => {
+  if (activityRefreshInterval) {
+    clearInterval(activityRefreshInterval);
+    activityRefreshInterval = null;
+  }
+  if (window.location.hash === '#activity') {
+    // Auto-refresh activity every 10s
+    activityRefreshInterval = setInterval(() => {
+      if (window.location.hash === '#activity') {
+        loadActivity();
+      }
+    }, 10000);
+  }
+});
+
+// ============================================================
+// Start
+// ============================================================
+init();
+</script>
+</body>
+</html>

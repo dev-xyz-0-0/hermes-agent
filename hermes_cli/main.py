@@ -5142,6 +5142,16 @@ For more help on a command:
     memory_import.add_argument("--from", dest="import_source", choices=["builtin"], required=True)
     memory_import.add_argument("--provider", choices=["holographic"], required=True)
     memory_import.add_argument("--apply", action="store_true", help="Write the previewed entries (default is dry-run)")
+    memory_health = memory_sub.add_parser(
+        "health", help="Read-only Holographic memory health diagnostics (never mutates the database)",
+    )
+    memory_health.add_argument("--json", action="store_true", help="Emit machine-parsable JSON only")
+    memory_health.add_argument("--backup-path", dest="backup_path", default=None, help="Also verify this backup file's checksum/integrity")
+    memory_benchmark = memory_sub.add_parser(
+        "benchmark", help="Read-only Holographic memory retrieval benchmark against a gold set",
+    )
+    memory_benchmark.add_argument("--gold-set", dest="gold_set", required=True, help="Path to a benchmark gold-set JSON file")
+    memory_benchmark.add_argument("--json", action="store_true", help="Emit machine-parsable JSON only")
 
     def cmd_memory(args):
         sub = getattr(args, "memory_command", None)

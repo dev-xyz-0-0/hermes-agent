@@ -521,8 +521,127 @@ def memory_command(args) -> None:
         cmd_status(args)
     elif sub == "import":
         cmd_import(args)
+    elif sub == "health":
+        cmd_health(args)
+    elif sub == "benchmark":
+        cmd_benchmark(args)
     else:
         cmd_status(args)
+
+
+def _holographic_db_path() -> Path:
+    """Resolve the active profile's Holographic memory database path.
+
+    Reuses the same `$HERMES_HOME` substitution the provider itself applies
+    in `HolographicMemoryProvider.initialize()` — never hardcodes
+    `~/.hermes`. Honors a custom `db_path` set under
+    `plugins.hermes-memory-store` in config.yaml, if present.
+    """
+    from plugins.memory.holographic import _DEFAULT_DB_PATH, _load_plugin_config
+
+    hermes_home = str(get_hermes_home())
+    plugin_config = _load_plugin_config()
+    db_path = plugin_config.get("db_path", _DEFAULT_DB_PATH)
+    if isinstance(db_path, str):
+        db_path = db_path.replace("$HERMES_HOME", hermes_home).replace("${HERMES_HOME}", hermes_home)
+    return Path(db_path).expanduser()
+
+
+def cmd_health(args) -> None:
+    """`hermes memory health [--json] [--backup-path PATH]` — read-only.
+
+    Resolves the database for the currently active profile (default or
+    named via the global `-p`/`--profile` flag, which has already set
+    HERMES_HOME before this module was imported) and never accepts an
+    arbitrary namespace or raw chat identity.
+    """
+    import json as _json
+    import sys as _sys
+
+    from plugins.memory.holographic import diagnostics as _diagnostics
+
+    db_path = _holographic_db_path()
+    as_json = bool(getattr(args, "json", False))
+    backup_path = getattr(args, "backup_path", None)
+
+    report = _diagnostics.run_diagnostics(db_path, backup_path=backup_path)
+
+    if as_json:
+        print(_json.dumps(report.to_dict(), indent=2))
+    else:
+        from hermes_constants import display_hermes_home
+
+        print(f"\n  Holographic memory health ({display_hermes_home()})")
+        print("  " + "─" * 40)
+        print(f"  Database: {db_path}")
+        print(f"  Status:   {'OK' if report.ok else 'ISSUES FOUND'}")
+        for key, value in report.counts.items():
+            print(f"  {key}: {value}")
+        if report.namespaces:
+            print(f"  Namespaces: {len(report.namespaces)} (opaque labels only)")
+        if report.issues:
+            print("\n  Issues:")
+            for issue in report.issues:
+                print(f"    [{issue.severity}] {issue.code}: {issue.message}")
+        if report.backup is not None:
+            print(f"\n  Backup check: {'ok' if report.backup['ok'] else report.backup['reason']}")
+        print()
+
+    _sys.exit(report.exit_code)
+
+
+def cmd_benchmark(args) -> None:
+    """`hermes memory benchmark --gold-set PATH [--json]` — read-only.
+
+    Never mutates retrieval counters, trust scores, or feedback (see
+    plugins/memory/holographic/benchmark.py). Operates against the active
+    profile's database only; does not accept an arbitrary namespace.
+    """
+    import json as _json
+    import sys as _sys
+
+    from plugins.memory.holographic import benchmark as _benchmark
+
+    db_path = _holographic_db_path()
+    gold_set_path = getattr(args, "gold_set", None)
+    as_json = bool(getattr(args, "json", False))
+
+    if not db_path.exists():
+        message = f"Holographic memory database not found: {db_path}"
+        if as_json:
+            print(_json.dumps({"error": message}))
+        else:
+            print(f"\n  {message}\n")
+        _sys.exit(3)
+
+    try:
+        report = _benchmark.run_benchmark(db_path, gold_set_path)
+    except _benchmark.BenchmarkError as exc:
+        message = str(exc)
+        if as_json:
+            print(_json.dumps({"error": message}))
+        else:
+            print(f"\n  Benchmark failed: {message}\n")
+        _sys.exit(2)
+
+    if as_json:
+        print(_json.dumps(report, indent=2))
+    else:
+        print("\n  Holographic memory benchmark")
+        print("  " + "─" * 40)
+        print(f"  Database:  {report['database']}")
+        print(f"  Gold set:  {report['gold_set']}")
+        print(f"  Queries:   {report['query_count']}")
+        print(f"  Recall@1:  {report['recall_at_1']:.2%}")
+        print(f"  Recall@5:  {report['recall_at_5']:.2%}")
+        print(f"  MRR:       {report['mean_reciprocal_rank']:.3f}")
+        print(f"  Empty-result rate: {report['empty_result_rate']:.2%}")
+        print(f"  Query-error rate:  {report['query_error_rate']:.2%}")
+        print(f"  Namespace leakage: {report['namespace_leakage_count']}")
+        print(f"  Latency p50/p95 (ms): {report['latency_ms']['p50']} / {report['latency_ms']['p95']}")
+        print()
+
+    _sys.exit(0)
 
 
 def cmd_import(args) -> None:

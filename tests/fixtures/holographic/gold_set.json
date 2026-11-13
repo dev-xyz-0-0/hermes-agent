@@ -1,0 +1,17 @@
+{
+  "description": "Small, deterministic, hand-checkable benchmark gold set for plugins/memory/holographic/benchmark.py. Corpus facts are inserted in this order into a fresh database by build_fixture_db(), so SQLite AUTOINCREMENT assigns fact_id 1..5 in the order below.",
+  "corpus": [
+    {"content": "Prefers dark mode editor themes.", "category": "user_pref", "namespace": ""},
+    {"content": "The Nightjar project uses PostgreSQL for its database.", "category": "project", "namespace": ""},
+    {"content": "Alice Smith is the lead engineer on Nightjar.", "category": "general", "namespace": ""},
+    {"content": "Prefers tabs over spaces for Python code.", "category": "user_pref", "namespace": ""},
+    {"content": "The deploy process runs through GitHub Actions.", "category": "project", "namespace": ""}
+  ],
+  "cases": [
+    {"query": "dark mode editor theme", "expected_fact_id": 1, "namespace": ""},
+    {"query": "Nightjar database Postgres", "expected_fact_id": 2, "namespace": ""},
+    {"query": "Alice Smith lead engineer", "expected_fact_id": 3, "namespace": ""},
+    {"query": "tabs spaces Python", "expected_fact_id": 4, "namespace": ""},
+    {"query": "deploy process GitHub Actions", "expected_fact_id": 5, "namespace": ""}
+  ]
+}
