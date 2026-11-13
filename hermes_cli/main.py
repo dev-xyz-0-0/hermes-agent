@@ -5180,6 +5180,27 @@ For more help on a command:
     )
     memory_verify.add_argument("--json", action="store_true", help="Emit machine-parsable JSON only")
     memory_verify.add_argument("--backup-path", dest="backup_path", default=None, help="Also verify this backup file's checksum/integrity")
+    memory_viewer = memory_sub.add_parser(
+        "viewer",
+        help="Start the optional, read-only, loopback-only Holographic memory diagnostic viewer",
+        description=(
+            "Starts a local HTTP server exposing a read-only, namespace-scoped view of the\n"
+            "active profile's Holographic memory database (opaque namespace labels, redacted\n"
+            "fact content, no mutation endpoints). Disabled unless you run this explicitly.\n"
+            "Binds to loopback only — non-loopback binding is not supported in this release."
+        ),
+    )
+    memory_viewer.add_argument("--port", type=int, default=8787, help="TCP port to bind (default: 8787)")
+    memory_viewer.add_argument(
+        "--host", default="127.0.0.1",
+        help="Loopback address to bind: 127.0.0.1, localhost, or ::1 (default: 127.0.0.1). "
+             "Any other value is refused — non-loopback binding is not supported.",
+    )
+    memory_viewer.add_argument(
+        "--show-raw-identity", action="store_true",
+        help="Show raw namespace identities next to their opaque digest on the namespace list "
+             "(explicit opt-in; off by default).",
+    )
 
     def cmd_memory(args):
         sub = getattr(args, "memory_command", None)

@@ -374,31 +374,128 @@ from `tests/plugins/memory/conftest.py`.
 
 ## 11. Phase 7 — Optional local viewer
 
-- [ ] Keep viewer dependencies optional.
-- [ ] Bind to loopback by default.
-- [ ] Disable viewer by default.
-- [ ] Make initial viewer read-only.
-- [ ] Require explicit profile selection.
-- [ ] Require explicit namespace selection.
-- [ ] Avoid an all-namespaces default view.
-- [ ] Redact secret-shaped fact content.
-- [ ] Minimize displayed provenance.
-- [ ] Distinguish active/superseded/forgotten states.
-- [ ] Show revision and relationship provenance safely.
-- [ ] Enforce pagination and query limits.
-- [ ] Expose no raw SQL, restore, file access, or mutation endpoint.
-- [ ] Require authentication and CSRF protection before any future write or
-      non-loopback mode.
+- [x] Keep viewer dependencies optional. (`plugins/memory/holographic/viewer.py`
+      uses only the Python stdlib — `http.server`, `sqlite3`, `html`,
+      `urllib.parse` — no new third-party dependency. `fastapi`/`uvicorn`
+      are declared in `pyproject.toml` but unused by any existing runtime
+      code path in this repo, so building on them would create a new
+      dependency *relationship* even though the packages were already
+      listed; stdlib avoids that entirely and is trivially provably
+      optional — see `tests/plugins/memory/test_holographic_viewer_optional_import.py`.)
+- [x] Bind to loopback by default. (`create_server(..., host="127.0.0.1")`
+      default; `_validate_host` only accepts `127.0.0.1`/`localhost`/`::1`.)
+- [x] Disable viewer by default. (Nothing starts it except the operator
+      explicitly running `hermes memory viewer`; see
+      `hermes_cli/memory_setup.py`'s `cmd_viewer`.)
+- [x] Make initial viewer read-only. (Every connection opened with SQLite's
+      `mode=ro` URI flag — identical technique to
+      `diagnostics.run_diagnostics` — plus every mutation HTTP method is
+      explicitly rejected with 405; no route ever calls a `MemoryStore`
+      write method or constructs a writable `MemoryStore` at all.)
+- [x] Require explicit profile selection. (Resolved through the same
+      `_holographic_db_path()`/`get_hermes_home()` helpers every other
+      `hermes memory` subcommand uses; there is no "all profiles" mode.)
+- [x] Require explicit namespace selection. (`/namespace`, `/fact`, and
+      `/entity` all require an explicit `ns=<digest>` query parameter;
+      missing it is a 400, not a fallback to "no filter.")
+- [x] Avoid an all-namespaces default view. (`/` is a namespace *selector*
+      — opaque digests + counts only; it never renders a fact.)
+- [x] Redact secret-shaped fact content. (New
+      `plugins/memory/holographic/__init__.py:redact_secret_shapes()`
+      reuses the exact same `_RE_SECRET_SHAPE`/`_RE_PRIVATE_KEY`/
+      `_RE_RECOVERY_PHRASE`/`_RE_CREDENTIAL` detectors the capture-time
+      filter already uses, applied to every rendered fact's content/tags
+      and every rendered entity name as defense-in-depth for data that
+      predates or bypasses that filter.)
+- [x] Minimize displayed provenance. (Fact pages show status, category,
+      trust_score, confidence, source_type, extraction_method,
+      created_at/updated_at — never `fact_sources.chat_id`/`platform`/
+      `author`, the on-disk DB path, or any environment value.)
+- [x] Distinguish active/superseded/forgotten states. (Distinct CSS status
+      badges for active vs. superseded in every listing; forgotten facts
+      are hard-deleted by `remove_fact` so there is no content left to
+      show — represented honestly as an opaque tombstone count in a
+      visually distinct "forgotten" badge, never a fabricated entry.)
+- [x] Show revision and relationship provenance safely. (Fact pages link
+      supersession ancestors/descendant within the same namespace, bounded
+      to `_SUPERSESSION_CHAIN_MAX_HOPS`; entity pages list namespace-scoped
+      relationships and a bounded BFS traversal via
+      `relationships.list_relationships`/`relationships.traverse`, called
+      through `_ReadOnlyStoreView` — see below.)
+- [x] Enforce pagination and query limits. (Every list view — namespace
+      selector, fact list, relationship list, traversal — is capped at
+      `MAX_PAGE_SIZE` (50) rows regardless of client-requested
+      `per_page`; search (`q`) is always a bound SQL parameter, never
+      interpolated.)
+- [x] Expose no raw SQL, restore, file access, or mutation endpoint. (Only
+      four fixed, parameterized read queries exist; every non-GET method
+      405s; no route accepts a file path, SQL fragment, or restore action.)
+- [x] Require authentication and CSRF protection before any future write or
+      non-loopback mode. (Satisfied by NOT offering either: non-loopback
+      binding raises `NonLoopbackBindingNotSupported` before any socket is
+      opened — a deliberate "not supported at all" choice, documented in
+      the module docstring, rather than a flag that could be mistaken for
+      a real safeguard with no auth/CSRF behind it. No write endpoint
+      exists at all in this phase.)
+
+Deliberate design note — `--show-raw-identity`: implemented as an explicit,
+server-start-time-only CLI flag (never a per-request query parameter). It is
+off by default; when passed, it only adds the raw namespace string next to
+its digest on the `/` selector page — it never changes which routes exist,
+never disables redaction, and never affects the read-only/loopback-only
+guarantees. This matches the plan's own allowance ("opaque labels unless the
+operator explicitly requests identity metadata") as a narrow, documented,
+opt-in escape hatch rather than a default behavior.
+
+A `_ReadOnlyStoreView` adapter class (in `viewer.py`) implements only the two
+read methods `relationships.list_relationships`/`relationships.traverse`
+need (`list_relationships_for_entity`, `relationship_neighbors`), backed
+directly by the module's own `mode=ro` connection — a real `store.MemoryStore`
+is deliberately never constructed in this module, because its constructor
+opens a read-write connection and can run schema migrations, which would
+break the read-only guarantee.
 
 ### Viewer tests
 
-- [ ] Default bind address is loopback.
-- [ ] Mutation HTTP methods/endpoints are absent or rejected.
-- [ ] Namespace selection is explicit.
-- [ ] Cross-namespace access is rejected.
-- [ ] Pagination/query limits are enforced.
-- [ ] Secrets and raw identities are absent from rendered output.
-- [ ] Normal Hermes startup does not import optional viewer dependencies.
+All in `tests/plugins/memory/test_holographic_viewer.py` (HTTP-level, 44
+tests), `tests/plugins/memory/test_holographic_viewer_optional_import.py`
+(fresh-interpreter subprocess import checks, 7 tests), and
+`tests/hermes_cli/test_memory_viewer_cli.py` (CLI wiring, 6 tests) — 57 new
+tests total.
+
+- [x] Default bind address is loopback. (Tests construct the real
+      `ViewerServer`/socket via `create_server` and assert
+      `server.server_address[0] == "127.0.0.1"`, plus confirm
+      `0.0.0.0`/other hosts raise before any socket opens.)
+- [x] Mutation HTTP methods/endpoints are absent or rejected. (Every
+      registered route — `/`, `/namespace`, `/fact`, `/entity`, and an
+      unknown path — is exercised with POST/PUT/DELETE/PATCH over a real
+      HTTP connection and asserted to return 404/405, with `Allow: GET` on
+      405s.)
+- [x] Namespace selection is explicit. (`/namespace`/`/fact` without `ns`
+      400; index never renders a fact.)
+- [x] Cross-namespace access is rejected. (Two real namespace fixtures;
+      namespace B's fact_id requested under namespace A's digest 404s;
+      namespace B's entity_id requested under namespace A's digest 404s; a
+      raw namespace string passed directly as `ns` also 404s rather than
+      being accepted as a selector.)
+- [x] Pagination/query limits are enforced. (A corpus of `MAX_PAGE_SIZE + 25`
+      facts and `MAX_PAGE_SIZE + 10` namespaces is seeded; default page,
+      an oversized `per_page`, and a past-the-end `page` are all asserted
+      to return at most `MAX_PAGE_SIZE` rows, never the full set.)
+- [x] Secrets and raw identities are absent from rendered output. (A fact
+      seeded with a real `sk-ant-...`-shaped secret and a fact tagged with
+      a real `telegram:chat_...` namespace string are asserted absent from
+      every rendered page, with `[REDACTED:...]`/the opaque digest shown
+      instead; a separate test confirms `--show-raw-identity` is the only
+      way the raw string appears.)
+- [x] Normal Hermes startup does not import optional viewer dependencies.
+      (Fresh-interpreter subprocess checks of `run_agent`, `cli`,
+      `hermes_cli.main`, `model_tools`, `plugins.memory.holographic`, and
+      `hermes_cli.memory_setup` all assert
+      `"plugins.memory.holographic.viewer" not in sys.modules`; a sanity
+      check confirms the marker mechanism itself works by explicitly
+      importing the viewer module and seeing it appear.)
 
 ## 12. Phase 8 — Retrieval telemetry
 

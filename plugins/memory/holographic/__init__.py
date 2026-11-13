@@ -228,6 +228,41 @@ def _has_credential(text: str) -> bool:
     return any(_looks_like_secret_value(match.group(1)) for match in _RE_CREDENTIAL.finditer(text))
 
 
+def redact_secret_shapes(text: str) -> str:
+    """Replace secret-shaped spans in ``text`` with a placeholder, for
+    DISPLAY purposes only (e.g. the Phase 7 read-only viewer,
+    ``plugins/memory/holographic/viewer.py``).
+
+    Reuses the exact same detection regexes already used at capture time
+    (``_RE_SECRET_SHAPE``, ``_RE_PRIVATE_KEY``, ``_RE_RECOVERY_PHRASE``,
+    ``_RE_CREDENTIAL``/``_looks_like_secret_value`` via ``_fact_problem``)
+    rather than inventing a second, parallel secret-shape detector. Under
+    normal operation every ``fact_store add`` path already rejects
+    secret-shaped content via ``_fact_problem`` before it is ever written,
+    so this is a defense-in-depth pass for data that predates that filter,
+    was inserted directly against the store (e.g. by a maintenance/import
+    path or a test fixture), or slips through for any other reason — the
+    viewer must never assume the database is already clean.
+
+    Not a general PII redactor: it only targets the same credential/secret
+    *shapes* the capture-time filter already recognizes.
+    """
+    if not text:
+        return text
+    redacted = _RE_PRIVATE_KEY.sub("[REDACTED:PRIVATE_KEY]", text)
+    redacted = _RE_SECRET_SHAPE.sub("[REDACTED:SECRET]", redacted)
+    redacted = _RE_RECOVERY_PHRASE.sub("[REDACTED:RECOVERY_PHRASE]", redacted)
+
+    def _cred_sub(match: "re.Match[str]") -> str:
+        value = match.group(1)
+        if _looks_like_secret_value(value):
+            return match.group(0)[: match.start(1) - match.start(0)] + "[REDACTED:CREDENTIAL]"
+        return match.group(0)
+
+    redacted = _RE_CREDENTIAL.sub(_cred_sub, redacted)
+    return redacted
+
+
 def _fact_problem(content: str) -> str | None:
     """Why content should not be stored as a fact, or None."""
     text = (content or "").strip()

@@ -533,6 +533,8 @@ def memory_command(args) -> None:
         cmd_backfill_relationships(args)
     elif sub == "verify":
         cmd_verify(args)
+    elif sub == "viewer":
+        cmd_viewer(args)
     else:
         cmd_status(args)
 
@@ -852,6 +854,62 @@ def cmd_verify(args) -> None:
         print()
 
     _sys.exit(report.exit_code)
+
+
+def cmd_viewer(args) -> None:
+    """`hermes memory viewer [--port N] [--host HOST] [--show-raw-identity]`.
+
+    Starts the optional, read-only, local-only Holographic memory
+    diagnostic viewer (Phase 7 of
+    docs/plans/demo-reference-plan/implementation-plan.md) against the
+    currently active profile's database — resolved through the same
+    `_holographic_db_path()` helper every other `hermes memory` subcommand
+    uses. There is no way to point this at "all profiles" or an arbitrary
+    namespace; see `plugins/memory/holographic/viewer.py`'s module
+    docstring for the full safety model (loopback-only binding, read-only
+    SQLite connections, opaque namespace digests, display redaction,
+    pagination caps).
+
+    Blocks (serves requests) until interrupted with Ctrl+C. Never invoked
+    automatically by normal Hermes startup, and not reachable from any
+    gateway/chat slash command.
+    """
+    import sys as _sys
+
+    from hermes_constants import display_hermes_home
+    from plugins.memory.holographic import viewer as _viewer
+
+    db_path = _holographic_db_path()
+    if not db_path.exists():
+        print(f"\n  Holographic memory database not found: {db_path}\n")
+        _sys.exit(3)
+
+    host = getattr(args, "host", None) or "127.0.0.1"
+    port = int(getattr(args, "port", 8787) or 8787)
+    show_raw_identity = bool(getattr(args, "show_raw_identity", False))
+
+    try:
+        server = _viewer.create_server(db_path, host=host, port=port, show_raw_identity=show_raw_identity)
+    except _viewer.NonLoopbackBindingNotSupported as exc:
+        print(f"\n  {exc}\n")
+        _sys.exit(3)
+
+    bound_host, bound_port = server.server_address[:2]
+    print(f"\n  Holographic memory viewer ({display_hermes_home()})")
+    print(f"  Database:  {db_path}")
+    print(f"  Read-only. No restore, raw SQL, or mutation endpoint exists.")
+    print(f"  Serving:   http://{bound_host}:{bound_port}/")
+    if show_raw_identity:
+        print("  WARNING:   --show-raw-identity is enabled — namespace pages will show raw chat identities.")
+    print("  Press Ctrl+C to stop.\n")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def cmd_import(args) -> None:
