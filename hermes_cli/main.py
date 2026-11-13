@@ -5152,6 +5152,34 @@ For more help on a command:
     )
     memory_benchmark.add_argument("--gold-set", dest="gold_set", required=True, help="Path to a benchmark gold-set JSON file")
     memory_benchmark.add_argument("--json", action="store_true", help="Emit machine-parsable JSON only")
+    memory_rebuild_vectors = memory_sub.add_parser(
+        "rebuild-vectors", help="Recompute HRR vectors for every active fact (idempotent)",
+    )
+    memory_rebuild_vectors.add_argument("--dry-run", dest="dry_run", action="store_true", default=True,
+                                         help="Report planned counts without writing (default)")
+    memory_rebuild_vectors.add_argument("--apply", dest="dry_run", action="store_false",
+                                         help="Actually rebuild vectors (creates+verifies a backup first)")
+    memory_rebuild_vectors.add_argument("--json", action="store_true", help="Emit machine-parsable JSON only")
+    memory_rebuild_banks = memory_sub.add_parser(
+        "rebuild-banks", help="Rebuild every namespace/category HRR memory bank (idempotent)",
+    )
+    memory_rebuild_banks.add_argument("--dry-run", dest="dry_run", action="store_true", default=True,
+                                       help="Report planned bank pairs without writing (default)")
+    memory_rebuild_banks.add_argument("--apply", dest="dry_run", action="store_false",
+                                       help="Actually rebuild banks (creates+verifies a backup first)")
+    memory_rebuild_banks.add_argument("--json", action="store_true", help="Emit machine-parsable JSON only")
+    memory_backfill = memory_sub.add_parser(
+        "backfill-relationships",
+        help="Scan existing facts for deterministic co-occurrence relationships",
+    )
+    memory_backfill.add_argument("--dry-run", action="store_true", help="Report planned candidates without writing")
+    memory_backfill.add_argument("--apply", action="store_true", help="Write the candidate relationships (creates+verifies a backup first)")
+    memory_backfill.add_argument("--json", action="store_true", help="Emit machine-parsable JSON only")
+    memory_verify = memory_sub.add_parser(
+        "verify", help="Read-only Holographic memory verification (alias for `health`)",
+    )
+    memory_verify.add_argument("--json", action="store_true", help="Emit machine-parsable JSON only")
+    memory_verify.add_argument("--backup-path", dest="backup_path", default=None, help="Also verify this backup file's checksum/integrity")
 
     def cmd_memory(args):
         sub = getattr(args, "memory_command", None)

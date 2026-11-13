@@ -271,30 +271,49 @@ intentional deviations in the relevant PR.
 
 ## 9. Phase 6 — Maintenance commands
 
-- [ ] Add `hermes memory rebuild-vectors`.
-- [ ] Add `hermes memory rebuild-banks`.
-- [ ] Add `hermes memory backfill-relationships --dry-run`.
-- [ ] Add explicit `--apply` behavior.
-- [ ] Add `hermes memory verify` or reuse health consistently.
-- [ ] Resolve default/named profiles safely.
-- [ ] Acquire a maintenance lock for writes.
-- [ ] Create and verify a backup before apply operations.
-- [ ] Display exact target before confirmation.
-- [ ] Support interruption and idempotent restart.
-- [ ] Avoid printing fact content or raw identities.
-- [ ] Define stable JSON output and exit codes.
-- [ ] Keep commands unavailable through gateways/model tools.
+- [x] Add `hermes memory rebuild-vectors`.
+- [x] Add `hermes memory rebuild-banks`.
+- [x] Add `hermes memory backfill-relationships --dry-run`.
+- [x] Add explicit `--apply` behavior.
+- [x] Add `hermes memory verify` or reuse health consistently. (Implemented
+      as a thin alias: `maintenance.verify()` calls
+      `diagnostics.run_diagnostics()` directly and `cmd_verify` is a
+      near-duplicate of `cmd_health` under the `verify` name — same checks,
+      same JSON schema/exit codes, no separate check logic. See
+      `plugins/memory/holographic/maintenance.py`'s module docstring for
+      the rationale: the plan explicitly allows "reuse health
+      consistently" and a literal second implementation would only risk
+      drift between two things that must always agree.)
+- [x] Resolve default/named profiles safely.
+- [x] Acquire a maintenance lock for writes. (New: no cross-process lock
+      existed for this plugin before this phase —
+      `maintenance.maintenance_lock()` adds a non-blocking
+      `fcntl.flock(LOCK_EX | LOCK_NB)` on a `<db>.maintenance.lock` sidecar
+      file, following the same separate-lock-file convention already used
+      by `tools/memory_tool.py`'s `MemoryStore._file_lock`.)
+- [x] Create and verify a backup before apply operations.
+- [x] Display exact target before confirmation. (`--apply` itself is the
+      confirmation — see `_print_maintenance_target` in
+      `hermes_cli/memory_setup.py`; there is no additional interactive
+      prompt, and `db_path` is always present in the JSON result too.)
+- [x] Support interruption and idempotent restart.
+- [x] Avoid printing fact content or raw identities.
+- [x] Define stable JSON output and exit codes. (0 ok, 1 reserved for a
+      future warnings-but-ok state — not currently emitted by any Phase 6
+      path, 2 errors, 3 cannot-run/malformed input, 4 lock held by another
+      process. See `maintenance.py`'s `EXIT_*` constants.)
+- [x] Keep commands unavailable through gateways/model tools.
 
 ### Maintenance tests
 
-- [ ] Dry-run changes no files or rows.
-- [ ] Apply refuses to run without required confirmation/flag.
-- [ ] Apply aborts when backup verification fails.
-- [ ] Lock prevents unsafe concurrent maintenance.
-- [ ] Interrupted operation can restart safely.
-- [ ] Repeated rebuild is idempotent.
-- [ ] Named profile operation cannot touch another profile.
-- [ ] Output contains no secrets or raw chat identity.
+- [x] Dry-run changes no files or rows.
+- [x] Apply refuses to run without required confirmation/flag.
+- [x] Apply aborts when backup verification fails.
+- [x] Lock prevents unsafe concurrent maintenance.
+- [x] Interrupted operation can restart safely.
+- [x] Repeated rebuild is idempotent.
+- [x] Named profile operation cannot touch another profile.
+- [x] Output contains no secrets or raw chat identity.
 
 ## 10. Database migrations
 

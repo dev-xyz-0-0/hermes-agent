@@ -525,6 +525,14 @@ def memory_command(args) -> None:
         cmd_health(args)
     elif sub == "benchmark":
         cmd_benchmark(args)
+    elif sub == "rebuild-vectors":
+        cmd_rebuild_vectors(args)
+    elif sub == "rebuild-banks":
+        cmd_rebuild_banks(args)
+    elif sub == "backfill-relationships":
+        cmd_backfill_relationships(args)
+    elif sub == "verify":
+        cmd_verify(args)
     else:
         cmd_status(args)
 
@@ -642,6 +650,208 @@ def cmd_benchmark(args) -> None:
         print()
 
     _sys.exit(0)
+
+
+def _print_maintenance_target(db_path: Path, *, as_json: bool, apply: bool) -> None:
+    """Print the exact target before proceeding — required by
+    docs/plans/demo-reference-plan/implementation-plan.md Phase 6
+    ("Print the exact target profile/path before confirmation"). There is
+    no separate interactive confirmation prompt: passing `--apply` IS the
+    confirmation (it is already an explicit, deliberate flag), so this is
+    the only thing printed before a write proceeds — in both text and
+    JSON mode the resolved `db_path` is always present in the final
+    result payload too, so an operator can verify what was touched even
+    after the fact.
+    """
+    if as_json:
+        return
+    from hermes_constants import display_hermes_home
+
+    mode = "APPLY" if apply else "DRY RUN"
+    print(f"\n  Holographic memory maintenance ({display_hermes_home()}) — {mode}")
+    print(f"  Target database: {db_path}\n")
+
+
+def cmd_rebuild_vectors(args) -> None:
+    """`hermes memory rebuild-vectors [--dry-run]`.
+
+    Recomputes HRR vectors for every active fact in the current profile's
+    database. Defaults to dry-run unless the caller explicitly asks to
+    write — see the `--dry-run`/no-flag handling below.
+    """
+    import json as _json
+    import sys as _sys
+
+    from plugins.memory.holographic import maintenance as _maintenance
+
+    db_path = _holographic_db_path()
+    as_json = bool(getattr(args, "json", False))
+    dry_run = bool(getattr(args, "dry_run", True))
+
+    if not db_path.exists():
+        message = f"Holographic memory database not found: {db_path}"
+        if as_json:
+            print(_json.dumps({"ok": False, "error": message}))
+        else:
+            print(f"\n  {message}\n")
+        _sys.exit(_maintenance.EXIT_CANNOT_RUN)
+
+    _print_maintenance_target(db_path, as_json=as_json, apply=not dry_run)
+
+    try:
+        result = _maintenance.rebuild_vectors(
+            db_path, hermes_home=get_hermes_home(), dry_run=dry_run,
+        )
+    except _maintenance.MaintenanceLockError as exc:
+        if as_json:
+            print(_json.dumps({"ok": False, "error": str(exc)}))
+        else:
+            print(f"\n  {exc}\n")
+        _sys.exit(_maintenance.EXIT_LOCKED)
+
+    _emit_maintenance_result(result, as_json=as_json)
+    _sys.exit(result.exit_code)
+
+
+def cmd_rebuild_banks(args) -> None:
+    """`hermes memory rebuild-banks [--dry-run]`."""
+    import json as _json
+    import sys as _sys
+
+    from plugins.memory.holographic import maintenance as _maintenance
+
+    db_path = _holographic_db_path()
+    as_json = bool(getattr(args, "json", False))
+    dry_run = bool(getattr(args, "dry_run", True))
+
+    if not db_path.exists():
+        message = f"Holographic memory database not found: {db_path}"
+        if as_json:
+            print(_json.dumps({"ok": False, "error": message}))
+        else:
+            print(f"\n  {message}\n")
+        _sys.exit(_maintenance.EXIT_CANNOT_RUN)
+
+    _print_maintenance_target(db_path, as_json=as_json, apply=not dry_run)
+
+    try:
+        result = _maintenance.rebuild_banks(
+            db_path, hermes_home=get_hermes_home(), dry_run=dry_run,
+        )
+    except _maintenance.MaintenanceLockError as exc:
+        if as_json:
+            print(_json.dumps({"ok": False, "error": str(exc)}))
+        else:
+            print(f"\n  {exc}\n")
+        _sys.exit(_maintenance.EXIT_LOCKED)
+
+    _emit_maintenance_result(result, as_json=as_json)
+    _sys.exit(result.exit_code)
+
+
+def cmd_backfill_relationships(args) -> None:
+    """`hermes memory backfill-relationships --dry-run|--apply`.
+
+    Requires an explicit choice: neither flag defaults to a write. See
+    plugins/memory/holographic/maintenance.py's module docstring for the
+    deterministic co-occurrence extraction heuristic this wraps.
+    """
+    import json as _json
+    import sys as _sys
+
+    from plugins.memory.holographic import maintenance as _maintenance
+
+    db_path = _holographic_db_path()
+    as_json = bool(getattr(args, "json", False))
+    apply = bool(getattr(args, "apply", False))
+    dry_run_flag = bool(getattr(args, "dry_run", False))
+
+    if not apply and not dry_run_flag:
+        message = "backfill-relationships requires either --dry-run or --apply"
+        if as_json:
+            print(_json.dumps({"ok": False, "error": message}))
+        else:
+            print(f"\n  {message}\n")
+        _sys.exit(_maintenance.EXIT_CANNOT_RUN)
+
+    if not db_path.exists():
+        message = f"Holographic memory database not found: {db_path}"
+        if as_json:
+            print(_json.dumps({"ok": False, "error": message}))
+        else:
+            print(f"\n  {message}\n")
+        _sys.exit(_maintenance.EXIT_CANNOT_RUN)
+
+    _print_maintenance_target(db_path, as_json=as_json, apply=apply)
+
+    try:
+        result = _maintenance.backfill_relationships(
+            db_path, hermes_home=get_hermes_home(), apply=apply,
+        )
+    except _maintenance.MaintenanceLockError as exc:
+        if as_json:
+            print(_json.dumps({"ok": False, "error": str(exc)}))
+        else:
+            print(f"\n  {exc}\n")
+        _sys.exit(_maintenance.EXIT_LOCKED)
+
+    _emit_maintenance_result(result, as_json=as_json)
+    _sys.exit(result.exit_code)
+
+
+def _emit_maintenance_result(result, *, as_json: bool) -> None:
+    import json as _json
+
+    if as_json:
+        print(_json.dumps(result.to_dict(), indent=2))
+        return
+
+    print(f"  Operation: {result.operation}  ({'dry-run' if result.dry_run else 'applied'})")
+    print(f"  Status:    {'OK' if result.ok else 'FAILED'}")
+    for key, value in result.counts.items():
+        print(f"  {key}: {value}")
+    if result.backup is not None:
+        print(f"  Backup:    {'ok' if result.backup['ok'] else result.backup.get('reason', 'failed')}")
+    if result.issues:
+        print("\n  Issues:")
+        for issue in result.issues:
+            print(f"    {issue}")
+    print()
+
+
+def cmd_verify(args) -> None:
+    """`hermes memory verify [--json]` — thin alias for `hermes memory
+    health` (see maintenance.verify's docstring for why this is an alias
+    rather than a duplicate check implementation). Read-only."""
+    import json as _json
+    import sys as _sys
+
+    from plugins.memory.holographic import maintenance as _maintenance
+
+    db_path = _holographic_db_path()
+    as_json = bool(getattr(args, "json", False))
+    backup_path = getattr(args, "backup_path", None)
+
+    report = _maintenance.verify(db_path, backup_path=backup_path)
+
+    if as_json:
+        print(_json.dumps(report.to_dict(), indent=2))
+    else:
+        from hermes_constants import display_hermes_home
+
+        print(f"\n  Holographic memory verify ({display_hermes_home()})")
+        print("  " + "─" * 40)
+        print(f"  Database: {db_path}")
+        print(f"  Status:   {'OK' if report.ok else 'ISSUES FOUND'}")
+        for key, value in report.counts.items():
+            print(f"  {key}: {value}")
+        if report.issues:
+            print("\n  Issues:")
+            for issue in report.issues:
+                print(f"    [{issue.severity}] {issue.code}: {issue.message}")
+        print()
+
+    _sys.exit(report.exit_code)
 
 
 def cmd_import(args) -> None:
