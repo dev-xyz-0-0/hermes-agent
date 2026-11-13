@@ -502,19 +502,32 @@ against the FTS5 shadow `_docsize` table, not a plain row count, which is
 unreliable for an external-content FTS5 table); orphaned `fact_entities`/
 `fact_sources` rows; invalid or cyclic `superseded_by` chains; malformed or
 wrong-dimension HRR vector blobs; `memory_banks` dimension/count validity;
-facts with an invalid `status` or an out-of-range `trust_score`; and, when
-`--backup-path` is given, that backup's checksum/integrity via
-`backup.py`'s existing `verify_backup()`. JSON fields: `ok`,
-`algorithm_version`, `schema_version`, `exit_code`, `issues` (each with a
-stable `code`/`severity`/`message`/`count` — e.g. `FTS_PARITY_MISMATCH`,
-`ORPHAN_FACT_ENTITY`, `INVALID_SUPERSEDED_BY`, `SUPERSESSION_CYCLE`,
-`MALFORMED_HRR_VECTOR`, `BANK_COUNT_MISMATCH`, `INVALID_FACT_STATUS`,
-`INVALID_TRUST_SCORE`, `BACKUP_INVALID`), `counts` (facts/active/superseded/
-entities/tombstones/memory_banks), `namespaces` (per-namespace counts only
-— each namespace is reported as `""` for unscoped/CLI facts or a short
-opaque SHA-1 digest, never the raw `platform:chat_id` string), and
-`backup`. Exit codes are stable: `0` = clean, `1` = warnings only, `2` =
-errors found, `3` = could not run (e.g. database not found).
+and facts with an invalid `status` or an out-of-range `trust_score`.
+
+**`--backup-path PATH` changes the diagnosed target, not just an extra
+check**: when given, every check above (and every count) runs against
+*that backup file*, not the live database — `backup.py`'s
+`verify_backup()` runs first to checksum/integrity-check the file, and only
+if that passes does the health suite open the backup itself (`mode=ro`) and
+diagnose it. The live database is never consulted for `issues`/`counts` in
+this mode; `JSON` field `target` reads `"backup"`, `db_path` is the backup
+file, and `live_db_path` names the live database purely for context (it was
+not diagnosed). Omit `--backup-path` to diagnose the live database
+(`target: "live"`, `live_db_path: null`). JSON fields: `ok`,
+`algorithm_version`, `schema_version`, `exit_code`, `target`, `db_path`,
+`live_db_path`, `issues` (each with a stable `code`/`severity`/`message`/
+`count` — e.g. `FTS_PARITY_MISMATCH`, `ORPHAN_FACT_ENTITY`,
+`INVALID_SUPERSEDED_BY`, `SUPERSESSION_CYCLE`, `MALFORMED_HRR_VECTOR`,
+`BANK_COUNT_MISMATCH`, `INVALID_FACT_STATUS`, `INVALID_TRUST_SCORE`,
+`BACKUP_INVALID`), `counts` (facts/active/superseded/entities/tombstones/
+memory_banks — always describing whichever database was diagnosed),
+`namespaces` (per-namespace counts only — each namespace is reported as
+`""` for unscoped/CLI facts or a short opaque SHA-1 digest, never the raw
+`platform:chat_id` string), and `backup` (the checksum/integrity verify
+result; independent of `issues`/`counts`). Exit codes are stable: `0` =
+clean, `1` = warnings only, `2` = errors found (including an invalid
+backup, which stops diagnostics before opening the file further), `3` =
+could not run (e.g. database not found).
 
 **`hermes memory benchmark`** runs
 `plugins/memory/holographic/benchmark.py` against the resolved database and
@@ -930,8 +943,17 @@ Result JSON: `ok`, `dry_run`, `operation`, `db_path`, `algorithm_version`,
 
 **`rebuild-banks`** — same dry-run/apply/backup/lock shape, via
 `rebuild_banks()`, wrapping `MemoryStore.rebuild_bank` once per distinct
-`(namespace, category)` pair with at least one non-superseded fact. Result
-`counts`: `pairs_planned` (dry-run) or `pairs_rebuilt` (apply).
+`(namespace, category)` pair with at least one non-superseded fact. This is
+a full reconcile, not just a rebuild of banks that already have active
+facts: it also deletes orphan `memory_banks` rows — banks whose
+`(namespace, category)` no longer has any active fact behind it (e.g. a
+pre-Phase-2 unscoped bank left behind once every fact in that pair was
+superseded, removed, or migrated to a namespaced bank). Result `counts` in
+dry-run mode: `pairs_planned`, `banks_to_rebuild`, `banks_to_delete`,
+`banks_existing`, `banks_expected`. After apply: `pairs_rebuilt`,
+`banks_deleted`. Idempotent: a second `--apply` reports `banks_deleted: 0`
+once every orphan is gone, and leaves `hermes memory health` clean of
+`BANK_COUNT_MISMATCH`.
 
 **`backfill-relationships`** — unlike the two commands above, `--dry-run`
 and `--apply` are **two independent flags, and neither defaults to true**:

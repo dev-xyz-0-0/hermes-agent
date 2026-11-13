@@ -287,6 +287,21 @@ def _active_namespace_category_pairs(conn: sqlite3.Connection) -> list[tuple[str
     return sorted({(row["namespace"] or "", row["category"] or "general") for row in rows})
 
 
+def _existing_bank_names(conn: sqlite3.Connection) -> set[str]:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_banks'"
+    ).fetchone()
+    if row is None:
+        return set()
+    return {r[0] for r in conn.execute("SELECT bank_name FROM memory_banks")}
+
+
+def _expected_bank_names(pairs: list[tuple[str, str]]) -> set[str]:
+    from .store import bank_name
+
+    return {bank_name(ns, cat) for ns, cat in pairs}
+
+
 def rebuild_banks(
     db_path: "str | Path",
     *,
@@ -294,12 +309,20 @@ def rebuild_banks(
     dry_run: bool = True,
     hrr_dim: int = 1024,
 ) -> MaintenanceResult:
-    """Rebuild every (namespace, category) HRR memory bank.
+    """Reconcile every (namespace, category) HRR memory bank with the
+    active facts that should back it.
 
-    Wraps ``MemoryStore.rebuild_bank`` (Phase 2) once per affected pair.
-    Already idempotent per-pair (a full rebuild from current active facts,
-    not an incremental update), so repeated/interrupted runs converge to
-    the same end state.
+    This is a full reconcile, not just a rebuild of banks that already have
+    active facts: it also deletes orphan bank rows — banks whose
+    (namespace, category) no longer has any active fact behind it (e.g. the
+    pre-Phase-2 unscoped banks left behind once every fact in that pair was
+    superseded, removed, or migrated to a namespaced bank). Wraps
+    ``MemoryStore.rebuild_bank`` (Phase 2), which already deletes a bank row
+    when it finds zero active facts for that pair — this function's job is
+    to also walk *existing* bank rows with no matching expected pair, not
+    just the pairs with current active facts, so those orphans actually get
+    visited. Idempotent: repeated/interrupted runs converge to the same end
+    state (second apply reports zero further deletions).
     """
     db_path = _require_db(db_path)
 
@@ -307,11 +330,20 @@ def rebuild_banks(
         conn = _readonly_connection(db_path)
         try:
             pairs = _active_namespace_category_pairs(conn)
+            expected = _expected_bank_names(pairs)
+            existing = _existing_bank_names(conn)
         finally:
             conn.close()
+        to_delete = existing - expected
         return MaintenanceResult(
             ok=True, dry_run=True, operation="rebuild-banks", db_path=str(db_path),
-            counts={"pairs_planned": len(pairs)},
+            counts={
+                "pairs_planned": len(pairs),
+                "banks_to_rebuild": len(pairs),
+                "banks_to_delete": len(to_delete),
+                "banks_existing": len(existing),
+                "banks_expected": len(expected),
+            },
         )
 
     with maintenance_lock(db_path):
@@ -328,12 +360,21 @@ def rebuild_banks(
             pairs = _active_namespace_category_pairs(conn)
             for namespace, category in pairs:
                 store.rebuild_bank(category, namespace)
+
+            expected = _expected_bank_names(pairs)
+            existing = _existing_bank_names(conn)
+            orphans = sorted(existing - expected)
+            for name in orphans:
+                conn.execute("DELETE FROM memory_banks WHERE bank_name = ?", (name,))
+            if orphans:
+                conn.commit()
         finally:
             store.close()
 
         return MaintenanceResult(
             ok=True, dry_run=False, operation="rebuild-banks", db_path=str(db_path),
-            counts={"pairs_rebuilt": len(pairs)}, backup=backup_info,
+            counts={"pairs_rebuilt": len(pairs), "banks_deleted": len(orphans)},
+            backup=backup_info,
         )
 
 

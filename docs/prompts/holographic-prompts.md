@@ -197,7 +197,7 @@ partially imported.
 ```bash
 hermes memory health                              # human-readable report
 hermes memory health --json                       # machine-readable, no decorative text
-hermes memory health --backup-path ./backup.db    # also verify a backup file
+hermes memory health --backup-path ./backup.db    # diagnose that backup DB itself (and verify its checksum/integrity)
 hermes memory verify                               # alias for health — same output
 ```
 
@@ -224,7 +224,7 @@ hermes memory rebuild-vectors --apply         # actually recompute HRR vectors
 hermes memory rebuild-vectors --apply --json
 
 hermes memory rebuild-banks                   # dry-run by default
-hermes memory rebuild-banks --apply           # rebuild every namespace/category bank pair
+hermes memory rebuild-banks --apply           # reconcile: rebuild every active namespace/category bank pair and delete orphan bank rows
 
 hermes memory backfill-relationships --dry-run    # report planned candidate relationships
 hermes memory backfill-relationships --apply      # write co-occurrence relationships

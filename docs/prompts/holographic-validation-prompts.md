@@ -80,6 +80,16 @@ files aren't subject to the same redaction as other tooling output.)
 hermes memory health --backup-path /path/to/backup.db --json
 ```
 
+This runs the full read-only health suite **against the backup database
+itself** — not the live database. `counts`/`issues` in the output describe
+the backup file's own content, and `target` in the JSON output will read
+`"backup"` with `db_path` pointing at the backup file (`live_db_path` names
+the live database for context, but it is not what was diagnosed).
+`backup.ok` separately reports the backup file's checksum/integrity
+verification. A live DB can be dirty while its backup reports clean, or vice
+versa — they are independent checks. To check the live DB, omit
+`--backup-path`.
+
 ### Read-only diagnostic viewer
 
 > "Start the local Holographic memory viewer against production, read-only,
@@ -160,9 +170,18 @@ hermes memory rebuild-banks --apply --json
 ```
 
 > "Dry-run `rebuild-banks` on production and tell me which namespace/
-> category pairs would be rebuilt."
+> category pairs would be rebuilt, and whether any orphan banks would be
+> deleted."
 > *(review)*
 > "Apply it."
+
+`rebuild-banks` is a full reconcile, not just a rebuild of banks that
+already have active facts behind them: it also deletes orphan bank rows —
+banks whose (namespace, category) no longer has any active fact behind it.
+The dry-run JSON reports this as `banks_to_delete` (and `banks_existing`/
+`banks_expected` for context); applying reports `banks_deleted`. Confirm
+`banks_to_delete` only names banks you'd expect to have zero active facts
+before approving the apply step.
 
 ### Backfill entity relationships
 

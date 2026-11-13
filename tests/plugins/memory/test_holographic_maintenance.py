@@ -280,6 +280,119 @@ class TestInterruptionAndIdempotentRestart:
 
 
 # ---------------------------------------------------------------------------
+# rebuild-banks orphan pruning (full reconcile, not just rebuild-existing)
+# ---------------------------------------------------------------------------
+
+class TestRebuildBanksOrphanPrune:
+    def test_rebuild_banks_deletes_orphan_unscoped_banks(self, tmp_path):
+        from plugins.memory.holographic import diagnostics
+        from plugins.memory.holographic.store import bank_name
+
+        db_path = tmp_path / "db.sqlite"
+        store = MemoryStore(db_path=db_path, hrr_dim=32)
+        # Active namespaced fact only — this bank has no corresponding
+        # active unscoped facts, so the unscoped bank below is a pure orphan.
+        store.add_fact("ns fact", category="general", namespace="telegram:1")
+        store._conn.execute(
+            "INSERT INTO memory_banks (bank_name, vector, dim, fact_count) VALUES (?, ?, ?, ?)",
+            (bank_name("", "general"), b"\x00" * (32 * 8), 32, 5),
+        )
+        store._conn.commit()
+        store.close()
+
+        before = diagnostics.run_diagnostics(db_path)
+        assert diagnostics.CODE_BANK_COUNT_MISMATCH in {i.code for i in before.issues}
+
+        dry = maintenance.rebuild_banks(db_path, hermes_home=tmp_path, dry_run=True)
+        assert dry.counts.get("banks_to_delete", 0) >= 1
+
+        result = maintenance.rebuild_banks(db_path, hermes_home=tmp_path, dry_run=False)
+        assert result.ok is True
+        assert result.counts.get("banks_deleted", 0) >= 1
+
+        after = diagnostics.run_diagnostics(db_path)
+        assert diagnostics.CODE_BANK_COUNT_MISMATCH not in {i.code for i in after.issues}
+
+        store2 = MemoryStore(db_path=db_path, hrr_dim=32)
+        try:
+            names = {row["bank_name"] for row in store2.read("SELECT bank_name FROM memory_banks")}
+        finally:
+            store2.close()
+        assert bank_name("", "general") not in names
+
+    def test_rebuild_banks_apply_twice_is_idempotent_after_prune(self, tmp_path):
+        from plugins.memory.holographic.store import bank_name
+
+        db_path = tmp_path / "db.sqlite"
+        store = MemoryStore(db_path=db_path, hrr_dim=32)
+        store.add_fact("ns fact", category="general", namespace="telegram:1")
+        store._conn.execute(
+            "INSERT INTO memory_banks (bank_name, vector, dim, fact_count) VALUES (?, ?, ?, ?)",
+            (bank_name("", "general"), b"\x00" * (32 * 8), 32, 5),
+        )
+        store._conn.commit()
+        store.close()
+
+        r1 = maintenance.rebuild_banks(db_path, hermes_home=tmp_path, dry_run=False)
+        assert r1.counts.get("banks_deleted", 0) >= 1
+
+        r2 = maintenance.rebuild_banks(db_path, hermes_home=tmp_path, dry_run=False)
+        assert r2.ok is True
+        assert r2.counts.get("banks_deleted", 0) == 0
+
+        dry_after = maintenance.rebuild_banks(db_path, hermes_home=tmp_path, dry_run=True)
+        assert dry_after.counts.get("banks_to_delete", 0) == 0
+
+    def test_rebuild_banks_deletes_orphan_namespaced_bank(self, tmp_path):
+        """A namespaced orphan (`cat:ns:<digest>:<category>`) with no active
+        pair behind it must also be deleted — not just unscoped orphans."""
+        from plugins.memory.holographic.store import bank_name
+
+        db_path = tmp_path / "db.sqlite"
+        store = MemoryStore(db_path=db_path, hrr_dim=32)
+        store.add_fact("live fact", category="general", namespace="telegram:1")
+        orphan_name = bank_name("telegram:999-gone", "tool")
+        store._conn.execute(
+            "INSERT INTO memory_banks (bank_name, vector, dim, fact_count) VALUES (?, ?, ?, ?)",
+            (orphan_name, b"\x00" * (32 * 8), 32, 3),
+        )
+        store._conn.commit()
+        store.close()
+
+        dry = maintenance.rebuild_banks(db_path, hermes_home=tmp_path, dry_run=True)
+        assert dry.counts.get("banks_to_delete", 0) >= 1
+
+        result = maintenance.rebuild_banks(db_path, hermes_home=tmp_path, dry_run=False)
+        assert result.counts.get("banks_deleted", 0) >= 1
+
+        store2 = MemoryStore(db_path=db_path, hrr_dim=32)
+        try:
+            names = {row["bank_name"] for row in store2.read("SELECT bank_name FROM memory_banks")}
+        finally:
+            store2.close()
+        assert orphan_name not in names
+
+    def test_rebuild_banks_dry_run_delete_count_does_not_modify_file(self, tmp_path):
+        from plugins.memory.holographic.store import bank_name
+
+        db_path = tmp_path / "db.sqlite"
+        store = MemoryStore(db_path=db_path, hrr_dim=32)
+        store.add_fact("ns fact", category="general", namespace="telegram:1")
+        store._conn.execute(
+            "INSERT INTO memory_banks (bank_name, vector, dim, fact_count) VALUES (?, ?, ?, ?)",
+            (bank_name("", "general"), b"\x00" * (32 * 8), 32, 5),
+        )
+        store._conn.commit()
+        store.close()
+
+        before = _file_hash(db_path)
+        dry = maintenance.rebuild_banks(db_path, hermes_home=tmp_path, dry_run=True)
+        after = _file_hash(db_path)
+        assert before == after
+        assert dry.counts.get("banks_to_delete", 0) >= 1
+
+
+# ---------------------------------------------------------------------------
 # Named profile cannot touch another profile
 # ---------------------------------------------------------------------------
 
