@@ -131,6 +131,22 @@ def _clamp_trust(value: float) -> float:
     return max(_TRUST_MIN, min(_TRUST_MAX, value))
 
 
+def bank_name(namespace: str, category: str) -> str:
+    """Deterministic, opaque memory-bank key for a (namespace, category) pair.
+
+    ``namespace == ""`` is the unscoped/CLI identity and keeps the original
+    ``cat:<category>`` key so pre-existing unscoped banks (written before
+    Phase 2) remain usable without any migration. Every other namespace is
+    folded through a short SHA-1 digest — never the raw namespace string —
+    so a bank row never reveals a chat ID or other raw identity, matching
+    the precedent in diagnostics.py's ``_namespace_digest``.
+    """
+    if not namespace:
+        return f"cat:{category}"
+    digest = hashlib.sha1(namespace.encode("utf-8")).hexdigest()[:16]
+    return f"cat:ns:{digest}:{category}"
+
+
 def content_hash(content: str) -> str:
     """Stable identity for a fact's text, used for forget tombstones.
 
@@ -339,7 +355,7 @@ class MemoryStore:
 
             # Compute HRR vector after entity linking
             self._compute_hrr_vector(fact_id, content)
-            self._rebuild_bank(category)
+            self.rebuild_bank(category, namespace)
 
             return fact_id
 
@@ -502,15 +518,17 @@ class MemoryStore:
         with self._lock:
             if namespace is not None:
                 row = self._conn.execute(
-                    "SELECT fact_id, trust_score FROM facts WHERE fact_id = ? AND namespace = ?",
+                    "SELECT fact_id, trust_score, category, namespace FROM facts WHERE fact_id = ? AND namespace = ?",
                     (fact_id, namespace),
                 ).fetchone()
             else:
                 row = self._conn.execute(
-                    "SELECT fact_id, trust_score FROM facts WHERE fact_id = ?", (fact_id,)
+                    "SELECT fact_id, trust_score, category, namespace FROM facts WHERE fact_id = ?", (fact_id,)
                 ).fetchone()
             if row is None:
                 return False
+            fact_namespace = row["namespace"] or ""
+            old_category = row["category"]
 
             assignments: list[str] = ["updated_at = CURRENT_TIMESTAMP"]
             params: list = []
@@ -549,11 +567,13 @@ class MemoryStore:
             # Recompute HRR vector if content changed
             if content is not None:
                 self._compute_hrr_vector(fact_id, content)
-            # Rebuild bank for relevant category
-            cat = category or self._conn.execute(
-                "SELECT category FROM facts WHERE fact_id = ?", (fact_id,)
-            ).fetchone()["category"]
-            self._rebuild_bank(cat)
+            # Rebuild bank(s) for the affected namespace/category pair(s).
+            # The fact's own namespace never changes here, so only the
+            # category may differ between old and new.
+            new_category = category or old_category
+            self.rebuild_bank(new_category, fact_namespace)
+            if category is not None and category != old_category:
+                self.rebuild_bank(old_category, fact_namespace)
 
             return True
 
@@ -647,9 +667,9 @@ class MemoryStore:
                     entity_id = self._resolve_entity(name)
                     self._link_fact_entity(new_fact_id, entity_id)
                 self._compute_hrr_vector(new_fact_id, new_content)
-                self._rebuild_bank(resolved_category)
-                if old_row["category"] != resolved_category:
-                    self._rebuild_bank(old_row["category"])
+                self.rebuild_bank(resolved_category, resolved_namespace)
+                if old_row["category"] != resolved_category or old_row["namespace"] != resolved_namespace:
+                    self.rebuild_bank(old_row["category"], old_row["namespace"] or "")
 
             return new_fact_id
 
@@ -725,7 +745,7 @@ class MemoryStore:
                     (content_hash(row["content"]), row["namespace"]),
                 )
             self._conn.commit()
-            self._rebuild_bank(row["category"])
+            self.rebuild_bank(row["category"], row["namespace"] or "")
             return True
 
     def get_tombstones(self, namespace: str | None = None) -> set[str]:
@@ -933,20 +953,30 @@ class MemoryStore:
             )
             self._conn.commit()
 
-    def _rebuild_bank(self, category: str) -> None:
-        """Full rebuild of a category's memory bank from all its fact vectors."""
+    def rebuild_bank(self, category: str, namespace: str = "") -> None:
+        """Full rebuild of one (namespace, category) memory bank from its
+        active fact vectors.
+
+        Only active (non-superseded) facts contribute — superseded/forgotten
+        facts never do, since forgotten facts are hard-deleted from `facts`
+        and superseded ones are filtered out here. Scoped to `namespace`
+        exactly: a bank never aggregates facts from any other namespace,
+        including the unscoped ("") namespace.
+        """
         with self._lock:
             if not self._hrr_available:
                 return
 
-            bank_name = f"cat:{category}"
+            name = bank_name(namespace, category)
             rows = self._conn.execute(
-                "SELECT hrr_vector FROM facts WHERE category = ? AND hrr_vector IS NOT NULL",
-                (category,),
+                "SELECT hrr_vector FROM facts "
+                "WHERE category = ? AND namespace = ? AND hrr_vector IS NOT NULL "
+                "AND status != 'superseded'",
+                (category, namespace),
             ).fetchall()
 
             if not rows:
-                self._conn.execute("DELETE FROM memory_banks WHERE bank_name = ?", (bank_name,))
+                self._conn.execute("DELETE FROM memory_banks WHERE bank_name = ?", (name,))
                 self._conn.commit()
                 return
 
@@ -967,12 +997,21 @@ class MemoryStore:
                     fact_count = excluded.fact_count,
                     updated_at = excluded.updated_at
                 """,
-                (bank_name, hrr.phases_to_bytes(bank_vector), self.hrr_dim, fact_count),
+                (name, hrr.phases_to_bytes(bank_vector), self.hrr_dim, fact_count),
             )
             self._conn.commit()
 
-    def rebuild_all_vectors(self, dim: int | None = None) -> int:
-        """Recompute all HRR vectors + banks from text. For recovery/migration.
+    def _rebuild_bank(self, category: str, namespace: str = "") -> None:
+        """Back-compat alias for :meth:`rebuild_bank` (internal call sites)."""
+        self.rebuild_bank(category, namespace)
+
+    def rebuild_all_vectors(self, dim: int | None = None, namespace: str | None = None) -> int:
+        """Recompute HRR vectors + banks from text. For recovery/migration.
+
+        `namespace=None` (default) rebuilds every namespace's vectors and
+        banks, matching the pre-Phase-2 contract. Pass a namespace to scope
+        the rebuild to just that namespace/category pairs — used by
+        maintenance paths that must not touch other tenants' banks.
 
         Returns the number of facts processed.
         """
@@ -983,17 +1022,23 @@ class MemoryStore:
             if dim is not None:
                 self.hrr_dim = dim
 
-            rows = self._conn.execute(
-                "SELECT fact_id, content, category FROM facts"
-            ).fetchall()
+            if namespace is not None:
+                rows = self._conn.execute(
+                    "SELECT fact_id, content, category, namespace FROM facts WHERE namespace = ?",
+                    (namespace,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT fact_id, content, category, namespace FROM facts"
+                ).fetchall()
 
-            categories: set[str] = set()
+            pairs: set[tuple[str, str]] = set()
             for row in rows:
                 self._compute_hrr_vector(row["fact_id"], row["content"])
-                categories.add(row["category"])
+                pairs.add((row["namespace"] or "", row["category"]))
 
-            for category in categories:
-                self._rebuild_bank(category)
+            for ns, category in pairs:
+                self.rebuild_bank(category, ns)
 
             return len(rows)
 

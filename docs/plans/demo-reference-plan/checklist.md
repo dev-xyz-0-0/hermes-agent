@@ -139,33 +139,33 @@ intentional deviations in the relevant PR.
 
 ## 5. Phase 2 — Namespace-specific HRR banks
 
-- [ ] Define a deterministic bank key for `(namespace, category)`.
-- [ ] Ensure raw chat IDs are not present in bank names.
-- [ ] Preserve an unscoped CLI bank identity.
-- [ ] Include only active facts in banks.
-- [ ] Pass namespace through bank rebuild APIs.
-- [ ] Update insert/update/supersede/forget paths.
-- [ ] Update restore/rebuild behavior.
-- [ ] Rebuild each affected bank once after batch commit.
-- [ ] Use scoped banks for scoped probe/reason paths where valid.
-- [ ] Never use legacy global banks for scoped retrieval.
-- [ ] Preserve per-fact scoped scoring as safe fallback.
-- [ ] Handle NumPy absence without errors.
-- [ ] Document legacy-bank cleanup behavior.
+- [x] Define a deterministic bank key for `(namespace, category)`.
+- [x] Ensure raw chat IDs are not present in bank names.
+- [x] Preserve an unscoped CLI bank identity.
+- [x] Include only active facts in banks.
+- [x] Pass namespace through bank rebuild APIs.
+- [x] Update insert/update/supersede/forget paths.
+- [x] Update restore/rebuild behavior.
+- [x] Rebuild each affected bank once after batch commit.
+- [x] Use scoped banks for scoped probe/reason paths where valid.
+- [x] Never use legacy global banks for scoped retrieval.
+- [x] Preserve per-fact scoped scoring as safe fallback.
+- [x] Handle NumPy absence without errors.
+- [x] Document legacy-bank cleanup behavior.
 
 ### Scoped-bank tests
 
-- [ ] Same category in two namespaces creates different bank keys.
-- [ ] Bank keys contain no raw identity.
-- [ ] Bank vectors include only their namespace.
-- [ ] Superseded facts are absent from rebuilt banks.
-- [ ] Forget removes the fact contribution.
-- [ ] Mutation rebuilds only affected namespace/category pairs.
-- [ ] Batch rebuild count is bounded to one per affected pair.
-- [ ] Scoped retrieval never consults a legacy global bank.
-- [ ] Rebuild preserves dimensions and fact counts.
-- [ ] Dimension migration is consistent.
-- [ ] FTS fallback works without NumPy.
+- [x] Same category in two namespaces creates different bank keys.
+- [x] Bank keys contain no raw identity.
+- [x] Bank vectors include only their namespace.
+- [x] Superseded facts are absent from rebuilt banks.
+- [x] Forget removes the fact contribution.
+- [x] Mutation rebuilds only affected namespace/category pairs.
+- [x] Batch rebuild count is bounded to one per affected pair.
+- [x] Scoped retrieval never consults a legacy global bank.
+- [x] Rebuild preserves dimensions and fact counts.
+- [x] Dimension migration is consistent.
+- [x] FTS fallback works without NumPy.
 
 ## 6. Phase 3 — Fuzzy consolidation evidence
 

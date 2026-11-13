@@ -23,8 +23,10 @@ _ACTIVE_CLAUSE = "status != 'superseded'"
 
 try:
     from . import holographic as hrr
+    from .store import bank_name as _bank_name
 except ImportError:
     import holographic as hrr  # type: ignore[no-redef]
+    from store import bank_name as _bank_name  # type: ignore[no-redef]
 
 
 class FactRetriever:
@@ -170,23 +172,28 @@ class FactRetriever:
         entity_vec = hrr.encode_atom(entity.lower(), self.hrr_dim)
         probe_key = hrr.bind(entity_vec, role_entity)
 
-        # Try category-specific bank first, then all facts — but the bank is
-        # bundled across ALL namespaces (see store.py's _rebuild_bank), so a
-        # namespace-scoped caller must skip it and go straight to per-fact
-        # scoring below, which IS namespace-filterable.
-        if category and namespace is None:
-            bank_name = f"cat:{category}"
+        # Try the category-specific bank first, then fall back to per-fact
+        # scoring. Phase 2: banks are namespace-specific (see
+        # store.bank_name()), so the bank lookup key always includes the
+        # caller's namespace ("" for unscoped/CLI). A scoped caller
+        # (namespace not None, i.e. not "") NEVER falls back to or is served
+        # by the unscoped/legacy global `cat:<category>` bank — if no
+        # namespace-specific bank exists yet, this skips straight to the
+        # per-fact scoring below, which IS namespace-filterable and safe.
+        if category:
+            name = _bank_name(namespace or "", category)
             with self.store._lock:
                 bank_row = conn.execute(
                     "SELECT vector FROM memory_banks WHERE bank_name = ?",
-                    (bank_name,),
+                    (name,),
                 ).fetchone()
             if bank_row:
                 bank_vec = hrr.bytes_to_phases(bank_row["vector"])
                 extracted = hrr.unbind(bank_vec, probe_key)
-                # Use extracted signal to score individual facts
+                # Use extracted signal to score individual facts, scoped to
+                # the same namespace the bank itself was built from.
                 return self._score_facts_by_vector(
-                    extracted, category=category, limit=limit
+                    extracted, category=category, limit=limit, namespace=namespace
                 )
 
         # Score against individual fact vectors directly
@@ -504,6 +511,7 @@ class FactRetriever:
         target_vec: "np.ndarray",
         category: str | None = None,
         limit: int = 10,
+        namespace: str | None = None,
     ) -> list[dict]:
         """Score facts by similarity to a target vector."""
         conn = self.store._conn
@@ -513,6 +521,9 @@ class FactRetriever:
         if category:
             where += " AND category = ?"
             params.append(category)
+        if namespace is not None:
+            where += " AND namespace = ?"
+            params.append(namespace)
 
         with self.store._lock:
             rows = conn.execute(

@@ -308,11 +308,22 @@ def _check_hrr_vectors_and_banks(conn: sqlite3.Connection, issues: list[Diagnost
         if vector is None or dim is None or len(vector) != int(dim) * 8:
             dim_mismatches += 1
             continue
-        category = bank_name.split(":", 1)[1] if isinstance(bank_name, str) and ":" in bank_name else None
-        if category is None:
+        # Bank name formats (store.bank_name()):
+        #   "cat:<category>"              unscoped/CLI bank (namespace == "")
+        #   "cat:ns:<digest>:<category>"  namespace-specific bank — the
+        #     namespace is folded into a one-way digest and cannot be
+        #     recovered here, so its exact fact_count can't be independently
+        #     re-derived from a raw namespace string. Skip the parity check
+        #     for those rather than reporting a false mismatch.
+        if not isinstance(bank_name, str) or ":" not in bank_name:
             continue
+        parts = bank_name.split(":")
+        if len(parts) >= 2 and parts[0] == "cat" and parts[1] == "ns":
+            continue
+        category = bank_name.split(":", 1)[1]
         actual = conn.execute(
-            "SELECT COUNT(*) FROM facts WHERE category = ? AND hrr_vector IS NOT NULL AND status != 'superseded'",
+            "SELECT COUNT(*) FROM facts WHERE category = ? AND namespace = '' "
+            "AND hrr_vector IS NOT NULL AND status != 'superseded'",
             (category,),
         ).fetchone()[0]
         if actual != fact_count:
