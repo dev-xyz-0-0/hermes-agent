@@ -1378,6 +1378,18 @@ class HolographicMemoryProvider(MemoryProvider):
         This operator-facing migration is intentionally explicit.  It does not
         run during initialization and therefore never turns an upgrade into a
         silent write.
+
+        When ``apply`` is True, the whole per-entry loop below runs inside
+        ``store.transaction()`` + ``store.defer_bank_rebuilds()`` (the same
+        primitives `batch.ingest_candidates_batch()` uses): a failure
+        partway through rolls back every mutation this call made (not just
+        the entry that failed), and the HRR bank(s) touched by multiple
+        inserts/supersessions rebuild once per affected (namespace, category)
+        pair instead of once per entry. This is a pure wrap around the
+        existing per-entry logic (same validation/dedup/consolidation/source
+        recording) — nothing about what gets validated, matched, or written
+        changes. The ``apply=False`` preview path makes no writes and is
+        unaffected.
         """
         if not self._store or not self._retriever:
             raise RuntimeError("Holographic memory is not initialized")
@@ -1393,42 +1405,51 @@ class HolographicMemoryProvider(MemoryProvider):
             "rejected": [],
             "imported": [],
         }
-        for filename, category in (("USER.md", "user_pref"), ("MEMORY.md", "general")):
-            path = memory_dir / filename
-            entries = BuiltinMemoryStore._read_file(path)
-            result["sources"].append({"path": str(path), "entries": len(entries)})
-            for entry in entries:
-                problem = _fact_problem(entry)
-                item = {"source": filename, "content": entry, "category": category}
-                if problem:
-                    item["reason"] = problem
-                    result["rejected"].append(item)
-                    continue
-                if self._find_fact_id_by_content(entry) is not None:
-                    result["duplicates"].append(item)
-                    continue
-                result["proposed"].append(item)
-                if apply:
-                    candidate = capture.FactCandidate(
-                        content=entry, operation="statement", scope="", confidence=1.0,
-                    )
-                    applied = consolidation.classify_and_apply(
-                        self._store,
-                        self._retriever,
-                        candidate,
-                        category=category,
-                        namespace=self._namespace,
-                        source_type="builtin_import",
-                        extraction_method="explicit_import",
-                        confidence=1.0,
-                        fuzzy_enabled=self._fuzzy_dedup_enabled,
-                        fuzzy_ngram_threshold=self._fuzzy_dedup_threshold,
-                    )
-                    if applied.action == "inserted" and applied.fact_id:
-                        self._record_source(applied.fact_id, "builtin_import")
-                        result["imported"].append({**item, "fact_id": applied.fact_id})
-                    else:
-                        result["duplicates"].append({**item, "reason": applied.reason})
+
+        def _run_import() -> None:
+            for filename, category in (("USER.md", "user_pref"), ("MEMORY.md", "general")):
+                path = memory_dir / filename
+                entries = BuiltinMemoryStore._read_file(path)
+                result["sources"].append({"path": str(path), "entries": len(entries)})
+                for entry in entries:
+                    problem = _fact_problem(entry)
+                    item = {"source": filename, "content": entry, "category": category}
+                    if problem:
+                        item["reason"] = problem
+                        result["rejected"].append(item)
+                        continue
+                    if self._find_fact_id_by_content(entry) is not None:
+                        result["duplicates"].append(item)
+                        continue
+                    result["proposed"].append(item)
+                    if apply:
+                        candidate = capture.FactCandidate(
+                            content=entry, operation="statement", scope="", confidence=1.0,
+                        )
+                        applied = consolidation.classify_and_apply(
+                            self._store,
+                            self._retriever,
+                            candidate,
+                            category=category,
+                            namespace=self._namespace,
+                            source_type="builtin_import",
+                            extraction_method="explicit_import",
+                            confidence=1.0,
+                            fuzzy_enabled=self._fuzzy_dedup_enabled,
+                            fuzzy_ngram_threshold=self._fuzzy_dedup_threshold,
+                        )
+                        if applied.action == "inserted" and applied.fact_id:
+                            self._record_source(applied.fact_id, "builtin_import")
+                            result["imported"].append({**item, "fact_id": applied.fact_id})
+                        else:
+                            result["duplicates"].append({**item, "reason": applied.reason})
+
+        if apply:
+            with self._store.transaction(), self._store.defer_bank_rebuilds():
+                _run_import()
+        else:
+            _run_import()
+
         result["counts"] = {key: len(result[key]) for key in ("proposed", "duplicates", "rejected", "imported")}
         return result
 
