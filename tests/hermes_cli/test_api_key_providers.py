@@ -138,9 +138,17 @@ PROVIDER_ENV_VARS = (
 
 @pytest.fixture(autouse=True)
 def _clear_provider_env(monkeypatch):
-    for key in PROVIDER_ENV_VARS:
+    provider_env_vars = set(PROVIDER_ENV_VARS)
+    for provider in PROVIDER_REGISTRY.values():
+        provider_env_vars.update(provider.api_key_env_vars)
+        if provider.base_url_env_var:
+            provider_env_vars.add(provider.base_url_env_var)
+    for key in provider_env_vars:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr("hermes_cli.auth._load_auth_store", lambda: {})
+    # An authenticated developer machine may expose a token through
+    # `gh auth token` even when Hermes itself has no provider configured.
+    monkeypatch.setattr("hermes_cli.copilot_auth._try_gh_cli_token", lambda: None)
 
 
 class TestResolveProvider:

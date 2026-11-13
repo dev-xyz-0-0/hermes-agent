@@ -14,6 +14,7 @@ Usage:
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -2335,11 +2336,21 @@ class GatewayRunner:
                                 stdout=asyncio.subprocess.PIPE,
                                 stderr=asyncio.subprocess.PIPE,
                             )
-                            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                            communicate_coro = proc.communicate()
+                            try:
+                                stdout, stderr = await asyncio.wait_for(
+                                    communicate_coro, timeout=30
+                                )
+                            except asyncio.TimeoutError:
+                                # wait_for normally cancels/awaits the coroutine,
+                                # but a scheduler failure can leave it unclaimed.
+                                if inspect.getcoroutinestate(communicate_coro) == inspect.CORO_CREATED:
+                                    communicate_coro.close()
+                                proc.kill()
+                                await proc.wait()
+                                return "Quick command timed out (30s)."
                             output = (stdout or stderr).decode().strip()
                             return output if output else "Command returned no output."
-                        except asyncio.TimeoutError:
-                            return "Quick command timed out (30s)."
                         except Exception as e:
                             return f"Quick command error: {e}"
                     else:

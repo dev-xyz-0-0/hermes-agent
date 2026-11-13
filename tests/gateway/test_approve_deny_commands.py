@@ -21,6 +21,15 @@ from gateway.platforms.base import MessageEvent
 from gateway.session import SessionSource
 
 
+@pytest.fixture(autouse=True)
+def _isolate_command_security(monkeypatch):
+    """Keep approval tests deterministic and independent of Tirith installs."""
+    monkeypatch.setattr(
+        "tools.tirith_security.check_command_security",
+        lambda _command: {"action": "allow", "findings": [], "summary": ""},
+    )
+
+
 def _make_source() -> SessionSource:
     return SessionSource(
         platform=Platform.TELEGRAM,
@@ -383,8 +392,13 @@ class TestBlockingApprovalE2E:
 
         session_key = "e2e-test"
         notified = []
+        notification_ready = threading.Event()
 
-        register_gateway_notify(session_key, lambda d: notified.append(d))
+        def notify(data):
+            notified.append(data)
+            notification_ready.set()
+
+        register_gateway_notify(session_key, notify)
 
         result_holder = [None]
 
@@ -406,12 +420,9 @@ class TestBlockingApprovalE2E:
         t = threading.Thread(target=agent_thread)
         t.start()
 
-        for _ in range(50):
-            if notified:
-                break
-            time.sleep(0.05)
+        assert notification_ready.wait(timeout=5)
 
-        # assert len(notified) == 1
+        assert len(notified) == 1
         assert "rm -rf /important" in notified[0]["command"]
 
         resolve_gateway_approval(session_key, "once")
@@ -430,7 +441,13 @@ class TestBlockingApprovalE2E:
 
         session_key = "e2e-deny"
         notified = []
-        register_gateway_notify(session_key, lambda d: notified.append(d))
+        notification_ready = threading.Event()
+
+        def notify(data):
+            notified.append(data)
+            notification_ready.set()
+
+        register_gateway_notify(session_key, notify)
 
         result_holder = [None]
 
@@ -451,15 +468,13 @@ class TestBlockingApprovalE2E:
 
         t = threading.Thread(target=agent_thread)
         t.start()
-        for _ in range(50):
-            if notified:
-                break
-            time.sleep(0.05)
+        assert notification_ready.wait(timeout=5)
 
-        resolve_gateway_approval(session_key, "deny")
+        assert resolve_gateway_approval(session_key, "deny") == 1
         t.join(timeout=5)
 
-        # assert result_holder[0]["approved"] is False
+        assert result_holder[0] is not None
+        assert result_holder[0]["approved"] is False
         assert "BLOCKED" in result_holder[0]["message"]
         unregister_gateway_notify(session_key)
 

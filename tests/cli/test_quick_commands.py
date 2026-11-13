@@ -1,5 +1,5 @@
 """Tests for user-defined quick commands that bypass the agent loop."""
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from rich.text import Text
 import pytest
 
@@ -136,7 +136,10 @@ class TestGatewayQuickCommands:
         runner._is_user_authorized = MagicMock(return_value=True)
 
         event = self._make_event("limits")
-        result = await runner._handle_message(event)
+        proc = MagicMock()
+        proc.communicate = AsyncMock(return_value=(b"ok\n", b""))
+        with patch("asyncio.create_subprocess_shell", new=AsyncMock(return_value=proc)):
+            result = await runner._handle_message(event)
         assert result == "ok"
 
     @pytest.mark.asyncio
@@ -164,10 +167,16 @@ class TestGatewayQuickCommands:
         runner._is_user_authorized = MagicMock(return_value=True)
 
         event = self._make_event("slow")
-        with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
+        proc = MagicMock()
+        proc.communicate = AsyncMock()
+        proc.wait = AsyncMock()
+        with patch("asyncio.create_subprocess_shell", new=AsyncMock(return_value=proc)), \
+             patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
             result = await runner._handle_message(event)
         assert result is not None
         assert "timed out" in result.lower()
+        proc.kill.assert_called_once()
+        proc.wait.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_gateway_config_object_supports_quick_commands(self):
@@ -183,5 +192,8 @@ class TestGatewayQuickCommands:
         runner._is_user_authorized = MagicMock(return_value=True)
 
         event = self._make_event("limits")
-        result = await runner._handle_message(event)
+        proc = MagicMock()
+        proc.communicate = AsyncMock(return_value=(b"ok\n", b""))
+        with patch("asyncio.create_subprocess_shell", new=AsyncMock(return_value=proc)):
+            result = await runner._handle_message(event)
         assert result == "ok"
