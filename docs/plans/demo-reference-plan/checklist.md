@@ -95,7 +95,7 @@ intentional deviations in the relevant PR.
 - [x] Check FTS/facts parity.
 - [x] Detect orphaned fact-entity links.
 - [x] Detect orphaned provenance rows.
-- [ ] Detect orphaned relationships.
+- [x] Detect orphaned relationships.
 - [x] Detect invalid or cyclic supersession chains.
 - [x] Detect malformed/wrong-dimension HRR vectors.
 - [x] Validate memory-bank counts and dimensions.
@@ -198,67 +198,76 @@ intentional deviations in the relevant PR.
 
 ## 7. Phase 4 — Transactional batch ingestion
 
-- [ ] Define `BatchResult` and per-item result structures.
-- [ ] Require an already resolved namespace.
-- [ ] Add atomic and dry-run modes.
-- [ ] Add bounded batch and item sizes.
-- [ ] Reuse validation, normalization, consolidation, and tombstone policy.
-- [ ] Record provenance for each successful mutation.
-- [ ] Add transaction-aware store primitives/context manager.
-- [ ] Remove nested commits from the batch execution path.
-- [ ] Roll back facts, entities, links, sources, relationships, and tombstones
+- [x] Define `BatchResult` and per-item result structures.
+- [x] Require an already resolved namespace.
+- [x] Add atomic and dry-run modes.
+- [x] Add bounded batch and item sizes.
+- [x] Reuse validation, normalization, consolidation, and tombstone policy.
+- [x] Record provenance for each successful mutation.
+- [x] Add transaction-aware store primitives/context manager.
+- [x] Remove nested commits from the batch execution path.
+- [x] Roll back facts, entities, links, sources, relationships, and tombstones
       together.
-- [ ] Rebuild affected banks only after successful commit.
-- [ ] Keep batch ingestion non-model-callable initially.
-- [ ] Migrate built-in import only after compatibility tests pass.
+- [x] Rebuild affected banks only after successful commit.
+- [x] Keep batch ingestion non-model-callable initially.
+- [ ] Migrate built-in import only after compatibility tests pass. (Not
+      migrated this phase — see PR notes: judged riskier to prove
+      byte-for-byte equivalence than the task budget allowed; batch API
+      added standalone, `import_builtin_memories` left as-is, its existing
+      tests still pass unmodified.)
 
 ### Batch tests
 
-- [ ] Successful atomic batch commits all associated rows.
-- [ ] Mid-batch failure rolls back every mutation.
-- [ ] Dry-run performs zero writes.
-- [ ] Every per-item status is covered.
-- [ ] Provenance is complete.
-- [ ] Same text in different namespaces is allowed.
-- [ ] Same text in one namespace consolidates.
-- [ ] Tombstone/reintroduction policy is preserved.
-- [ ] Excessive batch/item input is rejected safely.
-- [ ] Concurrent batches do not corrupt SQLite.
-- [ ] Bank rebuild count is bounded.
-- [ ] Built-in-memory import retains prior behavior.
+- [x] Successful atomic batch commits all associated rows.
+- [x] Mid-batch failure rolls back every mutation.
+- [x] Dry-run performs zero writes.
+- [x] Every per-item status is covered.
+- [x] Provenance is complete.
+- [x] Same text in different namespaces is allowed.
+- [x] Same text in one namespace consolidates.
+- [x] Tombstone/reintroduction policy is preserved.
+- [x] Excessive batch/item input is rejected safely.
+- [x] Concurrent batches do not corrupt SQLite.
+- [x] Bank rebuild count is bounded.
+- [x] Built-in-memory import retains prior behavior.
 
 ## 8. Phase 5 — Scoped relationships
 
-- [ ] Decide additive-column versus new-table migration after schema fixture
-      testing.
-- [ ] Add namespace to relationship ownership.
-- [ ] Add a composite namespace/source/target/type unique index.
-- [ ] Add extraction method, confidence, and timestamps.
-- [ ] Optionally link relationships to source facts.
-- [ ] Preserve legacy relationships as unscoped only.
-- [ ] Create a focused `relationships.py` service.
-- [ ] Implement add/upsert/remove/list operations.
-- [ ] Implement bounded breadth-first traversal.
-- [ ] Add depth, node, edge, and deadline limits.
-- [ ] Invalidate/remove derived edges after forget.
-- [ ] Recompute/invalidate stale edges after supersession.
-- [ ] Apply existing shared-memory allowlists to shared traversal.
-- [ ] Keep relationship mutations out of model tools initially.
+- [x] Decide additive-column versus new-table migration after schema fixture
+      testing. (New table: production had no `entity_relationships` table at
+      all — confirmed by grepping store.py/retrieval.py/__init__.py — so this
+      is a fresh additive table, not a column added to an existing one. It
+      includes `namespace` inline from creation, plus a defensive idempotent
+      migration path for the hypothetical case of a differently-shaped
+      pre-existing table — see `MemoryStore._migrate_entity_relationships`.)
+- [x] Add namespace to relationship ownership.
+- [x] Add a composite namespace/source/target/type unique index.
+- [x] Add extraction method, confidence, and timestamps.
+- [x] Optionally link relationships to source facts.
+- [x] Preserve legacy relationships as unscoped only.
+- [x] Create a focused `relationships.py` service.
+- [x] Implement add/upsert/remove/list operations.
+- [x] Implement bounded breadth-first traversal.
+- [x] Add depth, node, edge, and deadline limits.
+- [x] Invalidate/remove derived edges after forget.
+- [x] Recompute/invalidate stale edges after supersession.
+- [x] Apply existing shared-memory allowlists to shared traversal.
+- [x] Keep relationship mutations out of model tools initially.
 
 ### Relationship tests
 
-- [ ] Relationship uniqueness is namespace-scoped.
-- [ ] Identical entity names in two chats do not leak edges.
-- [ ] Direction and relationship type are preserved.
-- [ ] Upsert does not duplicate edges.
-- [ ] Strength/confidence are clamped.
-- [ ] Traversal respects depth/node/edge/deadline limits.
-- [ ] Cycles terminate safely.
-- [ ] Forget invalidates derived edges.
-- [ ] Superseded facts do not contribute stale active edges.
-- [ ] Shared traversal follows enablement and category allowlists.
-- [ ] Migration does not broadcast legacy edges into chat namespaces.
-- [ ] Health diagnostics detect orphan edges without repairing them.
+- [x] Relationship uniqueness is namespace-scoped.
+- [x] Identical entity names in two chats do not leak edges.
+- [x] Direction and relationship type are preserved.
+- [x] Upsert does not duplicate edges.
+- [x] Strength/confidence are clamped.
+- [x] Traversal respects depth/node/edge/deadline limits.
+- [x] Cycles terminate safely.
+- [x] Forget invalidates derived edges.
+- [x] Superseded facts do not contribute stale active edges.
+- [x] Shared traversal follows enablement and category allowlists.
+- [x] Migration does not broadcast legacy edges into chat namespaces.
+- [x] Health diagnostics detect orphan edges without repairing them.
 
 ## 9. Phase 6 — Maintenance commands
 

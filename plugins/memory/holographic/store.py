@@ -3,6 +3,7 @@ SQLite-backed fact store with entity resolution and trust scoring.
 Single-user Hermes memory store plugin.
 """
 
+import contextlib
 import hashlib
 import re
 import sqlite3
@@ -109,6 +110,47 @@ CREATE TABLE IF NOT EXISTS memory_banks (
     fact_count INTEGER DEFAULT 0,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Phase 5 (demo-reference integration) — namespace-scoped entity
+-- relationships. Unlike `fact_entities`/`entities` (which remain shared,
+-- global-ID resources — see _resolve_entity), relationship OWNERSHIP is
+-- always namespace-scoped: two chats that happen to resolve the same entity
+-- NAME to the same global entity_id must never see each other's edges. The
+-- composite unique index below is the mechanism — every read/write in
+-- relationships.py filters by namespace explicitly, it never infers scope
+-- from the entity row. `status` mirrors `facts.status` ('active' |
+-- 'stale') so a relationship derived from a since-superseded fact can be
+-- marked stale without being hard-deleted (see
+-- MemoryStore.mark_relationships_stale_for_fact), while a relationship
+-- derived from a FORGOTTEN fact is hard-deleted (see
+-- MemoryStore.invalidate_relationships_for_fact) — forgetting is
+-- intentionally irreversible, matching remove_fact's own tombstone policy
+-- for the fact it was derived from.
+CREATE TABLE IF NOT EXISTS entity_relationships (
+    relationship_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_entity_id  INTEGER NOT NULL REFERENCES entities(entity_id),
+    target_entity_id  INTEGER NOT NULL REFERENCES entities(entity_id),
+    relationship_type TEXT NOT NULL,
+    namespace         TEXT NOT NULL DEFAULT '',
+    strength          REAL DEFAULT 0.5,
+    confidence        REAL DEFAULT 1.0,
+    extraction_method TEXT DEFAULT '',
+    source_fact_id    INTEGER REFERENCES facts(fact_id),
+    target_fact_id    INTEGER REFERENCES facts(fact_id),
+    status            TEXT NOT NULL DEFAULT 'active',
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_entity_relationships_source ON entity_relationships(source_entity_id);
+CREATE INDEX IF NOT EXISTS idx_entity_relationships_target ON entity_relationships(target_entity_id);
+-- The namespace index and the namespace-scoped composite unique index are
+-- intentionally NOT created here, for the same reason documented above for
+-- facts.idx_facts_namespace: a pre-existing entity_relationships table
+-- (see MemoryStore._migrate_entity_relationships) might not have a
+-- `namespace` column yet, and this script runs unconditionally on every
+-- startup via `executescript` — referencing a not-yet-existing column here
+-- would raise before the ALTER TABLE migration ever runs.
 """
 
 # Trust adjustment constants
@@ -182,7 +224,119 @@ class MemoryStore:
         )
         self._lock = threading.RLock()
         self._conn.row_factory = sqlite3.Row
+        # Phase 4: depth counter for `transaction()`. While > 0, internal
+        # write paths defer their usual per-call commit to `_maybe_commit()`
+        # so a batch of mutations commits or rolls back as one unit instead
+        # of nesting commits (see `transaction()`/`_maybe_commit` below).
+        self._txn_depth = 0
+        # Phase 4: when > 0, `rebuild_bank()` just records the
+        # (namespace, category) pair instead of recomputing immediately —
+        # see `defer_bank_rebuilds()`. Lets a batch of N mutations against
+        # the same bank(s) rebuild each affected bank once instead of N
+        # times, without changing what add_fact/update_fact/supersede_fact/
+        # remove_fact call internally.
+        self._defer_bank_rebuild_depth = 0
+        self._pending_bank_rebuilds: set[tuple[str, str]] = set()
         self._init_db()
+
+    # ------------------------------------------------------------------
+    # Transaction primitives (Phase 4 — batch ingestion)
+    # ------------------------------------------------------------------
+
+    @contextlib.contextmanager
+    def transaction(self):
+        """Run a block of store mutations as a single SQLite transaction.
+
+        Every public write method below normally calls ``self._conn.commit()``
+        right after its own statement(s) so a lone call is durable
+        immediately. Calling several of them back-to-back would therefore
+        nest commits — each one durable on its own, with no way to undo an
+        earlier one if a later call fails. Inside this context those internal
+        commits become no-ops (see `_maybe_commit`); only the outermost
+        `transaction()` block commits (on success) or rolls back (on any
+        exception), so the whole block is atomic.
+
+        Reentrant/nestable: a nested `transaction()` call just increments the
+        depth counter and lets the outermost one own the actual commit/
+        rollback, so helper code that opens its own `transaction()` is safe
+        to call from inside a caller's own `transaction()` block.
+
+        Held under `self._lock` (an RLock) for its entire duration, exactly
+        like every other store method — a concurrent caller on another
+        thread simply waits for the whole batch to finish rather than
+        interleaving with it, matching the store's existing locking pattern.
+        """
+        with self._lock:
+            self._txn_depth += 1
+            is_outer = self._txn_depth == 1
+            try:
+                yield self
+                if is_outer:
+                    self._conn.commit()
+            except Exception:
+                if is_outer:
+                    self._conn.rollback()
+                raise
+            finally:
+                self._txn_depth -= 1
+
+    def _maybe_commit(self) -> None:
+        """Commit now, unless an outer `transaction()` block owns the commit."""
+        if self._txn_depth == 0:
+            self._conn.commit()
+
+    @contextlib.contextmanager
+    def defer_bank_rebuilds(self):
+        """Collapse repeated `rebuild_bank()` calls into one per pair.
+
+        Every mutation method (`add_fact`, `update_fact`, `supersede_fact`,
+        `remove_fact`) calls `rebuild_bank()` itself after writing — correct
+        and cheap for a single call, but wasteful inside a batch of N
+        mutations touching the same (namespace, category) pair. Inside this
+        context, `rebuild_bank()` just records the pair; the actual rebuild
+        runs once per distinct pair when the outermost `defer_bank_rebuilds()`
+        block exits successfully. On an exception, pending pairs are
+        discarded without rebuilding (the whole point in the common case is
+        running inside a `transaction()` block that is about to roll back
+        anyway). Nestable, like `transaction()`.
+        """
+        with self._lock:
+            self._defer_bank_rebuild_depth += 1
+            failed = False
+            try:
+                yield
+            except Exception:
+                failed = True
+                raise
+            finally:
+                self._defer_bank_rebuild_depth -= 1
+                if self._defer_bank_rebuild_depth == 0:
+                    pending = self._pending_bank_rebuilds
+                    self._pending_bank_rebuilds = set()
+                    if not failed:
+                        for ns, cat in pending:
+                            self.rebuild_bank(cat, ns)
+
+    @contextlib.contextmanager
+    def _savepoint(self, name: str):
+        """A SQLite SAVEPOINT that only undoes its own block.
+
+        Unlike `self._conn.rollback()` (which would abort an entire
+        in-progress `transaction()`), rolling back to a savepoint undoes
+        only the statements executed since it was created — used for the
+        store's existing "try an insert, fall back to the pre-existing row
+        on a collision" recovery pattern (see `supersede_fact`) so that
+        recovery stays safe to run inside a batch transaction.
+        """
+        self._conn.execute(f"SAVEPOINT {name}")
+        try:
+            yield
+        except Exception:
+            self._conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
+            self._conn.execute(f"RELEASE SAVEPOINT {name}")
+            raise
+        else:
+            self._conn.execute(f"RELEASE SAVEPOINT {name}")
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -231,6 +385,74 @@ class MemoryStore:
         self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_content_namespace ON facts(content, namespace)")
         self._conn.commit()
         self._migrate_drop_global_content_unique()
+        self._migrate_entity_relationships()
+
+    def _table_exists(self, name: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+        ).fetchone()
+        return row is not None
+
+    def _migrate_entity_relationships(self) -> None:
+        """Defensive, idempotent migration for `entity_relationships`.
+
+        A fresh database gets every column inline from `_SCHEMA` above, so
+        this is normally a no-op. It exists only to safely backfill
+        `namespace`/`status`/etc. on a differently-shaped `entity_relationships`
+        table that might already exist (e.g. a database touched by a future
+        or experimental build before this phase). Per implementation-plan.md
+        Phase 5 / "7. Database Migration Plan": pre-existing rows become
+        unscoped (namespace='') rather than being broadcast into every
+        namespace — they simply keep the default the ALTER backfills.
+        """
+        if not self._table_exists("entity_relationships"):
+            return
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(entity_relationships)").fetchall()}
+        if "namespace" not in columns:
+            self._conn.execute("ALTER TABLE entity_relationships ADD COLUMN namespace TEXT NOT NULL DEFAULT ''")
+        if "strength" not in columns:
+            self._conn.execute("ALTER TABLE entity_relationships ADD COLUMN strength REAL DEFAULT 0.5")
+        if "confidence" not in columns:
+            self._conn.execute("ALTER TABLE entity_relationships ADD COLUMN confidence REAL DEFAULT 1.0")
+        if "extraction_method" not in columns:
+            self._conn.execute("ALTER TABLE entity_relationships ADD COLUMN extraction_method TEXT DEFAULT ''")
+        if "source_fact_id" not in columns:
+            self._conn.execute("ALTER TABLE entity_relationships ADD COLUMN source_fact_id INTEGER")
+        if "target_fact_id" not in columns:
+            self._conn.execute("ALTER TABLE entity_relationships ADD COLUMN target_fact_id INTEGER")
+        if "status" not in columns:
+            self._conn.execute("ALTER TABLE entity_relationships ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+        if "created_at" not in columns:
+            # SQLite's ALTER TABLE ADD COLUMN rejects a non-constant default
+            # (CURRENT_TIMESTAMP) — unlike the inline _SCHEMA definition
+            # above, which CAN use it because it's part of CREATE TABLE.
+            # Backfilled rows just get NULL; new rows written after this
+            # migration go through upsert_relationship's INSERT, which
+            # relies on this same column default only on fresh tables.
+            self._conn.execute("ALTER TABLE entity_relationships ADD COLUMN created_at TIMESTAMP")
+        if "updated_at" not in columns:
+            self._conn.execute("ALTER TABLE entity_relationships ADD COLUMN updated_at TIMESTAMP")
+        self._conn.commit()
+
+        # Composite unique index — the namespace-scoping mechanism itself
+        # (implementation-plan.md Phase 5 "Schema"). Wrapped defensively: if
+        # a pre-existing table already has colliding (namespace, source,
+        # target, type) duplicates (only possible on a legacy/foreign
+        # table — a fresh table created by this module never can), creating
+        # the index would fail; log and continue rather than block startup,
+        # since this table is additive and unused until relationships.py
+        # writes to it.
+        try:
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_relationships_unique "
+                "ON entity_relationships(namespace, source_entity_id, target_entity_id, relationship_type)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_relationships_namespace ON entity_relationships(namespace)"
+            )
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            self._conn.rollback()
 
     def _migrate_drop_global_content_unique(self) -> None:
         """One-time rebuild: content must be unique per-namespace, not globally.
@@ -339,7 +561,7 @@ class MemoryStore:
                     (content, category, tags, self.default_trust,
                      source_type, extraction_method, confidence, namespace),
                 )
-                self._conn.commit()
+                self._maybe_commit()
                 fact_id: int = cur.lastrowid  # type: ignore[assignment]
             except sqlite3.IntegrityError:
                 # Duplicate (content, namespace) — return existing id
@@ -420,7 +642,7 @@ class MemoryStore:
                     f"UPDATE facts SET retrieval_count = retrieval_count + 1 WHERE fact_id IN ({placeholders})",
                     ids,
                 )
-                self._conn.commit()
+                self._maybe_commit()
 
             return results
 
@@ -454,7 +676,7 @@ class MemoryStore:
                 """,
                 (fact_id, via, platform, chat_id, thread_id, session_id, author),
             )
-            self._conn.commit()
+            self._maybe_commit()
 
     def stats(self, min_trust: float = 0.3, namespace: str | None = None) -> dict:
         """Return operational counts for the store.
@@ -552,7 +774,7 @@ class MemoryStore:
                 f"UPDATE facts SET {', '.join(assignments)} WHERE fact_id = ?",
                 params,
             )
-            self._conn.commit()
+            self._maybe_commit()
 
             # If content changed, re-extract entities
             if content is not None:
@@ -562,7 +784,7 @@ class MemoryStore:
                 for name in self._extract_entities(content):
                     entity_id = self._resolve_entity(name)
                     self._link_fact_entity(fact_id, entity_id)
-                self._conn.commit()
+                self._maybe_commit()
 
             # Recompute HRR vector if content changed
             if content is not None:
@@ -622,28 +844,33 @@ class MemoryStore:
             resolved_namespace = namespace if namespace is not None else old_row["namespace"]
 
             try:
-                cur = self._conn.execute(
-                    """
-                    INSERT INTO facts (content, category, tags, trust_score,
-                                        source_type, extraction_method, confidence, namespace)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (new_content, resolved_category, tags, self.default_trust,
-                     source_type, extraction_method, confidence, resolved_namespace),
-                )
-                new_fact_id: int = cur.lastrowid  # type: ignore[assignment]
-                if new_fact_id != old_fact_id:
-                    self._conn.execute(
-                        "UPDATE facts SET status = 'superseded', superseded_by = ?, "
-                        "updated_at = CURRENT_TIMESTAMP WHERE fact_id = ?",
-                        (new_fact_id, old_fact_id),
+                # Wrapped in a SAVEPOINT (not a bare commit/rollback) so the
+                # IntegrityError-recovery branch below only undoes THIS
+                # insert attempt, never an enclosing `transaction()` block's
+                # earlier, already-successful work (Phase 4 batch safety).
+                with self._savepoint("supersede_insert"):
+                    cur = self._conn.execute(
+                        """
+                        INSERT INTO facts (content, category, tags, trust_score,
+                                            source_type, extraction_method, confidence, namespace)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (new_content, resolved_category, tags, self.default_trust,
+                         source_type, extraction_method, confidence, resolved_namespace),
                     )
-                self._conn.commit()
+                    new_fact_id: int = cur.lastrowid  # type: ignore[assignment]
+                    if new_fact_id != old_fact_id:
+                        self._conn.execute(
+                            "UPDATE facts SET status = 'superseded', superseded_by = ?, "
+                            "updated_at = CURRENT_TIMESTAMP WHERE fact_id = ?",
+                            (new_fact_id, old_fact_id),
+                        )
+                self._maybe_commit()
             except sqlite3.IntegrityError:
                 # new_content collides with an existing fact's UNIQUE
                 # (content, namespace) — that fact becomes the replacement
-                # instead of inserting a duplicate.
-                self._conn.rollback()
+                # instead of inserting a duplicate. The savepoint above
+                # already undid the failed insert attempt.
                 existing = self._conn.execute(
                     "SELECT fact_id FROM facts WHERE content = ? AND namespace = ?",
                     (new_content, resolved_namespace),
@@ -652,15 +879,13 @@ class MemoryStore:
                     raise
                 new_fact_id = int(existing["fact_id"])
                 if new_fact_id != old_fact_id:
-                    self._conn.execute(
-                        "UPDATE facts SET status = 'superseded', superseded_by = ?, "
-                        "updated_at = CURRENT_TIMESTAMP WHERE fact_id = ?",
-                        (new_fact_id, old_fact_id),
-                    )
-                    self._conn.commit()
-            except Exception:
-                self._conn.rollback()
-                raise
+                    with self._savepoint("supersede_mark"):
+                        self._conn.execute(
+                            "UPDATE facts SET status = 'superseded', superseded_by = ?, "
+                            "updated_at = CURRENT_TIMESTAMP WHERE fact_id = ?",
+                            (new_fact_id, old_fact_id),
+                        )
+                    self._maybe_commit()
 
             if new_fact_id != old_fact_id:
                 for name in self._extract_entities(new_content):
@@ -744,7 +969,7 @@ class MemoryStore:
                     "VALUES (?, ?, CURRENT_TIMESTAMP)",
                     (content_hash(row["content"]), row["namespace"]),
                 )
-            self._conn.commit()
+            self._maybe_commit()
             self.rebuild_bank(row["category"], row["namespace"] or "")
             return True
 
@@ -840,7 +1065,7 @@ class MemoryStore:
                 """,
                 (new_trust, helpful_increment, fact_id),
             )
-            self._conn.commit()
+            self._maybe_commit()
 
             return {
                 "fact_id":      fact_id,
@@ -915,7 +1140,7 @@ class MemoryStore:
         cur = self._conn.execute(
             "INSERT INTO entities (name) VALUES (?)", (name,)
         )
-        self._conn.commit()
+        self._maybe_commit()
         return int(cur.lastrowid)  # type: ignore[return-value]
 
     def _link_fact_entity(self, fact_id: int, entity_id: int) -> None:
@@ -927,7 +1152,7 @@ class MemoryStore:
             """,
             (fact_id, entity_id),
         )
-        self._conn.commit()
+        self._maybe_commit()
 
     def _compute_hrr_vector(self, fact_id: int, content: str) -> None:
         """Compute and store HRR vector for a fact. No-op if numpy unavailable."""
@@ -951,7 +1176,7 @@ class MemoryStore:
                 "UPDATE facts SET hrr_vector = ? WHERE fact_id = ?",
                 (hrr.phases_to_bytes(vector), fact_id),
             )
-            self._conn.commit()
+            self._maybe_commit()
 
     def rebuild_bank(self, category: str, namespace: str = "") -> None:
         """Full rebuild of one (namespace, category) memory bank from its
@@ -967,6 +1192,10 @@ class MemoryStore:
             if not self._hrr_available:
                 return
 
+            if self._defer_bank_rebuild_depth > 0:
+                self._pending_bank_rebuilds.add((namespace, category))
+                return
+
             name = bank_name(namespace, category)
             rows = self._conn.execute(
                 "SELECT hrr_vector FROM facts "
@@ -977,7 +1206,7 @@ class MemoryStore:
 
             if not rows:
                 self._conn.execute("DELETE FROM memory_banks WHERE bank_name = ?", (name,))
-                self._conn.commit()
+                self._maybe_commit()
                 return
 
             vectors = [hrr.bytes_to_phases(row["hrr_vector"]) for row in rows]
@@ -999,7 +1228,7 @@ class MemoryStore:
                 """,
                 (name, hrr.phases_to_bytes(bank_vector), self.hrr_dim, fact_count),
             )
-            self._conn.commit()
+            self._maybe_commit()
 
     def _rebuild_bank(self, category: str, namespace: str = "") -> None:
         """Back-compat alias for :meth:`rebuild_bank` (internal call sites)."""
@@ -1041,6 +1270,215 @@ class MemoryStore:
                 self.rebuild_bank(category, ns)
 
             return len(rows)
+
+    # ------------------------------------------------------------------
+    # Relationship helpers (Phase 5 — namespace-scoped entity relationships)
+    # ------------------------------------------------------------------
+    # Raw-SQL storage primitives only; the traversal ALGORITHM, shared-memory
+    # reuse, and dataclasses live in relationships.py — the same split as
+    # retrieval.py (ranking) sits above this module for facts.
+
+    def upsert_relationship(
+        self,
+        source_entity_id: int,
+        target_entity_id: int,
+        relationship_type: str,
+        *,
+        namespace: str = "",
+        strength: float = 0.5,
+        confidence: float = 1.0,
+        extraction_method: str = "",
+        source_fact_id: int | None = None,
+        target_fact_id: int | None = None,
+    ) -> int:
+        """Insert or update one namespace-scoped relationship edge.
+
+        Upsert key is the composite unique index
+        ``(namespace, source_entity_id, target_entity_id, relationship_type)``
+        — direction and type are both part of the key, so A->B "manages" and
+        B->A "manages" (or A->B "reports_to") are different rows, never
+        merged. A second call with the same key updates
+        strength/confidence/extraction_method/source_fact_id/target_fact_id
+        in place (never inserts a duplicate row) and reactivates a
+        previously 'stale' edge back to 'active', since calling upsert again
+        is the caller asserting the edge currently holds.
+        """
+        relationship_type = (relationship_type or "").strip()
+        if not relationship_type:
+            raise ValueError("relationship_type must not be empty")
+        strength = _clamp_trust(strength)
+        confidence = _clamp_trust(confidence)
+        namespace = namespace or ""
+        with self._lock:
+            try:
+                cur = self._conn.execute(
+                    """
+                    INSERT INTO entity_relationships
+                        (source_entity_id, target_entity_id, relationship_type, namespace,
+                         strength, confidence, extraction_method, source_fact_id, target_fact_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (source_entity_id, target_entity_id, relationship_type, namespace,
+                     strength, confidence, extraction_method, source_fact_id, target_fact_id),
+                )
+                self._maybe_commit()
+                return int(cur.lastrowid)  # type: ignore[return-value]
+            except sqlite3.IntegrityError:
+                self._conn.execute(
+                    """
+                    UPDATE entity_relationships
+                    SET strength = ?, confidence = ?, extraction_method = ?,
+                        source_fact_id = ?, target_fact_id = ?, status = 'active',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE namespace = ? AND source_entity_id = ? AND target_entity_id = ?
+                          AND relationship_type = ?
+                    """,
+                    (strength, confidence, extraction_method, source_fact_id, target_fact_id,
+                     namespace, source_entity_id, target_entity_id, relationship_type),
+                )
+                self._maybe_commit()
+                row = self._conn.execute(
+                    "SELECT relationship_id FROM entity_relationships WHERE namespace = ? "
+                    "AND source_entity_id = ? AND target_entity_id = ? AND relationship_type = ?",
+                    (namespace, source_entity_id, target_entity_id, relationship_type),
+                ).fetchone()
+                return int(row["relationship_id"])
+
+    def remove_relationship(
+        self, source_entity_id: int, target_entity_id: int, relationship_type: str, namespace: str = "",
+    ) -> bool:
+        """Hard-delete one relationship edge. Returns True if a row existed."""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM entity_relationships WHERE namespace = ? AND source_entity_id = ? "
+                "AND target_entity_id = ? AND relationship_type = ?",
+                (namespace or "", source_entity_id, target_entity_id, relationship_type),
+            )
+            self._maybe_commit()
+            return cur.rowcount > 0
+
+    def list_relationships_for_entity(
+        self,
+        entity_id: int,
+        *,
+        namespace: str = "",
+        direction: str = "both",
+        relationship_type: str | None = None,
+        status: str | None = "active",
+        limit: int = 200,
+    ) -> list[dict]:
+        """Relationships touching ``entity_id``, scoped to exactly ``namespace``
+        (never any other namespace, including the unscoped/'' one unless
+        that IS the namespace asked for)."""
+        with self._lock:
+            clauses = ["namespace = ?"]
+            params: list = [namespace or ""]
+            if direction == "outgoing":
+                clauses.append("source_entity_id = ?")
+                params.append(entity_id)
+            elif direction == "incoming":
+                clauses.append("target_entity_id = ?")
+                params.append(entity_id)
+            else:
+                clauses.append("(source_entity_id = ? OR target_entity_id = ?)")
+                params.extend([entity_id, entity_id])
+            if relationship_type is not None:
+                clauses.append("relationship_type = ?")
+                params.append(relationship_type)
+            if status is not None:
+                clauses.append("status = ?")
+                params.append(status)
+            params.append(limit)
+            sql = f"""
+                SELECT relationship_id, source_entity_id, target_entity_id, relationship_type,
+                       namespace, strength, confidence, extraction_method, source_fact_id,
+                       target_fact_id, status, created_at, updated_at
+                FROM entity_relationships
+                WHERE {' AND '.join(clauses)}
+                ORDER BY relationship_id
+                LIMIT ?
+            """
+            rows = self._conn.execute(sql, params).fetchall()
+            return [self._row_to_dict(r) for r in rows]
+
+    def relationship_neighbors(
+        self, entity_ids: list[int], *, namespace: str = "", status: str | None = "active",
+    ) -> list[dict]:
+        """Every edge touching any of ``entity_ids``, scoped to exactly
+        ``namespace``. Used by relationships.py's bounded BFS traversal —
+        one query per frontier level, never per-node."""
+        if not entity_ids:
+            return []
+        with self._lock:
+            placeholders = ",".join("?" * len(entity_ids))
+            params: list = list(entity_ids) + list(entity_ids) + [namespace or ""]
+            sql = f"""
+                SELECT relationship_id, source_entity_id, target_entity_id, relationship_type,
+                       namespace, strength, confidence, status
+                FROM entity_relationships
+                WHERE (source_entity_id IN ({placeholders}) OR target_entity_id IN ({placeholders}))
+                  AND namespace = ?
+            """
+            if status is not None:
+                sql += " AND status = ?"
+                params.append(status)
+            rows = self._conn.execute(sql, params).fetchall()
+            return [self._row_to_dict(r) for r in rows]
+
+    def invalidate_relationships_for_fact(self, fact_id: int, namespace: str | None = None) -> int:
+        """Hard-delete relationships derived ONLY from ``fact_id``.
+
+        Mirrors `remove_fact`'s own irreversible tombstone policy: once the
+        evidence fact is forgotten, the derived edge is gone too, not merely
+        marked stale. NOT called automatically by `remove_fact` — the caller
+        (provider/batch/test) is responsible for calling this BEFORE its own
+        `remove_fact(fact_id, ...)` call, not after: `source_fact_id`/
+        `target_fact_id` are foreign keys into `facts(fact_id)`, so deleting
+        the fact first raises a foreign-key violation while a relationship
+        row still references it. `namespace`, if given, scopes the delete so
+        one namespace can't invalidate another's edge by guessing a fact_id.
+        """
+        with self._lock:
+            if namespace is not None:
+                cur = self._conn.execute(
+                    "DELETE FROM entity_relationships WHERE (source_fact_id = ? OR target_fact_id = ?) "
+                    "AND namespace = ?",
+                    (fact_id, fact_id, namespace),
+                )
+            else:
+                cur = self._conn.execute(
+                    "DELETE FROM entity_relationships WHERE source_fact_id = ? OR target_fact_id = ?",
+                    (fact_id, fact_id),
+                )
+            self._maybe_commit()
+            return cur.rowcount
+
+    def mark_relationships_stale_for_fact(self, fact_id: int, namespace: str | None = None) -> int:
+        """Mark active relationships derived from ``fact_id`` as 'stale'.
+
+        Called alongside `supersede_fact` (by the caller, not automatically)
+        so a relationship whose only evidence is a fact that has since been
+        corrected stops counting as active evidence, without being
+        hard-deleted — the fact itself still exists (as history), so the
+        edge might still be true; it just isn't re-asserted by anything
+        active anymore. `list_relationships_for_entity`/`relationship_neighbors`
+        default to ``status="active"`` and therefore exclude stale rows.
+        """
+        with self._lock:
+            if namespace is not None:
+                cur = self._conn.execute(
+                    "UPDATE entity_relationships SET status = 'stale', updated_at = CURRENT_TIMESTAMP "
+                    "WHERE (source_fact_id = ? OR target_fact_id = ?) AND namespace = ? AND status = 'active'",
+                    (fact_id, fact_id, namespace),
+                )
+            else:
+                cur = self._conn.execute(
+                    "UPDATE entity_relationships SET status = 'stale', updated_at = CURRENT_TIMESTAMP "
+                    "WHERE (source_fact_id = ? OR target_fact_id = ?) AND status = 'active'",
+                    (fact_id, fact_id),
+                )
+            self._maybe_commit()
+            return cur.rowcount
 
     # ------------------------------------------------------------------
     # Utilities

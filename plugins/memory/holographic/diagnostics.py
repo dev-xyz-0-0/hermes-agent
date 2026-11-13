@@ -43,6 +43,7 @@ CODE_MISSING_TRIGGER = "MISSING_TRIGGER"
 CODE_FTS_PARITY_MISMATCH = "FTS_PARITY_MISMATCH"
 CODE_ORPHAN_FACT_ENTITY = "ORPHAN_FACT_ENTITY"
 CODE_ORPHAN_FACT_SOURCE = "ORPHAN_FACT_SOURCE"
+CODE_ORPHAN_RELATIONSHIP = "ORPHAN_RELATIONSHIP"
 CODE_INVALID_SUPERSEDED_BY = "INVALID_SUPERSEDED_BY"
 CODE_SUPERSESSION_CYCLE = "SUPERSESSION_CYCLE"
 CODE_MALFORMED_HRR_VECTOR = "MALFORMED_HRR_VECTOR"
@@ -234,6 +235,33 @@ def _check_orphans(conn: sqlite3.Connection, issues: list[DiagnosticIssue]) -> N
             issues.append(DiagnosticIssue(CODE_ORPHAN_FACT_SOURCE, "error", f"{orphan_fs} orphaned fact_sources row(s)", count=orphan_fs))
 
 
+def _check_relationship_orphans(conn: sqlite3.Connection, issues: list[DiagnosticIssue]) -> None:
+    """Read-only: detect `entity_relationships` rows whose source or target
+    entity no longer exists (checklist section 3's "Detect orphaned
+    relationships" — left unimplemented until Phase 5 added the
+    `entity_relationships` table/service this check depends on).
+
+    `entity_relationships` is intentionally NOT in `_EXPECTED_TABLES` — it is
+    additive (Phase 5), not part of the Phase 1 schema contract, so this
+    check is a no-op (not a MISSING_TABLE issue) on any database that
+    doesn't have it yet. Reports only; never mutates or repairs a row,
+    matching every other check in this read-only module.
+    """
+    if not _table_exists(conn, "entity_relationships") or not _table_exists(conn, "entities"):
+        return
+    orphan = conn.execute(
+        """
+        SELECT COUNT(*) FROM entity_relationships r
+        WHERE NOT EXISTS (SELECT 1 FROM entities e WHERE e.entity_id = r.source_entity_id)
+           OR NOT EXISTS (SELECT 1 FROM entities e WHERE e.entity_id = r.target_entity_id)
+        """
+    ).fetchone()[0]
+    if orphan:
+        issues.append(DiagnosticIssue(
+            CODE_ORPHAN_RELATIONSHIP, "error", f"{orphan} orphaned entity_relationships row(s)", count=orphan,
+        ))
+
+
 def _facts_has_columns(conn: sqlite3.Connection, *columns: str) -> bool:
     if not _table_exists(conn, "facts"):
         return False
@@ -399,6 +427,7 @@ def run_diagnostics(
         _check_tables_columns_indexes_triggers(conn, issues)
         _check_fts_parity(conn, issues)
         _check_orphans(conn, issues)
+        _check_relationship_orphans(conn, issues)
         _check_supersession_chain(conn, issues)
         _check_hrr_vectors_and_banks(conn, issues)
         _check_status_and_trust(conn, issues)

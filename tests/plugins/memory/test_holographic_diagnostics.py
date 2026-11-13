@@ -157,6 +157,51 @@ class TestOrphanDetection:
         codes = {i.code for i in report.issues}
         assert diagnostics.CODE_ORPHAN_FACT_SOURCE in codes
 
+    def test_orphan_relationship_reports_expected_code_without_mutating(self, tmp_path):
+        """Phase 5 — checklist section 3's 'Detect orphaned relationships'
+        and section 8's 'Health diagnostics detect orphan edges without
+        repairing them'."""
+        db_path = tmp_path / "db.sqlite"
+        store = MemoryStore(db_path=db_path, hrr_dim=32)
+        alice = store._resolve_entity("Alice")
+        store._conn.commit()
+        store.close()
+
+        # Insert the orphan row via a separate connection with FK
+        # enforcement off, matching the fact_entities/fact_sources orphan
+        # tests above — MemoryStore's own connection enforces FKs.
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute(
+            "INSERT INTO entity_relationships (source_entity_id, target_entity_id, relationship_type, namespace) "
+            "VALUES (?, 999999, 'manages', 'ns')",
+            (alice,),
+        )
+        conn.commit()
+        conn.close()
+
+        before_hash = hashlib.sha256(db_path.read_bytes()).hexdigest()
+        report = diagnostics.run_diagnostics(db_path)
+        after_hash = hashlib.sha256(db_path.read_bytes()).hexdigest()
+
+        codes = {i.code for i in report.issues}
+        assert diagnostics.CODE_ORPHAN_RELATIONSHIP in codes
+        assert report.ok is False
+        assert before_hash == after_hash  # read-only — never repairs the orphan
+
+    def test_no_orphan_relationships_on_healthy_db(self, tmp_path):
+        db_path = tmp_path / "db.sqlite"
+        store = MemoryStore(db_path=db_path, hrr_dim=32)
+        alice = store._resolve_entity("Alice")
+        bob = store._resolve_entity("Bob")
+        store._conn.commit()
+        store.upsert_relationship(alice, bob, "manages", namespace="ns")
+        store.close()
+
+        report = diagnostics.run_diagnostics(db_path)
+        codes = {i.code for i in report.issues}
+        assert diagnostics.CODE_ORPHAN_RELATIONSHIP not in codes
+
 
 class TestSupersessionValidity:
     def test_invalid_superseded_by_reference_detected(self, tmp_path):

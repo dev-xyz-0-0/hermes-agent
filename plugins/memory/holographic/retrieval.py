@@ -137,7 +137,10 @@ class FactRetriever:
                         f"UPDATE facts SET retrieval_count = retrieval_count + 1 WHERE fact_id IN ({placeholders})",
                         ids,
                     )
-                    self.store._conn.commit()
+                    # Defer to an enclosing `transaction()` block (Phase 4
+                    # batch ingestion) if one is open, instead of committing
+                    # this counter bump ahead of/independent from it.
+                    self.store._maybe_commit()
             except Exception:
                 logger.debug("Failed to increment retrieval_count", exc_info=True)
 
