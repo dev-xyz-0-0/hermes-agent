@@ -76,6 +76,8 @@ class TestProviderConfigDefaults:
             "capture_debug", "profile_isolation", "diagnostics_enabled",
             "diagnostics_include_content", "shared_memory_enabled", "shared_memory_categories",
             "backup_enabled", "backup_retention",
+            # Phase 3 (demo-reference integration) — fuzzy consolidation evidence gate.
+            "fuzzy_dedup_enabled", "fuzzy_dedup_threshold",
         }
         assert keys == expected
 

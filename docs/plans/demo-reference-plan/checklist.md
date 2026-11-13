@@ -169,32 +169,32 @@ intentional deviations in the relevant PR.
 
 ## 6. Phase 3 — Fuzzy consolidation evidence
 
-- [ ] Port/adapt deterministic character N-gram similarity.
-- [ ] Keep it in consolidation, not `MemoryStore.add_fact()`.
-- [ ] Reuse current normalization and scope logic.
-- [ ] Compare only active same-namespace candidates.
-- [ ] Combine token and N-gram evidence conservatively.
-- [ ] Define named, documented thresholds.
-- [ ] Add strategy/score diagnostics without breaking existing result fields.
-- [ ] Keep corrections explicit and unambiguous.
-- [ ] Preserve ambiguous facts rather than merging them.
-- [ ] Run security rejection before similarity evaluation.
-- [ ] Gate rollout with configuration if required.
+- [x] Port/adapt deterministic character N-gram similarity.
+- [x] Keep it in consolidation, not `MemoryStore.add_fact()`.
+- [x] Reuse current normalization and scope logic.
+- [x] Compare only active same-namespace candidates.
+- [x] Combine token and N-gram evidence conservatively.
+- [x] Define named, documented thresholds.
+- [x] Add strategy/score diagnostics without breaking existing result fields.
+- [x] Keep corrections explicit and unambiguous.
+- [x] Preserve ambiguous facts rather than merging them.
+- [x] Run security rejection before similarity evaluation.
+- [x] Gate rollout with configuration if required.
 
 ### Fuzzy consolidation tests
 
-- [ ] Exact duplicate remains ignored.
-- [ ] Durable-fact paraphrases consolidate.
-- [ ] Different critical values remain separate.
-- [ ] Explicit correction supersedes one clear target.
-- [ ] Ambiguous correction supersedes nothing.
-- [ ] User and project scopes do not cross-match.
-- [ ] Two namespaces do not cross-match.
-- [ ] Unicode and punctuation normalization is deterministic.
-- [ ] Oversized input remains bounded.
-- [ ] Secret/instruction-shaped content is rejected before comparison.
-- [ ] Threshold boundary cases are pinned.
-- [ ] Evaluation corpus meets documented precision/recall targets.
+- [x] Exact duplicate remains ignored.
+- [x] Durable-fact paraphrases consolidate.
+- [x] Different critical values remain separate.
+- [x] Explicit correction supersedes one clear target.
+- [x] Ambiguous correction supersedes nothing.
+- [x] User and project scopes do not cross-match.
+- [x] Two namespaces do not cross-match.
+- [x] Unicode and punctuation normalization is deterministic.
+- [x] Oversized input remains bounded.
+- [x] Secret/instruction-shaped content is rejected before comparison.
+- [x] Threshold boundary cases are pinned.
+- [x] Evaluation corpus meets documented precision/recall targets.
 
 ## 7. Phase 4 — Transactional batch ingestion
 

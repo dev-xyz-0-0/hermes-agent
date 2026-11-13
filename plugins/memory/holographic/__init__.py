@@ -490,6 +490,23 @@ class HolographicMemoryProvider(MemoryProvider):
         # existing installs — see docs/plans/2026-10-15-holographic-pr2-*.md).
         self._auto_capture = is_truthy_value(self._config.get("auto_capture"), default=False)
         self._consolidation_enabled = is_truthy_value(self._config.get("consolidation_enabled"), default=True)
+        # Phase 3 (demo-reference integration) — deterministic character
+        # N-gram duplicate evidence inside consolidation.py. On by default
+        # (rollout gate per the implementation plan's config table); the
+        # optional threshold override is clamped the same way every other
+        # numeric option here is, and falls back to the calibrated module
+        # constant when unset/invalid.
+        self._fuzzy_dedup_enabled = is_truthy_value(self._config.get("fuzzy_dedup_enabled"), default=True)
+        self._fuzzy_dedup_threshold: float | None = None
+        _raw_fuzzy_threshold = self._config.get("fuzzy_dedup_threshold")
+        if _raw_fuzzy_threshold is not None:
+            try:
+                self._fuzzy_dedup_threshold = max(0.0, min(1.0, float(_raw_fuzzy_threshold)))
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Holographic: invalid fuzzy_dedup_threshold %r, falling back to the default.",
+                    _raw_fuzzy_threshold,
+                )
         self._max_facts_per_turn = max(1, min(10, int(self._config.get("max_facts_per_turn", 5))))
         self._capture_timeout_ms = max(10, min(5000, int(self._config.get("capture_timeout_ms", 500))))
         self._capture_debug = is_truthy_value(self._config.get("capture_debug"), default=False)
@@ -646,6 +663,17 @@ class HolographicMemoryProvider(MemoryProvider):
                 "description": "Deduplicate/supersede/forget via consolidation; if false, auto-captured facts are inserted as-is (forgetting is skipped)",
                 "default": str(self._config.get("consolidation_enabled", "true")).lower(),
                 "choices": ["true", "false"],
+            },
+            {
+                "key": "fuzzy_dedup_enabled",
+                "description": "Use deterministic character N-gram similarity as additional consolidation evidence for probable paraphrase duplicates",
+                "default": str(self._config.get("fuzzy_dedup_enabled", "true")).lower(),
+                "choices": ["true", "false"],
+            },
+            {
+                "key": "fuzzy_dedup_threshold",
+                "description": "Optional override for the fuzzy-duplicate N-gram overlap threshold (0.0-1.0); unset uses the calibrated default",
+                "default": str(self._config.get("fuzzy_dedup_threshold", "")),
             },
             {
                 "key": "capture_timeout_ms",
@@ -1133,6 +1161,8 @@ class HolographicMemoryProvider(MemoryProvider):
                         category=category, namespace=self._namespace,
                         source_type=via, extraction_method=extraction_method,
                         confidence=candidate.confidence,
+                        fuzzy_enabled=self._fuzzy_dedup_enabled,
+                        fuzzy_ngram_threshold=self._fuzzy_dedup_threshold,
                     )
                 elif candidate.operation == "forget":
                     continue  # forgetting requires consolidation to find its target safely
@@ -1326,6 +1356,8 @@ class HolographicMemoryProvider(MemoryProvider):
                         source_type="builtin_import",
                         extraction_method="explicit_import",
                         confidence=1.0,
+                        fuzzy_enabled=self._fuzzy_dedup_enabled,
+                        fuzzy_ngram_threshold=self._fuzzy_dedup_threshold,
                     )
                     if applied.action == "inserted" and applied.fact_id:
                         self._record_source(applied.fact_id, "builtin_import")

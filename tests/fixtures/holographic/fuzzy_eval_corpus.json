@@ -1,0 +1,28 @@
+{
+  "description": "Labeled pair corpus for Phase 3 consolidation duplicate detection (plugins/memory/holographic/consolidation.py's plan_candidate(), exercising the baseline token-overlap check together with the new fuzzy N-gram evidence -- a 'match' pair should be classified 'ignored' by either signal, a 'no_match' pair must stay 'inserted' regardless of raw text similarity). Each case is a pair of already-firewall-accepted fact contents. This does not test the full capture/extraction pipeline -- that has its own corpus in test_holographic_capture_eval.py. Thresholds (_FUZZY_DUPLICATE_NGRAM_OVERLAP, _FUZZY_VALUE_SWAP_GUARD) were calibrated against this corpus, not the other way around -- see consolidation.py's module docstring for the worked examples these numbers come from.",
+  "target_precision": 0.9,
+  "target_recall": 0.9,
+  "cases": [
+    {"a": "My MCP projects use uv.", "b": "I use Python uv for my MCP project.", "label": "match", "note": "singular/plural project variant"},
+    {"a": "My timezone is PST.", "b": "My time zone is PST.", "label": "match", "note": "compound word spacing variant"},
+    {"a": "I use PostgreSQL for my database.", "b": "I use Postgres for my database.", "label": "match", "note": "abbreviation variant of the same product"},
+    {"a": "I prefer dark mode.", "b": "I prefer darkmode.", "label": "match", "note": "compound/split spelling variant"},
+    {"a": "My cafe order is a latte.", "b": "My café order is a latte.", "label": "match", "note": "accented vs unaccented spelling"},
+    {"a": "I use Node.js for backend services.", "b": "I use NodeJS for backend services.", "label": "match", "note": "punctuation/casing variant of the same product name"},
+    {"a": "My preferred shell is zsh.", "b": "My preferred shell is Zsh.", "label": "match", "note": "casing-only variant"},
+    {"a": "I deploy to us-east-1.", "b": "I deploy to US-East-1.", "label": "match", "note": "casing-only variant of a region code"},
+    {"a": "My favorite color is blue.", "b": "My favorite color is red.", "label": "no_match", "note": "conflicting value behind a shared scaffold"},
+    {"a": "Project Alpha uses PostgreSQL.", "b": "Project Alpha uses MySQL.", "label": "no_match", "note": "conflicting database choice"},
+    {"a": "My phone number is 555-123-4567.", "b": "My phone number is 555-987-6543.", "label": "no_match", "note": "conflicting phone number, same template"},
+    {"a": "My ZIP code is 10001.", "b": "My ZIP code is 90210.", "label": "no_match", "note": "conflicting ZIP code, same template"},
+    {"a": "My favorite fruit is apple.", "b": "My favorite fruit is mango.", "label": "no_match", "note": "conflicting value behind a shared scaffold"},
+    {"a": "My birthday is in March.", "b": "My birthday is in October.", "label": "no_match", "note": "conflicting month"},
+    {"a": "I work at Acme Corp.", "b": "My employer is Acme Corp.", "label": "no_match", "note": "deep synonym paraphrase -- deliberately out of scope for deterministic N-gram evidence, see consolidation.py module docstring"},
+    {"a": "I live in Seattle.", "b": "My home city is Seattle.", "label": "no_match", "note": "deep synonym paraphrase, same reasoning as above"},
+    {"a": "My username is alpha99.", "b": "My username is beta42.", "label": "no_match", "note": "conflicting identifier"},
+    {"a": "I prefer tea.", "b": "I prefer coffee.", "label": "no_match", "note": "conflicting value, no shared content token at all"},
+    {"a": "We run PostgreSQL 14 in prod.", "b": "We run PostgreSQL 15 in staging.", "label": "no_match", "note": "conflicting version number and environment despite high raw text overlap"},
+    {"a": "The retro is scheduled for Monday.", "b": "The retro is scheduled for Friday.", "label": "no_match", "note": "conflicting day despite high raw text overlap"},
+    {"a": "My locker number is 214.", "b": "My locker number is 718.", "label": "no_match", "note": "conflicting identifier, same template"}
+  ]
+}
