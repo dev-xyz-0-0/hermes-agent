@@ -485,6 +485,310 @@ def backfill_relationships(
 
 
 # ---------------------------------------------------------------------------
+# restore — operator CLI orchestration around backup.restore_backup()
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RestoreMaintenanceResult:
+    """Result of `restore()`. Distinct from :class:`MaintenanceResult` because
+    restore's exit-code semantics are richer (dry-run can report "ready but
+    blocked by warnings" as exit 1 even though nothing failed) and its JSON
+    shape (diff/gates/plan/post_health) doesn't fit the generic `counts`
+    dict the other maintenance commands share.
+    """
+
+    ok: bool
+    dry_run: bool
+    exit_code: int
+    from_path: str
+    db_path: str
+    operation: str = "restore"
+    backup_verify: "dict[str, Any] | None" = None
+    backup_health: "dict[str, Any] | None" = None
+    live_health: "dict[str, Any] | None" = None
+    diff: "dict[str, Any] | None" = None
+    tombstones_live_count: int = 0
+    would_block_reactivation: bool = False
+    gates: "dict[str, Any]" = field(default_factory=dict)
+    plan: "list[str]" = field(default_factory=list)
+    safety_copy_path: str = ""
+    reactivated_blocked: int = 0
+    post_health: "dict[str, Any] | None" = None
+    issues: "list[str]" = field(default_factory=list)
+    algorithm_version: str = ALGORITHM_VERSION
+    schema_version: str = SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "ok": self.ok,
+            "dry_run": self.dry_run,
+            "operation": self.operation,
+            "exit_code": self.exit_code,
+            "algorithm_version": self.algorithm_version,
+            "schema_version": self.schema_version,
+            "from": self.from_path,
+            "target_db_path": self.db_path,
+            "backup_verify": self.backup_verify,
+            "gates": self.gates,
+            "issues": self.issues,
+        }
+        if self.dry_run:
+            d.update({
+                "backup_health": self.backup_health,
+                "live_health": self.live_health,
+                "diff": self.diff,
+                "tombstones_live_count": self.tombstones_live_count,
+                "would_block_reactivation": self.would_block_reactivation,
+                "plan": self.plan,
+            })
+        else:
+            d.update({
+                "safety_copy_path": self.safety_copy_path,
+                "reactivated_blocked": self.reactivated_blocked,
+                "post_health": self.post_health,
+            })
+        return d
+
+
+_RESTORE_PLAN_STEPS = [
+    "verify backup checksum+integrity",
+    "health-diagnose backup DB (P0)",
+    "health-diagnose live DB",
+    "read live tombstones",
+    "maintenance lock",
+    "close any open store if held by this process",
+    "stage+integrity backup",
+    "tombstone sweep on staging",
+    "safety-copy live DB to <target>.pre-restore-<ts>.bak",
+    "remove live -wal/-shm",
+    "atomic replace into target",
+    "post-health live",
+]
+
+
+def _diagnostic_summary(report) -> dict[str, Any]:
+    return {
+        "exit_code": report.exit_code,
+        "issues": [i.to_dict() for i in report.issues],
+        "counts": report.counts,
+    }
+
+
+def _count_diff(backup_counts: dict[str, Any], live_counts: "dict[str, Any] | None") -> "dict[str, Any] | None":
+    if live_counts is None:
+        return None
+    diff: dict[str, Any] = {}
+    for key in sorted(set(backup_counts) & set(live_counts)):
+        b, l = backup_counts[key], live_counts[key]
+        diff[key] = {"backup": b, "live": l, "delta": b - l}
+    return diff
+
+
+def _read_live_tombstone_count(db_path: Path) -> int:
+    if not db_path.exists():
+        return 0
+    conn = _readonly_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='forgotten_facts'"
+        ).fetchone()
+        if row is None:
+            return 0
+        return int(conn.execute("SELECT COUNT(*) FROM forgotten_facts").fetchone()[0])
+    finally:
+        conn.close()
+
+
+def _read_live_tombstones(db_path: Path) -> frozenset:
+    if not db_path.exists():
+        return frozenset()
+    conn = _readonly_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='forgotten_facts'"
+        ).fetchone()
+        if row is None:
+            return frozenset()
+        return frozenset(r[0] for r in conn.execute("SELECT content_hash FROM forgotten_facts"))
+    finally:
+        conn.close()
+
+
+def _compute_restore_gates(
+    *,
+    backup_exists: bool,
+    verify_ok: bool,
+    verify_reason: str,
+    backup_health_errors: int,
+    backup_health_warnings: int,
+    allow_backup_warnings: bool,
+) -> "tuple[dict[str, Any], int]":
+    """Returns (gates_dict, exit_code) per the exit-code table in the P1 plan:
+    0=ok, 1=warnings-only, 2=errors, 3=cannot-run (handled by caller before
+    this is ever invoked for the missing-backup-file case)."""
+    block_reasons: list[str] = []
+    if not verify_ok:
+        block_reasons.append(f"backup verification failed: {verify_reason}")
+    if backup_health_errors:
+        block_reasons.append(f"backup health has {backup_health_errors} error issue(s)")
+    if backup_health_warnings and not allow_backup_warnings:
+        block_reasons.append(
+            f"backup health has {backup_health_warnings} warning issue(s) "
+            "(pass --allow-backup-warnings to proceed anyway)"
+        )
+
+    apply_allowed = not block_reasons
+    gates = {
+        "backup_verify_ok": verify_ok,
+        "backup_health_errors": backup_health_errors,
+        "backup_health_warnings": backup_health_warnings,
+        "apply_allowed": apply_allowed,
+        "block_reasons": block_reasons,
+    }
+
+    if not verify_ok or backup_health_errors:
+        exit_code = EXIT_ERRORS
+    elif backup_health_warnings and not allow_backup_warnings:
+        exit_code = EXIT_WARNINGS
+    else:
+        exit_code = EXIT_OK
+    return gates, exit_code
+
+
+def restore(
+    db_path: "str | Path",
+    *,
+    backup_path: "str | Path",
+    hermes_home: "str | Path",
+    dry_run: bool = True,
+    allow_backup_warnings: bool = False,
+    hrr_dim: int = 1024,
+) -> RestoreMaintenanceResult:
+    """Restore `backup_path` onto `db_path` (full DB replace, v1 — see P1 plan
+    non-goals for what this deliberately does NOT do: no merge/partial
+    restore, no `fact_store` exposure, no auto-rollback).
+
+    Dry-run (default) performs zero writes: verifies the backup, diagnoses
+    the backup DB and the live DB independently (P0 semantics — never mixes
+    their counts/issues), reports a facts/active/memory_banks diff, and
+    computes the same apply-gate logic `--apply` will use, so an operator
+    can see exactly what would block an apply before running one.
+
+    Apply re-verifies everything inside the maintenance lock (TOCTOU-safe),
+    reads live tombstones before touching anything, and delegates the
+    actual file-level replace to the existing `backup.restore_backup()`
+    primitive — this function's job is orchestration/gating, not
+    reimplementing that primitive.
+    """
+    from . import diagnostics as diagnostics_module
+
+    db_path = Path(db_path)
+    backup_path = Path(backup_path)
+    from_path_str = str(backup_path)
+
+    if not backup_path.exists():
+        return RestoreMaintenanceResult(
+            ok=False, dry_run=dry_run, exit_code=EXIT_CANNOT_RUN,
+            from_path=from_path_str, db_path=str(db_path),
+            issues=[f"backup file not found: {backup_path}"],
+            gates={"backup_verify_ok": False, "backup_health_errors": 0,
+                   "backup_health_warnings": 0, "apply_allowed": False,
+                   "block_reasons": [f"backup file not found: {backup_path}"]},
+        )
+
+    verify = backup_module.verify_backup(str(backup_path))
+    backup_health_report = None
+    backup_health_errors = 0
+    backup_health_warnings = 0
+    if verify.ok:
+        backup_health_report = diagnostics_module.run_diagnostics(backup_path)
+        backup_health_errors = sum(1 for i in backup_health_report.issues if i.severity == "error")
+        backup_health_warnings = sum(1 for i in backup_health_report.issues if i.severity == "warning")
+
+    gates, exit_code = _compute_restore_gates(
+        backup_exists=True,
+        verify_ok=verify.ok,
+        verify_reason=verify.reason,
+        backup_health_errors=backup_health_errors,
+        backup_health_warnings=backup_health_warnings,
+        allow_backup_warnings=allow_backup_warnings,
+    )
+    backup_verify_dict = {"ok": verify.ok, "reason": verify.reason}
+
+    if dry_run:
+        live_health_report = diagnostics_module.run_diagnostics(db_path) if db_path.exists() else None
+        backup_health_dict = _diagnostic_summary(backup_health_report) if backup_health_report else None
+        live_health_dict = _diagnostic_summary(live_health_report) if live_health_report else None
+        diff = _count_diff(backup_health_dict["counts"], live_health_dict["counts"] if live_health_dict else None) if backup_health_dict else None
+        tombstones_live_count = _read_live_tombstone_count(db_path)
+
+        return RestoreMaintenanceResult(
+            ok=exit_code != EXIT_ERRORS,
+            dry_run=True, exit_code=exit_code,
+            from_path=from_path_str, db_path=str(db_path),
+            backup_verify=backup_verify_dict,
+            backup_health=backup_health_dict,
+            live_health=live_health_dict,
+            diff=diff,
+            tombstones_live_count=tombstones_live_count,
+            would_block_reactivation=tombstones_live_count > 0,
+            gates=gates,
+            plan=list(_RESTORE_PLAN_STEPS),
+        )
+
+    # --- apply ---
+    if not gates["apply_allowed"]:
+        return RestoreMaintenanceResult(
+            ok=False, dry_run=False, exit_code=exit_code,
+            from_path=from_path_str, db_path=str(db_path),
+            backup_verify=backup_verify_dict,
+            gates=gates,
+            issues=list(gates["block_reasons"]),
+        )
+
+    with maintenance_lock(db_path):
+        # Re-verify inside the lock (TOCTOU) — the backup file on disk could
+        # have changed between the gate check above and acquiring the lock.
+        reverify = backup_module.verify_backup(str(backup_path))
+        if not reverify.ok:
+            return RestoreMaintenanceResult(
+                ok=False, dry_run=False, exit_code=EXIT_ERRORS,
+                from_path=from_path_str, db_path=str(db_path),
+                backup_verify={"ok": reverify.ok, "reason": reverify.reason},
+                gates=gates,
+                issues=[f"backup verification failed on re-check: {reverify.reason}"],
+            )
+
+        tombstones = _read_live_tombstones(db_path)
+        restore_result = backup_module.restore_backup(
+            str(backup_path), str(db_path), tombstones=tombstones,
+        )
+        if not restore_result.ok:
+            return RestoreMaintenanceResult(
+                ok=False, dry_run=False, exit_code=EXIT_ERRORS,
+                from_path=from_path_str, db_path=str(db_path),
+                backup_verify=backup_verify_dict,
+                gates=gates,
+                issues=[restore_result.reason],
+            )
+
+        post_report = diagnostics_module.run_diagnostics(db_path)
+        post_health_dict = _diagnostic_summary(post_report)
+        final_ok = post_report.exit_code != EXIT_ERRORS
+        final_exit_code = post_report.exit_code
+
+        return RestoreMaintenanceResult(
+            ok=final_ok, dry_run=False, exit_code=final_exit_code,
+            from_path=from_path_str, db_path=str(db_path),
+            backup_verify=backup_verify_dict,
+            safety_copy_path=restore_result.safety_copy_path,
+            reactivated_blocked=restore_result.reactivated_blocked,
+            post_health=post_health_dict,
+            gates=gates,
+        )
+
+
+# ---------------------------------------------------------------------------
 # verify — thin alias for diagnostics.run_diagnostics
 # ---------------------------------------------------------------------------
 
