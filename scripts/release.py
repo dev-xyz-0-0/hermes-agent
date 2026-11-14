@@ -1,4 +1,4 @@
-#!/usr/bin/env uv run python 
+#!/usr/bin/env -S uv run python
 """Hermes Agent Release Script
 
 Generates changelogs and creates GitHub releases with CalVer tags.
