@@ -111,6 +111,9 @@ class MaintenanceResult:
     counts: dict[str, Any] = field(default_factory=dict)
     backup: "dict[str, Any] | None" = None
     issues: list[str] = field(default_factory=list)
+    # Optional operator plan rows (rebuild-banks dry-run, etc.). Never includes
+    # raw namespace strings or fact content — digests/bank keys/counts only.
+    plan: list[dict[str, Any]] = field(default_factory=list)
     algorithm_version: str = ALGORITHM_VERSION
     schema_version: str = SCHEMA_VERSION
 
@@ -121,7 +124,7 @@ class MaintenanceResult:
         return EXIT_OK
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "ok": self.ok,
             "dry_run": self.dry_run,
             "operation": self.operation,
@@ -133,6 +136,9 @@ class MaintenanceResult:
             "backup": self.backup,
             "issues": self.issues,
         }
+        if self.plan:
+            d["plan"] = self.plan
+        return d
 
 
 # ---------------------------------------------------------------------------
@@ -236,12 +242,16 @@ def rebuild_vectors(
     dry_run: bool = True,
     hrr_dim: int = 1024,
 ) -> MaintenanceResult:
-    """Recompute HRR vectors for every active fact (dimension-consistent).
+    """Recompute HRR vectors for every fact row, including superseded.
 
     Wraps ``MemoryStore.rebuild_all_vectors(namespace=None)`` (Phase 2),
-    which is already idempotent — rebuilding twice produces the same
-    vectors both times, so interrupting this operation and re-running it is
-    always safe to restart.
+    which intentionally walks *all* fact rows (active + superseded) so a
+    recovery/migration never leaves stale vectors on history rows. The
+    operation is idempotent — rebuilding twice produces the same vectors
+    both times, so interrupting and re-running is always safe.
+
+    Dry-run counts split active vs superseded so operators are not
+    surprised that ``facts_planned`` exceeds the active-only health count.
     """
     db_path = _require_db(db_path)
 
@@ -249,11 +259,27 @@ def rebuild_vectors(
         conn = _readonly_connection(db_path)
         try:
             planned = int(conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0])
+            active = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM facts WHERE status != 'superseded'"
+                ).fetchone()[0]
+            )
+            superseded = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM facts WHERE status = 'superseded'"
+                ).fetchone()[0]
+            )
         finally:
             conn.close()
         return MaintenanceResult(
             ok=True, dry_run=True, operation="rebuild-vectors", db_path=str(db_path),
-            counts={"facts_planned": planned},
+            counts={
+                "facts_planned": planned,
+                "facts_active": active,
+                "facts_superseded": superseded,
+                # Explicit contract note for automation/CLIs:
+                "scope": "all_fact_rows_including_superseded",
+            },
         )
 
     with maintenance_lock(db_path):
@@ -272,7 +298,11 @@ def rebuild_vectors(
 
         return MaintenanceResult(
             ok=True, dry_run=False, operation="rebuild-vectors", db_path=str(db_path),
-            counts={"facts_processed": processed}, backup=backup_info,
+            counts={
+                "facts_processed": processed,
+                "scope": "all_fact_rows_including_superseded",
+            },
+            backup=backup_info,
         )
 
 
@@ -302,6 +332,88 @@ def _expected_bank_names(pairs: list[tuple[str, str]]) -> set[str]:
     return {bank_name(ns, cat) for ns, cat in pairs}
 
 
+def _namespace_digest_for_plan(namespace: str) -> str:
+    """Opaque plan label — matches diagnostics display digests, never raw ns."""
+    import hashlib
+
+    if not namespace:
+        return "(unscoped)"
+    return hashlib.sha1(namespace.encode("utf-8")).hexdigest()[:12]
+
+
+def _bank_fact_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_banks'"
+    ).fetchone()
+    if row is None:
+        return {}
+    return {
+        str(r[0]): int(r[1] or 0)
+        for r in conn.execute("SELECT bank_name, fact_count FROM memory_banks")
+    }
+
+
+def _active_hrr_count(conn: sqlite3.Connection, namespace: str, category: str) -> int:
+    return int(
+        conn.execute(
+            """
+            SELECT COUNT(*) FROM facts
+            WHERE namespace = ?
+              AND category = ?
+              AND status != 'superseded'
+              AND hrr_vector IS NOT NULL
+            """,
+            (namespace, category),
+        ).fetchone()[0]
+    )
+
+
+def _rebuild_banks_plan_rows(
+    conn: sqlite3.Connection,
+    pairs: list[tuple[str, str]],
+    existing: set[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build dry-run plan rows: rebuild/create pairs + orphan deletes.
+
+    Never includes raw namespaces or fact content.
+    """
+    from .store import bank_name
+
+    existing_counts = _bank_fact_counts(conn)
+    plan: list[dict[str, Any]] = []
+    for namespace, category in pairs:
+        bname = bank_name(namespace, category)
+        old_count = int(existing_counts.get(bname, 0))
+        new_count = _active_hrr_count(conn, namespace, category)
+        if bname not in existing:
+            action = "CREATE"
+        elif old_count != new_count:
+            action = "UPDATE"
+        else:
+            action = "REFRESH"
+        plan.append({
+            "namespace_digest": _namespace_digest_for_plan(namespace),
+            "category": category,
+            "bank_name": bname,
+            "action": action,
+            "old_fact_count": old_count,
+            "new_fact_count": new_count,
+        })
+
+    expected = {row["bank_name"] for row in plan}
+    orphans: list[dict[str, Any]] = []
+    for name in sorted(existing - expected):
+        orphans.append({
+            "namespace_digest": None,
+            "category": None,
+            "bank_name": name,
+            "action": "DELETE",
+            "old_fact_count": int(existing_counts.get(name, 0)),
+            "new_fact_count": 0,
+        })
+    return plan, orphans
+
+
 def rebuild_banks(
     db_path: "str | Path",
     *,
@@ -323,6 +435,9 @@ def rebuild_banks(
     just the pairs with current active facts, so those orphans actually get
     visited. Idempotent: repeated/interrupted runs converge to the same end
     state (second apply reports zero further deletions).
+
+    Dry-run emits a ``plan`` list of digest/category/bank_name/action/
+    old→new rows plus orphan DELETE rows (no raw namespaces, no fact text).
     """
     db_path = _require_db(db_path)
 
@@ -332,6 +447,7 @@ def rebuild_banks(
             pairs = _active_namespace_category_pairs(conn)
             expected = _expected_bank_names(pairs)
             existing = _existing_bank_names(conn)
+            plan_rows, orphan_rows = _rebuild_banks_plan_rows(conn, pairs, existing)
         finally:
             conn.close()
         to_delete = existing - expected
@@ -344,6 +460,7 @@ def rebuild_banks(
                 "banks_existing": len(existing),
                 "banks_expected": len(expected),
             },
+            plan=plan_rows + orphan_rows,
         )
 
     with maintenance_lock(db_path):
@@ -614,6 +731,50 @@ def _read_live_tombstones(db_path: Path) -> frozenset:
         conn.close()
 
 
+_ENC_RESTORE_REFUSAL = (
+    "Encrypted skills-pack snapshots (.enc) are not supported by "
+    "`hermes memory restore`. Use skills-pack hermes_backup instead, e.g.: "
+    "cd /home/ubuntu/skills-pack && env -u VIRTUAL_ENV uv run python "
+    "src/hermes_backup.py restore --snapshot <ts> --only holographic "
+    "--mode migration --dry-run --db-path <fresh-or-target-db>"
+)
+
+
+def _looks_like_encrypted_skills_pack_snapshot(path: Path) -> bool:
+    """True for skills-pack encrypted snapshots (wrong tool for native restore)."""
+    name = path.name.lower()
+    return path.suffix.lower() == ".enc" or name.endswith(".db.enc") or name.endswith(".sqlite.enc")
+
+
+def _gateway_running_for_home(hermes_home: "str | Path") -> bool:
+    """Best-effort check whether this profile's gateway process is alive.
+
+    Warning-only for restore: file replace under live writers is risky, but
+    operators may still proceed after reviewing the warning. Uses the same
+    PID-file convention as profile/status tooling.
+    """
+    try:
+        from hermes_cli.profiles import _check_gateway_running
+
+        return bool(_check_gateway_running(Path(hermes_home)))
+    except Exception:
+        try:
+            # Fallback when profiles helper is unavailable: respect HERMES_HOME.
+            old = os.environ.get("HERMES_HOME")
+            os.environ["HERMES_HOME"] = str(hermes_home)
+            try:
+                from gateway.status import is_gateway_running
+
+                return bool(is_gateway_running())
+            finally:
+                if old is None:
+                    os.environ.pop("HERMES_HOME", None)
+                else:
+                    os.environ["HERMES_HOME"] = old
+        except Exception:
+            return False
+
+
 def _compute_restore_gates(
     *,
     backup_exists: bool,
@@ -622,11 +783,18 @@ def _compute_restore_gates(
     backup_health_errors: int,
     backup_health_warnings: int,
     allow_backup_warnings: bool,
+    gateway_running: bool = False,
 ) -> "tuple[dict[str, Any], int]":
     """Returns (gates_dict, exit_code) per the exit-code table in the P1 plan:
     0=ok, 1=warnings-only, 2=errors, 3=cannot-run (handled by caller before
-    this is ever invoked for the missing-backup-file case)."""
+    this is ever invoked for the missing-backup-file case).
+
+    ``gateway_running`` is advisory: it is surfaced on the gates object and
+    may promote the dry-run exit code to WARNINGS, but it does **not** block
+    ``apply_allowed`` (operator must still decide after the warning).
+    """
     block_reasons: list[str] = []
+    soft_warnings: list[str] = []
     if not verify_ok:
         block_reasons.append(f"backup verification failed: {verify_reason}")
     if backup_health_errors:
@@ -636,21 +804,32 @@ def _compute_restore_gates(
             f"backup health has {backup_health_warnings} warning issue(s) "
             "(pass --allow-backup-warnings to proceed anyway)"
         )
+    if gateway_running:
+        soft_warnings.append(
+            "gateway appears to be running for this HERMES_HOME — prefer "
+            "stopping writers before restore --apply to avoid races with an "
+            "open live DB"
+        )
 
     apply_allowed = not block_reasons
     gates = {
         "backup_verify_ok": verify_ok,
         "backup_health_errors": backup_health_errors,
         "backup_health_warnings": backup_health_warnings,
+        "gateway_running": gateway_running,
         "apply_allowed": apply_allowed,
         "block_reasons": block_reasons,
+        "warnings": soft_warnings,
     }
 
     if not verify_ok or backup_health_errors:
         exit_code = EXIT_ERRORS
     elif backup_health_warnings and not allow_backup_warnings:
+        # Health warnings that actually block apply (unless allow flag).
         exit_code = EXIT_WARNINGS
     else:
+        # Gateway running is advisory-only: surfaced in gates.warnings /
+        # issues, but does not change exit code or apply_allowed.
         exit_code = EXIT_OK
     return gates, exit_code
 
@@ -679,12 +858,34 @@ def restore(
     actual file-level replace to the existing `backup.restore_backup()`
     primitive — this function's job is orchestration/gating, not
     reimplementing that primitive.
+
+    Encrypted skills-pack ``*.enc`` inputs are refused with an explicit
+    pointer to ``hermes_backup.py`` (wrong tool / wrong format).
     """
     from . import diagnostics as diagnostics_module
 
     db_path = Path(db_path)
     backup_path = Path(backup_path)
+    hermes_home = Path(hermes_home)
     from_path_str = str(backup_path)
+
+    if _looks_like_encrypted_skills_pack_snapshot(backup_path):
+        reason = _ENC_RESTORE_REFUSAL
+        return RestoreMaintenanceResult(
+            ok=False, dry_run=dry_run, exit_code=EXIT_CANNOT_RUN,
+            from_path=from_path_str, db_path=str(db_path),
+            issues=[reason],
+            gates={
+                "backup_verify_ok": False,
+                "backup_health_errors": 0,
+                "backup_health_warnings": 0,
+                "gateway_running": False,
+                "apply_allowed": False,
+                "block_reasons": [reason],
+                "warnings": [],
+                "input_format": "skills_pack_encrypted",
+            },
+        )
 
     if not backup_path.exists():
         return RestoreMaintenanceResult(
@@ -692,9 +893,13 @@ def restore(
             from_path=from_path_str, db_path=str(db_path),
             issues=[f"backup file not found: {backup_path}"],
             gates={"backup_verify_ok": False, "backup_health_errors": 0,
-                   "backup_health_warnings": 0, "apply_allowed": False,
-                   "block_reasons": [f"backup file not found: {backup_path}"]},
+                   "backup_health_warnings": 0, "gateway_running": False,
+                   "apply_allowed": False,
+                   "block_reasons": [f"backup file not found: {backup_path}"],
+                   "warnings": []},
         )
+
+    gateway_running = _gateway_running_for_home(hermes_home)
 
     verify = backup_module.verify_backup(str(backup_path))
     backup_health_report = None
@@ -712,6 +917,7 @@ def restore(
         backup_health_errors=backup_health_errors,
         backup_health_warnings=backup_health_warnings,
         allow_backup_warnings=allow_backup_warnings,
+        gateway_running=gateway_running,
     )
     backup_verify_dict = {"ok": verify.ok, "reason": verify.reason}
 
@@ -734,6 +940,7 @@ def restore(
             would_block_reactivation=tombstones_live_count > 0,
             gates=gates,
             plan=list(_RESTORE_PLAN_STEPS),
+            issues=list(gates.get("warnings") or []),
         )
 
     # --- apply ---
@@ -743,7 +950,7 @@ def restore(
             from_path=from_path_str, db_path=str(db_path),
             backup_verify=backup_verify_dict,
             gates=gates,
-            issues=list(gates["block_reasons"]),
+            issues=list(gates["block_reasons"]) + list(gates.get("warnings") or []),
         )
 
     with maintenance_lock(db_path):

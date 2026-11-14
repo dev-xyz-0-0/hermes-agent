@@ -5153,18 +5153,32 @@ For more help on a command:
     memory_benchmark.add_argument("--gold-set", dest="gold_set", required=True, help="Path to a benchmark gold-set JSON file")
     memory_benchmark.add_argument("--json", action="store_true", help="Emit machine-parsable JSON only")
     memory_rebuild_vectors = memory_sub.add_parser(
-        "rebuild-vectors", help="Recompute HRR vectors for every active fact (idempotent)",
+        "rebuild-vectors",
+        help="Recompute HRR vectors for every fact row including superseded (idempotent)",
+        description=(
+            "Recomputes HRR vectors for ALL fact rows in the active profile DB "
+            "(active and superseded). Dry-run reports facts_planned plus "
+            "facts_active/facts_superseded so the count is not confused with "
+            "active-only health totals. --apply creates+verifies a backup first."
+        ),
     )
     memory_rebuild_vectors.add_argument("--dry-run", dest="dry_run", action="store_true", default=True,
                                          help="Report planned counts without writing (default)")
     memory_rebuild_vectors.add_argument("--apply", dest="dry_run", action="store_false",
-                                         help="Actually rebuild vectors (creates+verifies a backup first)")
+                                         help="Actually rebuild vectors for all fact rows (creates+verifies a backup first)")
     memory_rebuild_vectors.add_argument("--json", action="store_true", help="Emit machine-parsable JSON only")
     memory_rebuild_banks = memory_sub.add_parser(
-        "rebuild-banks", help="Rebuild every namespace/category HRR memory bank (idempotent)",
+        "rebuild-banks",
+        help="Reconcile every namespace/category HRR memory bank; delete orphans (idempotent)",
+        description=(
+            "Rebuilds banks for every active (namespace, category) pair and deletes "
+            "orphan bank rows. Dry-run emits a plan list with namespace_digest, "
+            "category, bank_name, action (CREATE/UPDATE/REFRESH/DELETE), and "
+            "old_fact_count→new_fact_count. No raw namespaces or fact text."
+        ),
     )
     memory_rebuild_banks.add_argument("--dry-run", dest="dry_run", action="store_true", default=True,
-                                       help="Report planned bank pairs without writing (default)")
+                                       help="Report planned bank pairs/plan rows without writing (default)")
     memory_rebuild_banks.add_argument("--apply", dest="dry_run", action="store_false",
                                        help="Actually rebuild banks (creates+verifies a backup first)")
     memory_rebuild_banks.add_argument("--json", action="store_true", help="Emit machine-parsable JSON only")
@@ -5180,6 +5194,17 @@ For more help on a command:
     )
     memory_verify.add_argument("--json", action="store_true", help="Emit machine-parsable JSON only")
     memory_verify.add_argument("--backup-path", dest="backup_path", default=None, help="Run health diagnostics against this backup database (and verify its checksum/integrity)")
+    memory_backup = memory_sub.add_parser(
+        "backup",
+        help="Create a native Holographic backup now (checksum sidecar + retention prune)",
+        description=(
+            "Snapshots the active profile's live memory_store.db via SQLite's online backup\n"
+            "API into $HERMES_HOME/backups/holographic/<dir>/memory-<timestamp>.db with a\n"
+            ".json checksum sidecar. Always available (does not require backup_enabled).\n"
+            "Prunes older backups in that directory down to backup_retention when configured."
+        ),
+    )
+    memory_backup.add_argument("--json", action="store_true", help="Emit machine-parsable JSON only")
     memory_restore = memory_sub.add_parser(
         "restore",
         help="Restore the live Holographic DB from a native backup (DESTRUCTIVE; dry-run by default)",
@@ -5191,12 +5216,16 @@ For more help on a command:
             "whether --apply would be allowed. --apply re-verifies everything, takes a safety\n"
             "copy of the current live DB first (never deleted by this command), sweeps any\n"
             "facts tombstoned on the live DB since the backup was taken (so a forgotten fact\n"
-            "is never silently reactivated), and reports post-restore health. Never exposed\n"
-            "to the model/fact_store tool — operator CLI only."
+            "is never silently reactivated), and reports post-restore health.\n"
+            "\n"
+            "Encrypted skills-pack snapshots (*.enc) are refused — use skills-pack\n"
+            "hermes_backup.py for those. If the gateway appears running for this HERMES_HOME,\n"
+            "a warning is included (does not hard-block apply). Never exposed to the\n"
+            "model/fact_store tool — operator CLI only."
         ),
     )
     memory_restore.add_argument("--from", dest="backup_from", required=True,
-                                 help="Path to the native backup .db file (its .json sidecar must sit alongside it)")
+                                 help="Path to the native backup .db file (with sibling .json sidecar). Not *.enc")
     memory_restore.add_argument("--dry-run", dest="dry_run", action="store_true", default=True,
                                  help="Report the restore plan/diff/gates without writing (default)")
     memory_restore.add_argument("--apply", dest="dry_run", action="store_false",

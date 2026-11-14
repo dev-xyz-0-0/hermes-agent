@@ -533,6 +533,8 @@ def memory_command(args) -> None:
         cmd_backfill_relationships(args)
     elif sub == "verify":
         cmd_verify(args)
+    elif sub == "backup":
+        cmd_backup(args)
     elif sub == "restore":
         cmd_restore(args)
     elif sub == "viewer":
@@ -682,9 +684,9 @@ def _print_maintenance_target(db_path: Path, *, as_json: bool, apply: bool) -> N
 def cmd_rebuild_vectors(args) -> None:
     """`hermes memory rebuild-vectors [--dry-run]`.
 
-    Recomputes HRR vectors for every active fact in the current profile's
-    database. Defaults to dry-run unless the caller explicitly asks to
-    write — see the `--dry-run`/no-flag handling below.
+    Recomputes HRR vectors for every fact row (active + superseded) in the
+    current profile's database. Defaults to dry-run unless the caller
+    explicitly asks to write — see the `--dry-run`/no-flag handling below.
     """
     import json as _json
     import sys as _sys
@@ -806,6 +808,85 @@ def cmd_backfill_relationships(args) -> None:
     _sys.exit(result.exit_code)
 
 
+def cmd_backup(args) -> None:
+    """`hermes memory backup` — create a native backup now + prune retention."""
+    import json as _json
+    import sys as _sys
+
+    from plugins.memory.holographic import backup as _backup
+    from plugins.memory.holographic import maintenance as _maintenance
+
+    db_path = _holographic_db_path()
+    as_json = bool(getattr(args, "json", False))
+    home = get_hermes_home()
+
+    if not db_path.exists():
+        message = f"Holographic memory database not found: {db_path}"
+        if as_json:
+            print(_json.dumps({"ok": False, "error": message}))
+        else:
+            print(f"\n  {message}\n")
+        _sys.exit(_maintenance.EXIT_CANNOT_RUN)
+
+    # Retention from active holographic plugin config when present.
+    retention = 14
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        plugins = cfg.get("plugins") or {}
+        holo = plugins.get("hermes-memory-store") or plugins.get("holographic") or {}
+        if isinstance(holo, dict) and "backup_retention" in holo:
+            retention = max(0, int(holo.get("backup_retention", 14)))
+        memory_cfg = cfg.get("memory") or {}
+        # Also accept nested memory.provider-style blocks if present.
+        if isinstance(memory_cfg, dict):
+            nested = memory_cfg.get("holographic") or memory_cfg.get("config") or {}
+            if isinstance(nested, dict) and "backup_retention" in nested:
+                retention = max(0, int(nested.get("backup_retention", retention)))
+    except Exception:
+        retention = 14
+
+    backup_dir = home / "backups" / "holographic" / "operator"
+    try:
+        info = _backup.create_backup(str(db_path), str(backup_dir))
+        verify = _backup.verify_backup(info.path)
+        removed: list[str] = []
+        if retention > 0:
+            removed = _backup.prune_backups(str(backup_dir), keep=retention)
+    except Exception as exc:
+        if as_json:
+            print(_json.dumps({"ok": False, "error": str(exc)}))
+        else:
+            print(f"\n  Backup failed: {exc}\n")
+        _sys.exit(_maintenance.EXIT_ERRORS)
+
+    payload = {
+        "ok": bool(verify.ok),
+        "backup_path": info.path,
+        "sidecar_path": info.sidecar_path,
+        "checksum": info.checksum,
+        "timestamp": info.timestamp,
+        "fact_count": info.fact_count,
+        "backup_dir": str(backup_dir),
+        "retention": retention,
+        "pruned": removed,
+        "verify_reason": verify.reason,
+    }
+    if as_json:
+        print(_json.dumps(payload, indent=2))
+    else:
+        print(f"\n  Holographic backup")
+        print("  " + "─" * 40)
+        print(f"  Path:      {info.path}")
+        print(f"  Checksum:  {info.checksum[:16]}…")
+        print(f"  Facts:     {info.fact_count}")
+        print(f"  Verify:    {'ok' if verify.ok else verify.reason}")
+        print(f"  Retention: keep {retention} (pruned {len(removed)})")
+        print()
+    _sys.exit(_maintenance.EXIT_OK if verify.ok else _maintenance.EXIT_ERRORS)
+
+
 def cmd_restore(args) -> None:
     """`hermes memory restore --from PATH [--dry-run|--apply] [--allow-backup-warnings]`.
 
@@ -813,6 +894,7 @@ def cmd_restore(args) -> None:
     Holographic database with a native backup. Dry-run (the default)
     performs zero writes — see maintenance.restore()'s docstring for the
     full dry-run/apply contract. Never exposed to fact_store/the model.
+    Refuses skills-pack ``*.enc`` inputs with an explicit hermes_backup hint.
     """
     import json as _json
     import sys as _sys
@@ -868,8 +950,12 @@ def _emit_restore_result(result, *, as_json: bool) -> None:
                 print(f"    {key}: backup={d['backup']} live={d['live']} delta={d['delta']}")
         print(f"\n  Tombstones on live DB: {result.tombstones_live_count}")
         print(f"  Apply allowed: {result.gates.get('apply_allowed')}")
+        if result.gates.get("gateway_running"):
+            print("  Gateway running: yes (warning — prefer stop before --apply)")
         for reason in result.gates.get("block_reasons", []):
             print(f"    blocked: {reason}")
+        for warn in result.gates.get("warnings", []) or []:
+            print(f"    warning: {warn}")
         print("\n  No changes made. Re-run with --apply to restore.\n")
     else:
         if result.safety_copy_path:
@@ -879,6 +965,8 @@ def _emit_restore_result(result, *, as_json: bool) -> None:
             print(f"  Post-restore health exit code: {result.post_health['exit_code']}")
         for reason in result.gates.get("block_reasons", []):
             print(f"    blocked: {reason}")
+        for warn in result.gates.get("warnings", []) or []:
+            print(f"    warning: {warn}")
         print()
 
     if result.issues:
@@ -899,6 +987,22 @@ def _emit_maintenance_result(result, *, as_json: bool) -> None:
     print(f"  Status:    {'OK' if result.ok else 'FAILED'}")
     for key, value in result.counts.items():
         print(f"  {key}: {value}")
+    if getattr(result, "plan", None):
+        print("\n  Plan:")
+        for row in result.plan:
+            action = row.get("action", "?")
+            bank = row.get("bank_name", "?")
+            digest = row.get("namespace_digest")
+            category = row.get("category")
+            old_c = row.get("old_fact_count")
+            new_c = row.get("new_fact_count")
+            meta = []
+            if digest is not None:
+                meta.append(f"ns={digest}")
+            if category is not None:
+                meta.append(f"cat={category}")
+            meta_s = (" " + " ".join(meta)) if meta else ""
+            print(f"    {action:7} {bank}{meta_s}  {old_c}→{new_c}")
     if result.backup is not None:
         print(f"  Backup:    {'ok' if result.backup['ok'] else result.backup.get('reason', 'failed')}")
     if result.issues:

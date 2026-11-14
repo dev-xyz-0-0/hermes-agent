@@ -121,3 +121,17 @@ class TestRestoreCommand:
             assert "restore" not in schema_actions
         finally:
             p.shutdown()
+
+    def test_enc_path_refused_via_cli(self, capsys, tmp_path):
+        from hermes_cli.memory_setup import cmd_restore
+
+        _seed_live()
+        enc = tmp_path / "snap.enc"
+        enc.write_text("encrypted-blob", encoding="utf-8")
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_restore(_ns(json=True, dry_run=True, backup_from=str(enc)))
+        assert exc_info.value.code == 3
+        parsed = json.loads(capsys.readouterr().out.strip())
+        assert parsed["ok"] is False
+        assert parsed["gates"]["apply_allowed"] is False
+        assert "hermes_backup" in " ".join(parsed.get("issues") or [])

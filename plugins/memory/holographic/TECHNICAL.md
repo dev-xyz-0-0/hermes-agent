@@ -667,7 +667,7 @@ Every key read in `HolographicMemoryProvider.__init__`/`get_config_schema()`
 | `diagnostics_include_content` | truthy | `false` | `_diagnostics()`'s `by_category` field |
 | `shared_memory_enabled` | truthy | `false` | `prefetch()`, `_handle_share_action()`, `relationships.list_relationships` |
 | `shared_memory_categories` | comma-separated string or list → `frozenset` | empty | same as above (also reused against `relationship_type`, not `category`, by `relationships.py`) |
-| `backup_enabled` | truthy | `false` | **reserved** — read into `self._backup_enabled` and surfaced in `diagnostics()`, but no code path currently gates a write on it; the manual `fact_store backup` action works regardless |
+| `backup_enabled` | truthy | `false` | When true, opportunistic native backup on provider initialize if newest backup in the namespace dir is missing/older than `backup_interval_hours`. Manual `fact_store backup` and `hermes memory backup` always work |
 | `backup_retention` | int, `max(0, int(...))` | `14` | `HolographicMemoryProvider.backup()` → `backup.prune_backups` |
 | `retrieval_telemetry` | truthy | `false` | `FactRetriever(telemetry_enabled=...)` |
 | `retrieval_telemetry_retention` | int, clamped `[1,100000]` | `1000` (`telemetry.DEFAULT_RETENTION`) | `FactRetriever` → `telemetry.record_retrieval_event(retention=...)` |

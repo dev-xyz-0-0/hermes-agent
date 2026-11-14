@@ -267,3 +267,43 @@ class TestRestoreApply:
         contents = [f["content"] for f in store.list_facts(limit=10)]
         store.close()
         assert "fresh fact" in contents
+
+
+# ---------------------------------------------------------------------------
+# P1b — .enc refusal + gateway advisory warning
+# ---------------------------------------------------------------------------
+
+class TestRestoreP1bGuards:
+    def test_enc_input_is_refused_without_touching_live(self, tmp_path):
+        live_path = _make_live(tmp_path, facts=[("live fact", "general", "")])
+        before = _file_hash(live_path)
+        enc_path = tmp_path / "skills-pack-snapshot.enc"
+        enc_path.write_bytes(b"not-a-sqlite-db")
+
+        result = maintenance.restore(
+            live_path, backup_path=enc_path, hermes_home=tmp_path, dry_run=True,
+        )
+        assert result.ok is False
+        assert result.exit_code == maintenance.EXIT_CANNOT_RUN
+        assert result.gates["apply_allowed"] is False
+        assert result.gates.get("input_format") == "skills_pack_encrypted"
+        joined = " ".join(result.issues + result.gates["block_reasons"])
+        assert "hermes_backup" in joined
+        assert ".enc" in joined
+        assert before == _file_hash(live_path)
+
+    def test_gateway_running_is_advisory_warning_not_hard_block(self, tmp_path, monkeypatch):
+        live_path = _make_live(tmp_path, facts=[("live fact", "general", "")])
+        info = _make_backup(tmp_path, "clean", facts=[("backup fact", "general", "")])
+
+        monkeypatch.setattr(maintenance, "_gateway_running_for_home", lambda _home: True)
+
+        result = maintenance.restore(
+            live_path, backup_path=info.path, hermes_home=tmp_path, dry_run=True,
+        )
+        d = result.to_dict()
+        assert d["gates"]["gateway_running"] is True
+        assert d["gates"]["apply_allowed"] is True
+        assert any("gateway" in w.lower() for w in d["gates"]["warnings"])
+        # Advisory only — clean backup still exits 0.
+        assert result.exit_code == maintenance.EXIT_OK

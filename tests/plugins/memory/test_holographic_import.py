@@ -1,5 +1,7 @@
 """Explicit migration from profile-scoped built-in memory files."""
 
+from pathlib import Path
+
 import pytest
 
 from plugins.memory.holographic import HolographicMemoryProvider
@@ -124,3 +126,65 @@ def test_import_bank_rebuild_count_is_bounded(tmp_path, monkeypatch):
     # whole call rather than once per inserted fact.
     assert rebuild_calls == [("", "general")]
     provider.shutdown()
+
+
+def test_import_preview_reports_near_duplicates(tmp_path, monkeypatch):
+    """P2: dry-run import should surface fuzzy/token near-dups, not only exact."""
+    hermes_home = tmp_path / ".hermes"
+    memories = hermes_home / "memories"
+    memories.mkdir(parents=True)
+    # Near-paraphrase of an already-stored fact (not byte-identical).
+    (memories / "MEMORY.md").write_text(
+        "Uses Python uv for project dependencies.",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    provider = HolographicMemoryProvider(config={
+        "db_path": str(hermes_home / "memory_store.db"),
+        "hrr_dim": 32,
+        "hrr_weight": 0.0,
+        "fuzzy_dedup_enabled": True,
+    })
+    provider.initialize(session_id="import-near-dup", platform="cli")
+    provider._store.add_fact(
+        "Uses Python uv for MCP dependencies.",
+        category="general",
+        namespace=provider._namespace,
+    )
+
+    preview = provider.import_builtin_memories(apply=False)
+    assert preview["counts"]["proposed"] == 0
+    assert preview["counts"]["duplicates"] == 1
+    dup = preview["duplicates"][0]
+    assert dup.get("strategy") in {"token_overlap", "fuzzy_ngram", "exact"}
+    assert dup.get("reason")
+    assert provider._store.list_facts(limit=20)  # unchanged; preview only
+    provider.shutdown()
+
+
+def test_auto_backup_on_initialize_when_enabled(tmp_path, monkeypatch):
+    """P1b: backup_enabled creates a native backup on initialize when stale/missing."""
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    provider = HolographicMemoryProvider(config={
+        "db_path": str(hermes_home / "memory_store.db"),
+        "hrr_dim": 32,
+        "backup_enabled": True,
+        "backup_interval_hours": 0,  # always eligible
+        "backup_retention": 5,
+    })
+    provider.initialize(session_id="auto-backup", platform="cli", hermes_home=str(hermes_home))
+    try:
+        backup_dir = provider._backup_dir()
+        assert backup_dir.is_dir()
+        dbs = list(backup_dir.glob("memory-*.db"))
+        assert len(dbs) >= 1
+        assert (dbs[0].with_suffix(dbs[0].suffix + ".json")).exists() or (
+            Path(str(dbs[0]) + ".json").exists()
+        )
+        assert provider._metrics.get("backup_auto_created", 0) >= 1
+    finally:
+        provider.shutdown()

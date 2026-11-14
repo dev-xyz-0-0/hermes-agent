@@ -573,6 +573,15 @@ class HolographicMemoryProvider(MemoryProvider):
         self._shared_memory_categories = frozenset(str(c) for c in (raw_categories or []))
         self._backup_enabled = is_truthy_value(self._config.get("backup_enabled"), default=False)
         self._backup_retention = max(0, int(self._config.get("backup_retention", 14)))
+        # Minimum hours between opportunistic auto-backups when backup_enabled.
+        # Manual fact_store/CLI backup always runs immediately and still prunes
+        # to backup_retention afterward.
+        try:
+            self._backup_interval_hours = max(
+                0.0, float(self._config.get("backup_interval_hours", 24))
+            )
+        except (TypeError, ValueError):
+            self._backup_interval_hours = 24.0
         self._metrics: Dict[str, int] = {}
 
         # Phase 8 (demo-reference integration) — optional, bounded,
@@ -769,14 +778,30 @@ class HolographicMemoryProvider(MemoryProvider):
             },
             {
                 "key": "backup_enabled",
-                "description": "Reserved for future automated backup scheduling; the manual fact_store 'backup' action works regardless of this flag",
+                "description": (
+                    "When true, take an opportunistic native backup on provider "
+                    "initialize if the newest backup in this namespace dir is older "
+                    "than backup_interval_hours (or missing). Manual fact_store "
+                    "'backup' and `hermes memory backup` always work regardless"
+                ),
                 "default": str(self._config.get("backup_enabled", "false")).lower(),
                 "choices": ["true", "false"],
             },
             {
                 "key": "backup_retention",
-                "description": "Keep the N most recent backups per namespace after each manual backup (0 = keep all)",
+                "description": (
+                    "Keep the N most recent native backups per backup directory "
+                    "after each successful backup (manual, CLI, or auto); 0 = keep all"
+                ),
                 "default": str(self._config.get("backup_retention", 14)),
+            },
+            {
+                "key": "backup_interval_hours",
+                "description": (
+                    "Minimum hours between opportunistic auto-backups when "
+                    "backup_enabled is true (0 = backup on every initialize)"
+                ),
+                "default": str(self._config.get("backup_interval_hours", 24)),
             },
             {
                 "key": "retrieval_telemetry",
@@ -865,6 +890,59 @@ class HolographicMemoryProvider(MemoryProvider):
             self._extraction_mode = "rules"
         if self._extraction_mode == "hybrid":
             self._capture_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="holographic-capture")
+
+        # Opportunistic native backup (P1b): rate-limited, never blocks init on failure.
+        self._maybe_auto_backup(reason="initialize")
+
+    def _backup_dir(self) -> "Path":
+        dir_name = re.sub(r"[^A-Za-z0-9_.-]", "_", self._namespace) or "default"
+        return Path(self._hermes_home) / "backups" / "holographic" / dir_name
+
+    def _latest_backup_age_hours(self, backup_dir: "Path") -> "float | None":
+        """Age in hours of the newest memory-*.db under backup_dir, or None."""
+        if not backup_dir.is_dir():
+            return None
+        newest_mtime = None
+        for entry in backup_dir.iterdir():
+            if not entry.is_file():
+                continue
+            if not entry.name.startswith("memory-") or not entry.name.endswith(".db"):
+                continue
+            if entry.name.endswith(".db.json"):
+                continue
+            try:
+                mtime = entry.stat().st_mtime
+            except OSError:
+                continue
+            if newest_mtime is None or mtime > newest_mtime:
+                newest_mtime = mtime
+        if newest_mtime is None:
+            return None
+        return max(0.0, (time.time() - newest_mtime) / 3600.0)
+
+    def _maybe_auto_backup(self, *, reason: str = "auto") -> None:
+        """Create a native backup when backup_enabled and interval elapsed.
+
+        Failures are logged and swallowed — auto backup must never break
+        session initialize. Manual backup() still raises.
+        """
+        if not self._backup_enabled or not self._store:
+            return
+        try:
+            backup_dir = self._backup_dir()
+            age_h = self._latest_backup_age_hours(backup_dir)
+            if age_h is not None and age_h < self._backup_interval_hours:
+                self._metric("backup_auto_skipped_fresh")
+                return
+            info = self.backup()
+            self._metric("backup_auto_created")
+            logger.info(
+                "holographic: auto-backup (%s) wrote %s (facts=%s)",
+                reason, info.path, info.fact_count,
+            )
+        except Exception:
+            self._metric("backup_auto_failed")
+            logger.warning("holographic: auto-backup (%s) failed", reason, exc_info=True)
 
     def _resolve_namespace(
         self, *, platform: str, chat_id: str, thread_id: str, agent_identity: str,
@@ -1418,31 +1496,77 @@ class HolographicMemoryProvider(MemoryProvider):
                         item["reason"] = problem
                         result["rejected"].append(item)
                         continue
-                    if self._find_fact_id_by_content(entry) is not None:
-                        result["duplicates"].append(item)
+                    exact_id = self._find_fact_id_by_content(entry)
+                    if exact_id is not None:
+                        result["duplicates"].append({
+                            **item,
+                            "reason": "exact_duplicate",
+                            "strategy": "exact",
+                            "matched_fact_id": exact_id,
+                        })
                         continue
-                    result["proposed"].append(item)
-                    if apply:
-                        candidate = capture.FactCandidate(
-                            content=entry, operation="statement", scope="", confidence=1.0,
-                        )
-                        applied = consolidation.classify_and_apply(
-                            self._store,
-                            self._retriever,
+
+                    candidate = capture.FactCandidate(
+                        content=entry, operation="statement", scope="", confidence=1.0,
+                    )
+
+                    if not apply:
+                        # Preview uses the same consolidation policy as apply
+                        # (token-overlap + optional fuzzy N-gram), so near-dups
+                        # are not under-counted vs the write path.
+                        plan = consolidation.plan_candidate(
                             candidate,
-                            category=category,
-                            namespace=self._namespace,
-                            source_type="builtin_import",
-                            extraction_method="explicit_import",
-                            confidence=1.0,
+                            consolidation._search_existing(
+                                self._retriever, candidate, self._namespace,
+                            ),
                             fuzzy_enabled=self._fuzzy_dedup_enabled,
                             fuzzy_ngram_threshold=self._fuzzy_dedup_threshold,
                         )
-                        if applied.action == "inserted" and applied.fact_id:
-                            self._record_source(applied.fact_id, "builtin_import")
-                            result["imported"].append({**item, "fact_id": applied.fact_id})
+                        if plan.action == "ignored":
+                            result["duplicates"].append({
+                                **item,
+                                "reason": plan.reason,
+                                "strategy": plan.strategy,
+                                "matched_fact_id": plan.fact_id,
+                                "fuzzy_score": plan.fuzzy_score,
+                            })
                         else:
-                            result["duplicates"].append({**item, "reason": applied.reason})
+                            result["proposed"].append({
+                                **item,
+                                "reason": plan.reason,
+                                "strategy": plan.strategy or "none",
+                            })
+                        continue
+
+                    result["proposed"].append(item)
+                    applied = consolidation.classify_and_apply(
+                        self._store,
+                        self._retriever,
+                        candidate,
+                        category=category,
+                        namespace=self._namespace,
+                        source_type="builtin_import",
+                        extraction_method="explicit_import",
+                        confidence=1.0,
+                        fuzzy_enabled=self._fuzzy_dedup_enabled,
+                        fuzzy_ngram_threshold=self._fuzzy_dedup_threshold,
+                    )
+                    if applied.action == "inserted" and applied.fact_id:
+                        self._record_source(applied.fact_id, "builtin_import")
+                        result["imported"].append({
+                            **item,
+                            "fact_id": applied.fact_id,
+                            "reason": applied.reason,
+                            "strategy": applied.strategy or "none",
+                        })
+                    else:
+                        result["duplicates"].append({
+                            **item,
+                            "reason": applied.reason,
+                            "strategy": applied.strategy,
+                            "matched_fact_id": applied.fact_id or applied.related_id,
+                            "fuzzy_score": applied.fuzzy_score,
+                        })
 
         if apply:
             with self._store.transaction(), self._store.defer_bank_rebuilds():
@@ -1630,12 +1754,23 @@ class HolographicMemoryProvider(MemoryProvider):
             "consolidation_enabled": self._consolidation_enabled,
             "shared_memory_enabled": self._shared_memory_enabled,
             "backup_enabled": self._backup_enabled,
+            "backup_retention": self._backup_retention,
+            "backup_interval_hours": self._backup_interval_hours,
             "database": stats.get("database", ""),
             "facts": stats.get("facts", 0),
             "active": stats.get("active", 0),
             "superseded": stats.get("superseded", 0),
             "metrics": dict(self._metrics),
         }
+        try:
+            if self._hermes_home:
+                age = self._latest_backup_age_hours(self._backup_dir())
+                result["backup_dir"] = str(self._backup_dir())
+                result["latest_backup_age_hours"] = (
+                    None if age is None else round(age, 3)
+                )
+        except Exception:
+            pass
         if self._diagnostics_include_content:
             result["by_category"] = stats.get("by_category", {})
         return result

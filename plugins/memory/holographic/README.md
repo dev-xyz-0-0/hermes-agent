@@ -217,8 +217,9 @@ All keys live in `config.yaml` under `plugins.hermes-memory-store` (not
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `backup_enabled` | `false` | Reserved for future automated backup scheduling — the manual `fact_store {"action": "backup"}` action works regardless of this setting |
-| `backup_retention` | `14` | Keep the N most recent backups per namespace after each manual backup (`0` = keep all) |
+| `backup_enabled` | `false` | When `true`, take an opportunistic native backup on provider initialize if the newest backup in this namespace dir is older than `backup_interval_hours` (or missing). Manual `fact_store {"action": "backup"}` and `hermes memory backup` always work regardless |
+| `backup_retention` | `14` | Keep the N most recent native backups per backup directory after each successful backup (manual, CLI, or auto); `0` = keep all |
+| `backup_interval_hours` | `24` | Minimum hours between opportunistic auto-backups when `backup_enabled` is true (`0` = backup on every initialize) |
 
 **Retrieval telemetry**
 
@@ -227,12 +228,11 @@ All keys live in `config.yaml` under `plugins.hermes-memory-store` (not
 | `retrieval_telemetry` | `false` | Record bounded, content-free retrieval-scoring telemetry (see [Retrieval Telemetry](#retrieval-telemetry)); nothing is written while this is `false` |
 | `retrieval_telemetry_retention` | `1000` | Maximum `retrieval_events` rows retained (oldest pruned first on every write, clamped `1`-`100000`); only relevant when `retrieval_telemetry` is enabled |
 
-No settings are currently purely experimental beyond `backup_enabled`'s
-reserved-for-scheduling note above — every other key already has a live
-effect in the current implementation. Note that `scoped_hrr_banks`,
-`relationship_recall_enabled`, `relationship_max_depth`, and
-`relationship_max_nodes` — named in the demo-reference integration's design
-plan — are **not** real config.yaml keys in the shipped code; see
+Every key above already has a live effect in the current implementation.
+Note that `scoped_hrr_banks`, `relationship_recall_enabled`,
+`relationship_max_depth`, and `relationship_max_nodes` — named in the
+demo-reference integration's design plan — are **not** real config.yaml
+keys in the shipped code; see
 [Configuration Defaults and Rollback Reference](#configuration-defaults-and-rollback-reference)
 for why.
 
@@ -559,12 +559,20 @@ it exists purely as read-only reference material for this integration.**
 
 ## Backup and Restore
 
-`fact_store {"action": "backup"}` snapshots the live database using
-SQLite's online backup API (safe against a concurrently open WAL
-connection — no file copy, no pausing writers) to
-`$HERMES_HOME/backups/holographic/<namespace>/memory-<timestamp>.db`, with a
-SHA-256 checksum sidecar and `0600` permissions. `backup_retention` prunes
-older backups automatically after each manual backup.
+Three ways to create a **native** Holographic backup (`memory-*.db` +
+`.json` checksum sidecar, `0600` permissions), all using SQLite's online
+backup API (safe against a concurrently open WAL connection):
+
+1. `fact_store {"action": "backup"}` — namespace-scoped dir under
+   `$HERMES_HOME/backups/holographic/<namespace>/`
+2. `hermes memory backup` — operator CLI into
+   `$HERMES_HOME/backups/holographic/operator/`
+3. Opportunistic auto-backup on provider initialize when `backup_enabled`
+   is true and the newest backup in that namespace dir is missing or older
+   than `backup_interval_hours`
+
+`backup_retention` prunes older backups in the target directory after each
+successful backup (`0` = keep all).
 
 **Restore is deliberately NOT a `fact_store` tool action** — it's exposed
 only as `HolographicMemoryProvider.restore_from_backup(path)` (library/
@@ -572,6 +580,10 @@ provider level) and `hermes memory restore` (the P1 operator CLI below),
 never from chat. A prompt-injected or confused model triggering a restore
 could silently reactivate facts the user explicitly forgot; that decision
 belongs to a human.
+
+**Encrypted skills-pack snapshots (`*.enc`) are not valid inputs** for
+`hermes memory restore`. Use skills-pack `hermes_backup.py` for those
+(typically `--only holographic --mode migration` onto a fresh DB path).
 
 ### `hermes memory restore` (operator CLI)
 

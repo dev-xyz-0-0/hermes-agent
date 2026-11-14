@@ -448,3 +448,60 @@ class TestVerifyAlias:
         via_maintenance = maintenance.verify(db_path)
         via_diagnostics = diagnostics.run_diagnostics(db_path)
         assert via_maintenance.to_dict() == via_diagnostics.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P2 — dry-run contract polish
+# ---------------------------------------------------------------------------
+
+class TestRebuildVectorsScopeCounts:
+    def test_dry_run_splits_active_and_superseded(self, tmp_path):
+        db_path = tmp_path / "db.sqlite"
+        store = MemoryStore(db_path=db_path, hrr_dim=32)
+        try:
+            a = store.add_fact("Active fact A.", category="general")
+            store.add_fact("Active fact B.", category="general")
+            store.supersede_fact(a, "Replacement for A.", category="general")
+        finally:
+            store.close()
+
+        result = maintenance.rebuild_vectors(db_path, hermes_home=tmp_path, dry_run=True)
+        assert result.counts["facts_planned"] == 3  # 2 active + 1 superseded
+        assert result.counts["facts_active"] == 2
+        assert result.counts["facts_superseded"] == 1
+        assert result.counts["scope"] == "all_fact_rows_including_superseded"
+
+
+class TestRebuildBanksPlanRows:
+    def test_dry_run_emits_digest_category_old_new_rows(self, tmp_path):
+        db_path = _seed_db(tmp_path)
+        # Inject an orphan bank that should appear as DELETE in the plan.
+        store = MemoryStore(db_path=db_path, hrr_dim=32)
+        try:
+            store._conn.execute(
+                "INSERT OR REPLACE INTO memory_banks(bank_name, vector, dim, fact_count, updated_at) "
+                "VALUES(?, ?, ?, ?, datetime('now'))",
+                ("cat:tool", b"\x00" * (32 * 8), 32, 9),
+            )
+            store._conn.commit()
+        finally:
+            store.close()
+
+        result = maintenance.rebuild_banks(db_path, hermes_home=tmp_path, dry_run=True)
+        payload = result.to_dict()
+        assert "plan" in payload
+        assert payload["counts"]["banks_to_delete"] >= 1
+
+        actions = {row["action"] for row in payload["plan"]}
+        assert "DELETE" in actions
+        assert any(row["action"] in {"CREATE", "UPDATE", "REFRESH"} for row in payload["plan"])
+
+        for row in payload["plan"]:
+            assert "bank_name" in row
+            assert "old_fact_count" in row
+            assert "new_fact_count" in row
+            # No raw namespace leakage.
+            assert "telegram:111" not in json.dumps(row)
+            if row["action"] != "DELETE":
+                assert row["namespace_digest"] in {"(unscoped)", row["namespace_digest"]}
+                assert row["category"]

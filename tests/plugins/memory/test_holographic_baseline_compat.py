@@ -75,7 +75,7 @@ class TestProviderConfigDefaults:
             "max_facts_per_turn", "consolidation_enabled", "capture_timeout_ms",
             "capture_debug", "profile_isolation", "diagnostics_enabled",
             "diagnostics_include_content", "shared_memory_enabled", "shared_memory_categories",
-            "backup_enabled", "backup_retention",
+            "backup_enabled", "backup_retention", "backup_interval_hours",
             # Phase 3 (demo-reference integration) — fuzzy consolidation evidence gate.
             "fuzzy_dedup_enabled", "fuzzy_dedup_threshold",
             # Phase 8 (demo-reference integration) — retrieval telemetry.
