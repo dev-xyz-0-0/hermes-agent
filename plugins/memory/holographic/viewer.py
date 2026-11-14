@@ -111,6 +111,7 @@ import html
 import re
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -128,6 +129,21 @@ ALGORITHM_VERSION = "1"
 # client requests via ?per_page=.
 MAX_PAGE_SIZE = 50
 DEFAULT_PAGE_SIZE = 25
+
+# Phase 7.1D — reject a `?page=` above this rather than silently turning it
+# into an arbitrarily large (if cheap, for SQLite) OFFSET. Picked generously
+# above any page count a real UI would ever produce via its own "next" link.
+MAX_PAGE_NUMBER = 10000
+
+# Phase 7.1D — bounds how long any single request's database connection may
+# spend executing SQL (checked via a SQLite progress handler — see
+# `_connection`), independent of `relationships.traverse`'s own, separate
+# `deadline_seconds` bookkeeping. Matches `_TRAVERSAL_LIMITS`'s own default
+# below for consistency.
+QUERY_DEADLINE_SECONDS = 2.0
+# How many SQLite VM opcodes elapse between progress-handler callbacks —
+# SQLite's own documented ballpark for a responsive-but-low-overhead check.
+_PROGRESS_HANDLER_OPCODE_INTERVAL = 1000
 
 # The only hosts `create_server` will bind to. Non-loopback binding is not
 # supported at all in this phase — see the module docstring.
@@ -213,6 +229,9 @@ def _is_valid_origin_header(value: "str | None", bound_port: int) -> bool:
 
 _REL_MAX_LIMIT = MAX_PAGE_SIZE
 _TRAVERSAL_LIMITS = relationships_module.TraversalLimits(max_depth=2, max_nodes=MAX_PAGE_SIZE, max_edges=100, deadline_seconds=2.0)
+# Phase 7.1D §D4 — see relationship_neighbors' docstring for why this must
+# stay above _TRAVERSAL_LIMITS.max_edges.
+_REL_NEIGHBORS_MAX_ROWS = _TRAVERSAL_LIMITS.max_edges * 2
 _SUPERSESSION_CHAIN_MAX_HOPS = 50
 
 
@@ -230,6 +249,15 @@ class UnsupportedSchemaError(ValueError):
     time, before any socket is opened — never automatically repaired or
     migrated; the message names exactly what's missing so the operator can
     run the normal `hermes memory` maintenance/migration path instead."""
+
+
+class QueryDeadlineExceeded(TimeoutError):
+    """Raised by `_connection` (Phase 7.1D §D3) when a single request's
+    database connection exceeds `QUERY_DEADLINE_SECONDS` of SQL execution,
+    detected via a SQLite progress handler. Caught by `_Handler._handle`
+    and turned into a `503`, never a generic `500`/stack trace. Independent
+    of `relationships.traverse`'s own, separate `deadline_seconds` bound —
+    this one limits raw SQL execution time, not BFS traversal steps."""
 
 
 @dataclass
@@ -287,11 +315,39 @@ def _connection(db_path: "str | Path"):
     body exits (Phase 7.1C §C2) — `with sqlite3.connect(...)` only manages
     the transaction (commit/rollback), not the connection's lifetime, so
     this is deliberately a separate wrapper rather than relying on
-    `sqlite3.Connection`'s own context-manager protocol."""
+    `sqlite3.Connection`'s own context-manager protocol.
+
+    Also installs (Phase 7.1D §D3) a SQLite progress handler that aborts
+    any SQL still running past `QUERY_DEADLINE_SECONDS` from the moment
+    this connection was opened — bounding one request's total SQL execution
+    time, not just one statement. A `sqlite3.OperationalError` caused by
+    that abort is re-raised as `QueryDeadlineExceeded`, which `_handle`
+    turns into a controlled `503`; any OTHER `OperationalError` (e.g. a
+    genuine lock-busy error from a concurrent writer) passes through
+    unchanged. The handler is always cleared before the connection closes.
+    """
     conn = _open_conn(db_path)
+    deadline = time.monotonic() + QUERY_DEADLINE_SECONDS
+    timed_out = False
+
+    def _on_progress() -> int:
+        nonlocal timed_out
+        if time.monotonic() >= deadline:
+            timed_out = True
+            return 1  # non-zero -> SQLite aborts the running statement
+        return 0
+
+    conn.set_progress_handler(_on_progress, _PROGRESS_HANDLER_OPCODE_INTERVAL)
     try:
         yield conn
+    except sqlite3.OperationalError:
+        if timed_out:
+            raise QueryDeadlineExceeded(
+                f"a database query exceeded its {QUERY_DEADLINE_SECONDS}s execution deadline"
+            ) from None
+        raise
     finally:
+        conn.set_progress_handler(None, 0)
         conn.close()
 
 
@@ -525,6 +581,17 @@ class _ReadOnlyStoreView:
     def relationship_neighbors(
         self, entity_ids: list[int], *, namespace: str = "", status: "str | None" = "active",
     ) -> list[dict]:
+        """Phase 7.1D §D4: bounded by `_REL_NEIGHBORS_MAX_ROWS` (deliberately
+        well above `_TRAVERSAL_LIMITS.max_edges`) so one pathologically
+        over-connected entity can't force a single query to materialize an
+        unbounded number of rows. `relationships.traverse`'s own BFS loop
+        already stops and marks `truncated=True` as soon as it has
+        collected `max_edges` edges across the whole traversal; because
+        `_REL_NEIGHBORS_MAX_ROWS > max_edges`, this LIMIT can only ever
+        discard rows in cases where `traverse()` was already going to
+        truncate on its own — it never changes the user-visible
+        `truncated`/`truncated_reason` outcome, only the worst-case query
+        cost that feeds it."""
         if not entity_ids:
             return []
         placeholders = ",".join("?" * len(entity_ids))
@@ -539,6 +606,8 @@ class _ReadOnlyStoreView:
         if status is not None:
             sql += " AND status = ?"
             params.append(status)
+        sql += " ORDER BY relationship_id LIMIT ?"
+        params.append(_REL_NEIGHBORS_MAX_ROWS)
         return [dict(r) for r in self._conn.execute(sql, params).fetchall()]
 
 
@@ -572,25 +641,37 @@ def _status_badge(status: str) -> str:
 
 
 def _render_index(conn: sqlite3.Connection, *, show_raw_identity: bool, params: dict) -> str:
+    """Phase 7.1D §D1: paginated at the SQL level (LIMIT/OFFSET), not by
+    fetching every distinct namespace and slicing in Python — the query
+    cost no longer scales with total namespace count, only with
+    `page_size`. `status != 'superseded'` is kept (rather than switching to
+    `= 'active'`) because `facts.status` is a closed `'active' |
+    'superseded'` domain (see store.py's own schema/migrations), so the two
+    expressions are already exactly equivalent, and this keeps the same
+    convention `store.py` itself uses for its own active-count queries."""
     page = _parse_page(params)
     page_size = _parse_page_size(params)
-    rows = conn.execute(
+    offset = (page - 1) * page_size
+    page_rows = conn.execute(
         """
         SELECT namespace,
                COUNT(*) AS total,
                SUM(CASE WHEN status != 'superseded' THEN 1 ELSE 0 END) AS active,
                SUM(CASE WHEN status = 'superseded' THEN 1 ELSE 0 END) AS superseded
         FROM facts GROUP BY namespace ORDER BY namespace
-        """
+        LIMIT ? OFFSET ?
+        """,
+        (page_size, offset),
     ).fetchall()
+    namespace_count = conn.execute(
+        "SELECT COUNT(DISTINCT namespace) FROM facts"
+    ).fetchone()[0]
     tombstones_by_ns: dict[str, int] = {}
     if _table_exists(conn, "forgotten_facts"):
         for ns, count in conn.execute("SELECT namespace, COUNT(*) FROM forgotten_facts GROUP BY namespace").fetchall():
             tombstones_by_ns[ns or ""] = count
 
-    start = (page - 1) * page_size
-    page_rows = rows[start:start + page_size]
-    total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+    total_pages = max(1, (namespace_count + page_size - 1) // page_size)
 
     parts = [_PAGE_HEAD, "<h1>Holographic memory — namespaces</h1>",
              "<p class='muted'>Select a namespace below to view its facts. "
@@ -916,6 +997,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._dispatch()
             finally:
                 self.server.request_semaphore.release()  # type: ignore[attr-defined]
+        except QueryDeadlineExceeded:
+            self._send_plain(503, b"503 Service Unavailable: a database query exceeded its execution deadline.\n")
         except Exception:
             self._send_html(500, _PAGE_HEAD + "<h1>Internal error</h1>" + _PAGE_TAIL)
 
@@ -931,6 +1014,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if any(len(v) > MAX_SEARCH_LENGTH for v in params.get("q", [])):
             self._send_html(400, _PAGE_HEAD + "<h1>Search query too long</h1>" + _PAGE_TAIL)
+            return
+        if _parse_int(params, "page", 1) > MAX_PAGE_NUMBER:
+            self._send_html(400, _PAGE_HEAD + "<h1>Page number too large</h1>" + _PAGE_TAIL)
             return
 
         with _connection(db_path) as conn:
