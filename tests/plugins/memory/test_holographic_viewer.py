@@ -148,7 +148,9 @@ class TestMutationMethodsRejected:
         resp = running.request(method, path)
         assert resp.status in (404, 405)
         if resp.status == 405:
-            assert resp.getheader("Allow") == "GET"
+            # HEAD was added in Phase 7.1A (A5) — see
+            # test_holographic_viewer_security.py's TestMethodPolicy.
+            assert resp.getheader("Allow") == "GET, HEAD"
 
     def test_enumerated_routes_accept_only_get(self, running):
         """Enumerate every registered route this module serves and confirm

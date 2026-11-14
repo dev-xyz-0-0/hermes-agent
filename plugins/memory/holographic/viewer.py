@@ -109,6 +109,7 @@ from __future__ import annotations
 import html
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -130,6 +131,84 @@ DEFAULT_PAGE_SIZE = 25
 # The only hosts `create_server` will bind to. Non-loopback binding is not
 # supported at all in this phase — see the module docstring.
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+# ---------------------------------------------------------------------------
+# Phase 7.1A — HTTP security hardening. These limits bound request cost and
+# surface before any database connection is opened; the Host/Origin checks
+# are defense-in-depth against DNS rebinding and cross-origin browser
+# requests (never a substitute for authentication — see module docstring).
+# ---------------------------------------------------------------------------
+
+MAX_REQUEST_TARGET_LENGTH = 2048  # raw self.path, before parsing
+MAX_QUERY_STRING_LENGTH = 2000  # query portion only
+MAX_SEARCH_LENGTH = 256  # a single 'q' value — also the Phase 7.1D limit
+MAX_QUERY_PARAM_COUNT = 20  # distinct query parameter keys
+MAX_CONCURRENT_REQUESTS = 8  # bounded worker slots; beyond this -> 503
+REQUEST_SOCKET_TIMEOUT = 10.0  # seconds
+
+_LOOPBACK_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; "
+        "form-action 'self'; frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+}
+
+
+def _parse_netloc(value: str) -> "tuple[str | None, int | None]":
+    """Parse a bare `host[:port]` value (no scheme) via urlsplit, which
+    handles IPv6 bracket syntax for free. Raises ValueError for a
+    syntactically invalid port or unexpected userinfo (e.g. `user@host`),
+    which callers treat as a malformed header."""
+    split = urlsplit("//" + value)
+    if split.username is not None or split.password is not None:
+        raise ValueError("unexpected userinfo in netloc")
+    return split.hostname, split.port
+
+
+def _is_valid_host_header(value: "str | None", bound_port: int) -> bool:
+    """A Host header is valid only if it names one of the loopback hostnames
+    AND matches the port this server is actually bound to. Requiring an
+    exact port match (not just "any loopback host") is what makes this
+    effective against DNS rebinding: the only accepted value is the exact
+    address+port the OS bound, which is also what an SSH `-L` local forward
+    presents to the browser."""
+    if not value:
+        return False
+    try:
+        hostname, port = _parse_netloc(value)
+    except ValueError:
+        return False
+    if hostname is None or hostname.lower() not in _LOOPBACK_HOSTNAMES:
+        return False
+    return port == bound_port
+
+
+def _is_valid_origin_header(value: "str | None", bound_port: int) -> bool:
+    """Origin validation is defense in depth, not authentication (see module
+    docstring) — it narrows which *browser* requests are honored, but does
+    not and cannot distinguish one local process from another. Absent
+    Origin (typical for direct navigation) is accepted; `null` (opaque
+    origins, e.g. sandboxed iframes or `file://`) is rejected like any other
+    non-local origin."""
+    if value is None:
+        return True
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return False
+    if parts.username is not None or parts.password is not None:
+        return False
+    if parts.scheme != "http" or parts.hostname is None:
+        return False
+    if parts.hostname.lower() not in _LOOPBACK_HOSTNAMES:
+        return False
+    return parts.port == bound_port
 
 _REL_MAX_LIMIT = MAX_PAGE_SIZE
 _TRAVERSAL_LIMITS = relationships_module.TraversalLimits(max_depth=2, max_nodes=MAX_PAGE_SIZE, max_edges=100, deadline_seconds=2.0)
@@ -603,42 +682,122 @@ def _render_entity(conn: sqlite3.Connection, entity_id: int, digest: str, namesp
 class _Handler(BaseHTTPRequestHandler):
     server_version = "HermesMemoryViewer/1"
 
+    # Bounds how long the stdlib request-parsing loop will block waiting on
+    # a slow/idle client (honored automatically by
+    # socketserver.StreamRequestHandler.setup(), a BaseHTTPRequestHandler
+    # base class) — part of Phase 7.1A's request limits (A4).
+    timeout = REQUEST_SOCKET_TIMEOUT
+
     def _send_html(self, status: int, body: str) -> None:
         encoded = body.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
-        self.send_header("X-Content-Type-Options", "nosniff")
+        for name, value in _SECURITY_HEADERS.items():
+            self.send_header(name, value)
         self.end_headers()
-        self.wfile.write(encoded)
+        if not getattr(self, "_suppress_body", False):
+            self.wfile.write(encoded)
 
-    def _reject_mutation(self) -> None:
-        body = b"405 Method Not Allowed: the Holographic memory viewer is read-only.\n"
-        self.send_response(405)
+    def _send_plain(self, status: int, body: bytes, *, extra_headers: "dict[str, str] | None" = None) -> None:
+        self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Allow", "GET")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in _SECURITY_HEADERS.items():
+            self.send_header(name, value)
+        if extra_headers:
+            for name, value in extra_headers.items():
+                self.send_header(name, value)
         self.end_headers()
-        self.wfile.write(body)
+        if not getattr(self, "_suppress_body", False):
+            self.wfile.write(body)
 
-    # Every mutation-shaped HTTP method is rejected explicitly (405) rather
-    # than left to BaseHTTPRequestHandler's default 501 — this makes "no
-    # mutation endpoint exists" independently testable per-method.
+    def _reject_method(self) -> None:
+        self._send_plain(
+            405,
+            b"405 Method Not Allowed: the Holographic memory viewer is read-only.\n",
+            extra_headers={"Allow": "GET, HEAD"},
+        )
+
+    def _check_request_target_length(self) -> bool:
+        if len(self.path) > MAX_REQUEST_TARGET_LENGTH:
+            self._send_plain(414, b"414 Request-URI Too Long\n")
+            return False
+        if len(urlsplit(self.path).query) > MAX_QUERY_STRING_LENGTH:
+            self._send_plain(414, b"414 Request-URI Too Long: query string too long\n")
+            return False
+        return True
+
+    def _check_host_header(self) -> bool:
+        bound_port = self.server.server_address[1]  # type: ignore[attr-defined]
+        if not _is_valid_host_header(self.headers.get("Host"), bound_port):
+            self._send_plain(400, b"400 Bad Request: invalid or missing Host header\n")
+            return False
+        return True
+
+    def _check_origin_header(self) -> bool:
+        bound_port = self.server.server_address[1]  # type: ignore[attr-defined]
+        if not _is_valid_origin_header(self.headers.get("Origin"), bound_port):
+            self._send_plain(403, b"403 Forbidden: cross-origin request rejected\n")
+            return False
+        return True
+
+    def _acquire_slot(self) -> bool:
+        if not self.server.request_semaphore.acquire(blocking=False):  # type: ignore[attr-defined]
+            self._send_plain(503, b"503 Service Unavailable: too many concurrent requests.\n")
+            return False
+        return True
+
+    # Every HTTP method funnels through `_handle`, which applies the
+    # Host/Origin/size checks uniformly before any method- or
+    # route-specific behavior — including the mutation methods, so even a
+    # rejected POST/OPTIONS/TRACE/CONNECT first gets the same DNS-rebinding
+    # and request-size defenses as a legitimate GET.
+    def do_GET(self) -> None:
+        self._handle("GET")
+
+    def do_HEAD(self) -> None:
+        self._handle("HEAD")
+
     def do_POST(self) -> None:
-        self._reject_mutation()
+        self._handle("POST")
 
     def do_PUT(self) -> None:
-        self._reject_mutation()
+        self._handle("PUT")
 
     def do_DELETE(self) -> None:
-        self._reject_mutation()
+        self._handle("DELETE")
 
     def do_PATCH(self) -> None:
-        self._reject_mutation()
+        self._handle("PATCH")
 
-    def do_GET(self) -> None:
+    def do_OPTIONS(self) -> None:
+        self._handle("OPTIONS")
+
+    def do_TRACE(self) -> None:
+        self._handle("TRACE")
+
+    def do_CONNECT(self) -> None:
+        self._handle("CONNECT")
+
+    def _handle(self, method: str) -> None:
+        self._suppress_body = method == "HEAD"
         try:
-            self._dispatch()
+            if not self._check_request_target_length():
+                return
+            if not self._check_host_header():
+                return
+            if not self._check_origin_header():
+                return
+            if method not in ("GET", "HEAD"):
+                self._reject_method()
+                return
+            if not self._acquire_slot():
+                return
+            try:
+                self._dispatch()
+            finally:
+                self.server.request_semaphore.release()  # type: ignore[attr-defined]
         except Exception:
             self._send_html(500, _PAGE_HEAD + "<h1>Internal error</h1>" + _PAGE_TAIL)
 
@@ -648,6 +807,13 @@ class _Handler(BaseHTTPRequestHandler):
         path = parsed.path
         db_path = self.server.db_path  # type: ignore[attr-defined]
         show_raw_identity = self.server.show_raw_identity  # type: ignore[attr-defined]
+
+        if len(params) > MAX_QUERY_PARAM_COUNT:
+            self._send_html(400, _PAGE_HEAD + "<h1>Too many query parameters</h1>" + _PAGE_TAIL)
+            return
+        if any(len(v) > MAX_SEARCH_LENGTH for v in params.get("q", [])):
+            self._send_html(400, _PAGE_HEAD + "<h1>Search query too long</h1>" + _PAGE_TAIL)
+            return
 
         conn = _open_conn(db_path)
         try:
@@ -719,6 +885,7 @@ class ViewerServer(ThreadingHTTPServer):
         super().__init__(server_address, _Handler)
         self.db_path = Path(db_path)
         self.show_raw_identity = bool(show_raw_identity)
+        self.request_semaphore = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 
 def create_server(
