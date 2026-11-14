@@ -23,6 +23,7 @@ Security:
 """
 
 import asyncio
+import errno
 import hashlib
 import hmac
 import json
@@ -30,6 +31,7 @@ import logging
 import re
 import subprocess
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 try:
@@ -41,6 +43,7 @@ except ImportError:
     web = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
+from gateway.session import build_session_key
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -56,6 +59,24 @@ _INSECURE_NO_AUTH = "INSECURE_NO_AUTH"
 _DYNAMIC_ROUTES_FILENAME = "webhook_subscriptions.json"
 
 
+def _config_int(value: Any, default: int, *, minimum: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        logger.warning("[webhook] Invalid integer setting %r; using %d", value, default)
+        return default
+    return max(minimum, parsed)
+
+
+def _config_float(value: Any, default: float, *, minimum: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        logger.warning("[webhook] Invalid numeric setting %r; using %.1f", value, default)
+        return default
+    return max(minimum, parsed)
+
+
 def check_webhook_requirements() -> bool:
     """Check if webhook adapter dependencies are available."""
     return AIOHTTP_AVAILABLE
@@ -67,9 +88,12 @@ class WebhookAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.WEBHOOK)
         self._host: str = config.extra.get("host", DEFAULT_HOST)
-        self._port: int = int(config.extra.get("port", DEFAULT_PORT))
+        self._port: int = _config_int(config.extra.get("port", DEFAULT_PORT), DEFAULT_PORT)
         self._global_secret: str = config.extra.get("secret", "")
-        self._static_routes: Dict[str, dict] = config.extra.get("routes", {})
+        raw_routes = config.extra.get("routes", {})
+        self._static_routes: Dict[str, dict] = (
+            raw_routes if isinstance(raw_routes, dict) else {"<invalid>": raw_routes}
+        )
         self._dynamic_routes: Dict[str, dict] = {}
         self._dynamic_routes_mtime: float = 0.0
         self._routes: Dict[str, dict] = dict(self._static_routes)
@@ -97,12 +121,24 @@ class WebhookAdapter(BasePlatformAdapter):
 
         # Rate limiting: per-route timestamps in a fixed window.
         self._rate_counts: Dict[str, List[float]] = {}
-        self._rate_limit: int = int(config.extra.get("rate_limit", 30))  # per minute
+        self._rate_limit: int = _config_int(config.extra.get("rate_limit", 30), 30, minimum=1)
 
         # Body size limit (auth-before-body pattern)
-        self._max_body_bytes: int = int(
-            config.extra.get("max_body_bytes", 1_048_576)
-        )  # 1MB
+        self._max_body_bytes = _config_int(
+            config.extra.get("max_body_bytes", 1_048_576), 1_048_576, minimum=1
+        )
+        self._body_timeout = _config_float(config.extra.get("body_timeout", 10.0), 10.0, minimum=0.1)
+        self._max_concurrency = _config_int(config.extra.get("max_concurrency", 4), 4, minimum=1)
+        self._max_queue = _config_int(config.extra.get("max_queue", 32), 32)
+        self._semaphore = asyncio.Semaphore(self._max_concurrency)
+        self._admitted_tasks: set[asyncio.Task] = set()
+        self._max_cache_entries: int = max(
+            self._max_concurrency + self._max_queue,
+            _config_int(config.extra.get("max_cache_entries", 4096), 4096, minimum=1),
+        )
+        self._timestamp_tolerance = _config_int(
+            config.extra.get("timestamp_tolerance", 300), 300
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -112,17 +148,14 @@ class WebhookAdapter(BasePlatformAdapter):
         # Load agent-created subscriptions before validating
         self._reload_dynamic_routes()
 
-        # Validate routes at startup — secret is required per route
-        for name, route in self._routes.items():
-            secret = route.get("secret", self._global_secret)
-            if not secret:
-                raise ValueError(
-                    f"[webhook] Route '{name}' has no HMAC secret. "
-                    f"Set 'secret' on the route or globally. "
-                    f"For testing without auth, set secret to '{_INSECURE_NO_AUTH}'."
-                )
+        try:
+            self._validate_routes(self._routes)
+        except ValueError as exc:
+            self._set_fatal_error("invalid_webhook_config", str(exc), retryable=False)
+            logger.error("%s", exc)
+            return False
 
-        app = web.Application()
+        app = web.Application(client_max_size=self._max_body_bytes)
         app.router.add_get("/health", self._handle_health)
         app.router.add_post("/webhooks/{route_name}", self._handle_webhook)
 
@@ -133,14 +166,36 @@ class WebhookAdapter(BasePlatformAdapter):
                 _s.settimeout(1)
                 _s.connect(('127.0.0.1', self._port))
             logger.error('[webhook] Port %d already in use. Set a different port in config.yaml: platforms.webhook.port', self._port)
+            self._set_fatal_error(
+                "webhook_port_in_use",
+                f"Webhook port {self._port} is already in use",
+                retryable=False,
+            )
             return False
         except (ConnectionRefusedError, OSError):
             pass  # port is free
 
         self._runner = web.AppRunner(app)
-        await self._runner.setup()
-        site = web.TCPSite(self._runner, self._host, self._port)
-        await site.start()
+        try:
+            await self._runner.setup()
+            site = web.TCPSite(self._runner, self._host, self._port)
+            await site.start()
+        except OSError as exc:
+            await self._runner.cleanup()
+            self._runner = None
+            if exc.errno == errno.EADDRINUSE:
+                self._set_fatal_error(
+                    "webhook_port_in_use",
+                    f"Webhook port {self._port} is already in use",
+                    retryable=False,
+                )
+                logger.error("[webhook] Port %d became unavailable during bind", self._port)
+                return False
+            raise
+        except Exception:
+            await self._runner.cleanup()
+            self._runner = None
+            raise
         self._mark_connected()
 
         route_names = ", ".join(self._routes.keys()) or "(none configured)"
@@ -158,6 +213,19 @@ class WebhookAdapter(BasePlatformAdapter):
             self._runner = None
         self._mark_disconnected()
         logger.info("[webhook] Disconnected")
+
+    def _validate_routes(self, routes: Dict[str, dict]) -> None:
+        """Validate a complete route snapshot before making it live."""
+        for name, route in routes.items():
+            if not isinstance(name, str) or not name or not isinstance(route, dict):
+                raise ValueError(f"[webhook] Invalid route definition: {name!r}")
+            secret = route.get("secret", self._global_secret)
+            if not isinstance(secret, str) or not secret:
+                raise ValueError(
+                    f"[webhook] Route '{name}' has no HMAC secret. "
+                    f"Set 'secret' on the route or globally. "
+                    f"For testing without auth, set secret to '{_INSECURE_NO_AUTH}'."
+                )
 
     async def send(
         self,
@@ -228,7 +296,12 @@ class WebhookAdapter(BasePlatformAdapter):
 
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         """GET /health — simple health check."""
-        return web.json_response({"status": "ok", "platform": "webhook"})
+        return web.json_response({
+            "status": "ok",
+            "platform": "webhook",
+            "admitted": len(self._admitted_tasks),
+            "capacity": self._max_concurrency + self._max_queue,
+        })
 
     def _reload_dynamic_routes(self) -> None:
         """Reload agent-created subscriptions from disk if the file changed."""
@@ -249,11 +322,14 @@ class WebhookAdapter(BasePlatformAdapter):
             if not isinstance(data, dict):
                 return
             # Merge: static routes take precedence over dynamic ones
-            self._dynamic_routes = {
+            candidate_dynamic = {
                 k: v for k, v in data.items()
                 if k not in self._static_routes
             }
-            self._routes = {**self._dynamic_routes, **self._static_routes}
+            candidate_routes = {**candidate_dynamic, **self._static_routes}
+            self._validate_routes(candidate_routes)
+            self._dynamic_routes = candidate_dynamic
+            self._routes = candidate_routes
             self._dynamic_routes_mtime = mtime
             logger.info(
                 "[webhook] Reloaded %d dynamic route(s): %s",
@@ -296,7 +372,11 @@ class WebhookAdapter(BasePlatformAdapter):
 
         # Read body
         try:
-            raw_body = await request.read()
+            raw_body = await asyncio.wait_for(request.read(), timeout=self._body_timeout)
+            if len(raw_body) > self._max_body_bytes:
+                return web.json_response({"error": "Payload too large"}, status=413)
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "Request body timeout"}, status=408)
         except Exception as e:
             logger.error("[webhook] Failed to read body: %s", e)
             return web.json_response({"error": "Bad request"}, status=400)
@@ -311,6 +391,14 @@ class WebhookAdapter(BasePlatformAdapter):
                 return web.json_response(
                     {"error": "Invalid signature"}, status=401
                 )
+            signed_timestamp = request.headers.get("X-Webhook-Timestamp", "")
+            if signed_timestamp and self._timestamp_tolerance:
+                try:
+                    age = abs(time.time() - float(signed_timestamp))
+                except (TypeError, ValueError):
+                    return web.json_response({"error": "Invalid timestamp"}, status=401)
+                if age > self._timestamp_tolerance:
+                    return web.json_response({"error": "Stale webhook"}, status=401)
 
         # Parse payload
         try:
@@ -327,6 +415,10 @@ class WebhookAdapter(BasePlatformAdapter):
                 return web.json_response(
                     {"error": "Cannot parse body"}, status=400
                 )
+        if not isinstance(payload, dict):
+            return web.json_response(
+                {"error": "Payload must be a JSON object"}, status=400
+            )
 
         # Check event type filter
         event_type = (
@@ -385,19 +477,31 @@ class WebhookAdapter(BasePlatformAdapter):
         # Build a unique delivery ID
         delivery_id = request.headers.get(
             "X-GitHub-Delivery",
-            request.headers.get("X-Request-ID", str(int(time.time() * 1000))),
+            request.headers.get("X-Request-ID", uuid.uuid4().hex),
         )
+        delivery_id = str(delivery_id)
+        if len(delivery_id) > 256:
+            delivery_id = hashlib.sha256(delivery_id.encode()).hexdigest()
 
         # ── Idempotency ─────────────────────────────────────────
         # Skip duplicate deliveries (webhook retries).
         now = time.time()
+        legacy_seen_at = self._seen_deliveries.get(delivery_id)
         # Prune expired entries
         self._seen_deliveries = {
             k: v
             for k, v in self._seen_deliveries.items()
             if now - v < self._idempotency_ttl
         }
-        if delivery_id in self._seen_deliveries:
+        delivery_key = f"{route_name}\0{delivery_id}"
+        # Accept legacy unscoped in-memory entries during rolling upgrades and
+        # normalize them to the new route-scoped key.
+        if legacy_seen_at is not None:
+            if now - legacy_seen_at < self._idempotency_ttl:
+                self._seen_deliveries[delivery_key] = legacy_seen_at
+            else:
+                self._seen_deliveries.pop(delivery_key, None)
+        if delivery_key in self._seen_deliveries:
             logger.info(
                 "[webhook] Skipping duplicate delivery %s", delivery_id
             )
@@ -405,7 +509,11 @@ class WebhookAdapter(BasePlatformAdapter):
                 {"status": "duplicate", "delivery_id": delivery_id},
                 status=200,
             )
-        self._seen_deliveries[delivery_id] = now
+        self._seen_deliveries[delivery_key] = now
+        if len(self._seen_deliveries) > self._max_cache_entries:
+            oldest = sorted(self._seen_deliveries, key=self._seen_deliveries.get)
+            for key in oldest[: len(self._seen_deliveries) - self._max_cache_entries]:
+                self._seen_deliveries.pop(key, None)
 
         # Use delivery_id in session key so concurrent webhooks on the
         # same route get independent agent runs (not queued/interrupted).
@@ -419,11 +527,15 @@ class WebhookAdapter(BasePlatformAdapter):
             "deliver_extra": self._render_delivery_extra(
                 route_config.get("deliver_extra", {}), payload
             ),
-            "payload": payload,
         }
         self._delivery_info[session_chat_id] = deliver_config
         self._delivery_info_created[session_chat_id] = now
         self._prune_delivery_info(now)
+        if len(self._delivery_info_created) > self._max_cache_entries:
+            oldest = sorted(self._delivery_info_created, key=self._delivery_info_created.get)
+            for key in oldest[: len(self._delivery_info_created) - self._max_cache_entries]:
+                self._delivery_info.pop(key, None)
+                self._delivery_info_created.pop(key, None)
 
         # Build source and event
         source = self.build_source(
@@ -440,6 +552,15 @@ class WebhookAdapter(BasePlatformAdapter):
             raw_message=payload,
             message_id=delivery_id,
         )
+        processing_session_key = build_session_key(
+            source,
+            group_sessions_per_user=self.config.extra.get(
+                "group_sessions_per_user", True
+            ),
+            thread_sessions_per_user=self.config.extra.get(
+                "thread_sessions_per_user", False
+            ),
+        )
 
         logger.info(
             "[webhook] %s event=%s route=%s prompt_len=%d delivery=%s",
@@ -450,9 +571,31 @@ class WebhookAdapter(BasePlatformAdapter):
             delivery_id,
         )
 
-        # Non-blocking — return 202 Accepted immediately
-        task = asyncio.create_task(self.handle_message(event))
+        # Bound admitted work (running + queued) before returning 202.
+        if len(self._admitted_tasks) >= self._max_concurrency + self._max_queue:
+            self._seen_deliveries.pop(delivery_key, None)
+            self._delivery_info.pop(session_chat_id, None)
+            self._delivery_info_created.pop(session_chat_id, None)
+            return web.json_response({"error": "Webhook capacity exhausted"}, status=503)
+
+        async def _run_admitted() -> None:
+            try:
+                async with self._semaphore:
+                    await self.handle_message(event)
+                    # BasePlatformAdapter.handle_message() starts the actual
+                    # processor in its own tracked task. Keep this admission
+                    # slot until that isolated webhook session is cleaned up.
+                    while processing_session_key in self._active_sessions:
+                        await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("[webhook] Supervised webhook task failed: %s", delivery_id)
+
+        task = asyncio.create_task(_run_admitted())
+        self._admitted_tasks.add(task)
         self._background_tasks.add(task)
+        task.add_done_callback(self._admitted_tasks.discard)
         task.add_done_callback(self._background_tasks.discard)
 
         return web.json_response(
@@ -577,7 +720,8 @@ class WebhookAdapter(BasePlatformAdapter):
             )
 
         try:
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 [
                     "gh",
                     "pr",
@@ -598,10 +742,13 @@ class WebhookAdapter(BasePlatformAdapter):
                 )
                 return SendResult(success=True)
             else:
+                from agent.redact import redact_sensitive_text
+
+                safe_stderr = redact_sensitive_text(result.stderr or "")[:1000]
                 logger.error(
-                    "[webhook] gh pr comment failed: %s", result.stderr
+                    "[webhook] gh pr comment failed: %s", safe_stderr
                 )
-                return SendResult(success=False, error=result.stderr)
+                return SendResult(success=False, error=safe_stderr)
         except FileNotFoundError:
             logger.error(
                 "[webhook] 'gh' CLI not found — install GitHub CLI for "
