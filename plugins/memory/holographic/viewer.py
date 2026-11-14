@@ -624,6 +624,7 @@ a { color: #7ab8ff; }
 .status-active { background: #16401e; color: #7ee787; }
 .status-superseded { background: #40360f; color: #e6c766; text-decoration: line-through; }
 .status-forgotten { background: #3a3a3a; color: #aaaaaa; font-style: italic; }
+.status-unknown { background: #552020; color: #ffb3b3; font-style: italic; }
 table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
 td, th { border: 1px solid #333; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
 .warn { color: #ffb86c; font-weight: 600; }
@@ -636,7 +637,13 @@ _PAGE_TAIL = "</body></html>"
 
 
 def _status_badge(status: str) -> str:
-    cls = {"active": "status-active", "superseded": "status-superseded"}.get(status, "status-active")
+    """Phase 7.1F §F2: an explicit mapping, not a default-to-active
+    fallback — `facts.status`/`entity_relationships.status` are plain TEXT
+    columns with no CHECK constraint, so a status value other than
+    'active'/'superseded' is possible (a future code path, a hand-edited
+    row, a migration bug) and must render as visibly unusual, never as a
+    normal, trustworthy "active" badge."""
+    cls = {"active": "status-active", "superseded": "status-superseded"}.get(status, "status-unknown")
     return f'<span class="badge {cls}">{_esc(status)}</span>'
 
 
@@ -644,11 +651,16 @@ def _render_index(conn: sqlite3.Connection, *, show_raw_identity: bool, params: 
     """Phase 7.1D §D1: paginated at the SQL level (LIMIT/OFFSET), not by
     fetching every distinct namespace and slicing in Python — the query
     cost no longer scales with total namespace count, only with
-    `page_size`. `status != 'superseded'` is kept (rather than switching to
-    `= 'active'`) because `facts.status` is a closed `'active' |
-    'superseded'` domain (see store.py's own schema/migrations), so the two
-    expressions are already exactly equivalent, and this keeps the same
-    convention `store.py` itself uses for its own active-count queries."""
+    `page_size`.
+
+    Phase 7.1F §F2: active/superseded use explicit `= 'active'`/
+    `= 'superseded'` comparisons, not `!= 'superseded'` for "active" — the
+    latter would silently fold any OTHER status value (there's no CHECK
+    constraint on `facts.status`) into "active". A third `unknown` bucket
+    catches anything that's neither, so `active + superseded + unknown ==
+    total` always holds and nothing is misclassified as trustworthy by
+    default (see `_status_badge`'s docstring for the matching per-row
+    fix)."""
     page = _parse_page(params)
     page_size = _parse_page_size(params)
     offset = (page - 1) * page_size
@@ -656,8 +668,9 @@ def _render_index(conn: sqlite3.Connection, *, show_raw_identity: bool, params: 
         """
         SELECT namespace,
                COUNT(*) AS total,
-               SUM(CASE WHEN status != 'superseded' THEN 1 ELSE 0 END) AS active,
-               SUM(CASE WHEN status = 'superseded' THEN 1 ELSE 0 END) AS superseded
+               SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
+               SUM(CASE WHEN status = 'superseded' THEN 1 ELSE 0 END) AS superseded,
+               SUM(CASE WHEN status NOT IN ('active', 'superseded') THEN 1 ELSE 0 END) AS unknown
         FROM facts GROUP BY namespace ORDER BY namespace
         LIMIT ? OFFSET ?
         """,
@@ -678,16 +691,23 @@ def _render_index(conn: sqlite3.Connection, *, show_raw_identity: bool, params: 
              "This page intentionally never lists individual facts.</p>"]
     if show_raw_identity:
         parts.append("<p class='warn'>--show-raw-identity is enabled: raw namespace identities are shown below.</p>")
-    parts.append("<table><tr><th>Namespace</th><th>Total</th><th>Active</th><th>Superseded</th><th>Forgotten (tombstones)</th></tr>")
-    for ns, total, active, superseded in page_rows:
+    parts.append(
+        "<table><tr><th>Namespace</th><th>Total</th><th>Active</th><th>Superseded</th>"
+        "<th>Unknown status</th><th>Forgotten (tombstones)</th></tr>"
+    )
+    for ns, total, active, superseded, unknown in page_rows:
         ns = ns or ""
         digest = _namespace_digest(ns) if ns else "(unscoped)"
         label = digest if not ns else (f"{digest}&nbsp;<span class='muted'>({_esc(ns)})</span>" if show_raw_identity else digest)
         href = f"/namespace?ns={digest if ns else ''}"
         tombstone_count = tombstones_by_ns.get(ns, 0)
+        unknown_cell = (
+            f"<span class='badge status-unknown'>{unknown}</span>" if unknown else "0"
+        )
         parts.append(
             f"<tr><td><a href='{href}'>{label}</a></td><td>{total}</td><td>{active or 0}</td>"
-            f"<td>{superseded or 0}</td><td><span class='badge status-forgotten'>{tombstone_count}</span></td></tr>"
+            f"<td>{superseded or 0}</td><td>{unknown_cell}</td>"
+            f"<td><span class='badge status-forgotten'>{tombstone_count}</span></td></tr>"
         )
     parts.append("</table>")
     parts.append(f"<p class='muted'>Page {page} of {total_pages} (max {page_size} per page).</p>")
@@ -885,7 +905,18 @@ def _literal_search(
 def _supersession_chain(conn: sqlite3.Connection, fact_id: int, namespace: str) -> tuple[list[dict], "dict | None"]:
     """Ancestors (older facts this one superseded, if any point here) and
     the direct successor (if this fact itself was superseded), bounded to
-    `_SUPERSESSION_CHAIN_MAX_HOPS` — never the whole table."""
+    `_SUPERSESSION_CHAIN_MAX_HOPS` — never the whole table.
+
+    Phase 7.1F §F1: deliberately IMMEDIATE relationships only (the fact(s)
+    this one directly superseded, and the fact that directly superseded
+    this one) — not a multi-hop walk of the full revision history. A fact
+    page can still be navigated transitively by following `successor`'s own
+    link to ITS fact page, one hop at a time; this function itself never
+    recurses. Multi-hop history with cycle detection was considered and
+    rejected for this phase as unneeded complexity — `superseded_by` forms
+    a simple forward chain by construction (each fact points to at most one
+    direct successor), so no cycle is possible in the first place, and no
+    operator need identified for seeing the whole chain in one page."""
     ancestors = conn.execute(
         """
         SELECT fact_id, content, status, created_at FROM facts

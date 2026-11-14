@@ -1084,8 +1084,13 @@ def cmd_viewer(args) -> None:
 
     try:
         server = _viewer.create_server(db_path, host=host, port=port, show_raw_identity=show_raw_identity)
-    except _viewer.NonLoopbackBindingNotSupported as exc:
+    except (_viewer.NonLoopbackBindingNotSupported, _viewer.UnsupportedSchemaError, FileNotFoundError) as exc:
         print(f"\n  {exc}\n")
+        _sys.exit(3)
+    except OSError as exc:
+        # Phase 7.1F §F4: a bind failure (e.g. the port is already in use)
+        # must produce a clear operator message, not a raw traceback.
+        print(f"\n  Could not bind the Holographic memory viewer to {host}:{port} — {exc}\n")
         _sys.exit(3)
 
     bound_host, bound_port = server.server_address[:2]
