@@ -703,22 +703,13 @@ def _render_namespace(conn: sqlite3.Connection, namespace: str, digest: str, *, 
     page = _parse_page(params)
     page_size = _parse_page_size(params)
     query = _parse_str(params, "q")
-
-    where = ["namespace = ?"]
-    sql_params: list = [namespace]
-    if query:
-        where.append("content LIKE ?")
-        sql_params.append(f"%{query}%")
-    total = conn.execute(f"SELECT COUNT(*) FROM facts WHERE {' AND '.join(where)}", sql_params).fetchone()[0]
+    requested_mode = _parse_str(params, "search_mode") or "literal"
     offset = (page - 1) * page_size
-    rows = conn.execute(
-        f"""
-        SELECT fact_id, content, category, status, trust_score, created_at
-        FROM facts WHERE {' AND '.join(where)}
-        ORDER BY fact_id DESC LIMIT ? OFFSET ?
-        """,
-        [*sql_params, page_size, offset],
-    ).fetchall()
+
+    rows, total, mode_used, fallback_reason = _search_namespace_facts(
+        conn, namespace, query, requested_mode, page_size, offset,
+    )
+
     tombstone_count = 0
     if _table_exists(conn, "forgotten_facts"):
         tombstone_count = conn.execute(
@@ -731,9 +722,17 @@ def _render_namespace(conn: sqlite3.Connection, namespace: str, digest: str, *, 
     parts.append(
         "<form method='get' action='/namespace'>"
         f"<input type='hidden' name='ns' value='{_esc(digest)}'>"
-        f"<input type='text' name='q' value='{_esc(query or '')}' placeholder='search content (literal match, not executed)'>"
+        f"<input type='text' name='q' value='{_esc(query or '')}' placeholder='search content'>"
+        "<select name='search_mode'>"
+        f"<option value='literal'{' selected' if requested_mode != 'fts' else ''}>literal (substring, not executed)</option>"
+        f"<option value='fts'{' selected' if requested_mode == 'fts' else ''}>full-text (FTS5, every word required)</option>"
+        "</select>"
         "<button type='submit'>Search</button></form>"
     )
+    if fallback_reason:
+        parts.append(f"<p class='warn'>{_esc(fallback_reason)}</p>")
+    elif query and mode_used == "fts":
+        parts.append("<p class='muted'>Full-text search (FTS5) results, ranked by relevance.</p>")
     parts.append("<table><tr><th>ID</th><th>Status</th><th>Category</th><th>Trust</th><th>Created</th><th>Content</th></tr>")
     for row in rows:
         content = _esc(_redact(row["content"]))
@@ -749,11 +748,138 @@ def _render_namespace(conn: sqlite3.Connection, namespace: str, digest: str, *, 
     )
     parts.append(f"<p class='muted'>Page {page} of {total_pages} (max {page_size} per page, {total} total match(es)).</p>")
     if page > 1:
-        parts.append(f"<a href='/namespace?ns={_esc(digest)}&page={page - 1}&per_page={page_size}&q={_esc(query or '')}'>&larr; prev</a> ")
+        parts.append(
+            f"<a href='/namespace?ns={_esc(digest)}&page={page - 1}&per_page={page_size}"
+            f"&q={_esc(query or '')}&search_mode={_esc(requested_mode)}'>&larr; prev</a> "
+        )
     if page < total_pages:
-        parts.append(f"<a href='/namespace?ns={_esc(digest)}&page={page + 1}&per_page={page_size}&q={_esc(query or '')}'>next &rarr;</a>")
+        parts.append(
+            f"<a href='/namespace?ns={_esc(digest)}&page={page + 1}&per_page={page_size}"
+            f"&q={_esc(query or '')}&search_mode={_esc(requested_mode)}'>next &rarr;</a>"
+        )
     parts.append(_PAGE_TAIL)
     return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.1E — FTS5 search integration.
+#
+# `facts_fts` (store.py) is an EXTERNAL-CONTENT FTS5 virtual table over
+# `facts(content, tags)` with `content_rowid=fact_id` (so `fts.rowid ==
+# f.fact_id` directly, no separate mapping table), kept in sync by triggers
+# on every facts insert/update/delete (store.py's `facts_ai`/`facts_au`/
+# `facts_ad`), using FTS5's default `unicode61` tokenizer (no custom
+# tokenizer configured). The viewer never rebuilds, migrates, or otherwise
+# writes to this index — read-only `mode=ro` connections make that
+# structurally impossible, not just a convention.
+# ---------------------------------------------------------------------------
+
+_LIKE_ESCAPE_CHAR = "\\"
+
+
+def _escape_like(term: str) -> str:
+    """Escape SQL LIKE wildcards (`%`, `_`) and the escape character itself
+    in a literal search term, so e.g. searching for a literal `50%` doesn't
+    also match `50` followed by anything. Paired with `LIKE ? ESCAPE '\\'`
+    at the call site."""
+    return (
+        term.replace(_LIKE_ESCAPE_CHAR, _LIKE_ESCAPE_CHAR * 2)
+        .replace("%", _LIKE_ESCAPE_CHAR + "%")
+        .replace("_", _LIKE_ESCAPE_CHAR + "_")
+    )
+
+
+def _fts5_available(conn: sqlite3.Connection) -> bool:
+    return _table_exists(conn, "facts_fts")
+
+
+def _fts5_match_query(raw_query: str) -> str:
+    """Build a safe FTS5 MATCH expression from free-form user input.
+
+    Every whitespace-separated token is individually double-quoted (FTS5
+    phrase-query syntax, with embedded `"` doubled per FTS5's own escaping
+    rule) and ANDed together (FTS5's implicit default between bareword
+    tokens). Quoting each token neutralizes every bit of FTS5 query syntax
+    the raw string might otherwise contain — boolean operators
+    (AND/OR/NOT), column filters (`col:term`), prefix wildcards (`term*`),
+    NEAR, and parentheses all become literal characters inside a phrase
+    rather than being interpreted — so a user's search text can never
+    itself become part of the query's *structure*, only its content.
+    """
+    tokens = raw_query.split()
+    return " ".join('"' + t.replace('"', '""') + '"' for t in tokens)
+
+
+def _search_namespace_facts(
+    conn: sqlite3.Connection, namespace: str, query: "str | None", requested_mode: str,
+    page_size: int, offset: int,
+) -> "tuple[list[sqlite3.Row], int, str, str | None]":
+    """Return `(rows, total_count, mode_used, fallback_reason)` for
+    `/namespace`'s fact listing, with or without a search term.
+
+    `mode_used` is always `"literal"` or `"fts"` — never a lie about what
+    actually ran. `fallback_reason` is set (and `mode_used` forced to
+    `"literal"`) whenever `requested_mode == "fts"` but FTS5 search
+    couldn't actually be used — the index is absent (older/synthetic
+    schema) or, defensively, a MATCH query still failed for some other
+    reason — so the page can say so explicitly rather than silently
+    returning literal-search results while claiming they're full-text.
+    """
+    base_columns = "fact_id, content, category, status, trust_score, created_at"
+
+    if not query:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM facts WHERE namespace = ?", (namespace,),
+        ).fetchone()[0]
+        rows = conn.execute(
+            f"SELECT {base_columns} FROM facts WHERE namespace = ? "
+            "ORDER BY fact_id DESC LIMIT ? OFFSET ?",
+            (namespace, page_size, offset),
+        ).fetchall()
+        return rows, total, "literal", None
+
+    if requested_mode == "fts":
+        if not _fts5_available(conn):
+            return (*_literal_search(conn, namespace, query, page_size, offset), "literal",
+                    "FTS5 search index not present in this database — showing literal search results instead.")
+        try:
+            match_query = _fts5_match_query(query)
+            total = conn.execute(
+                "SELECT COUNT(*) FROM facts f JOIN facts_fts fts ON fts.rowid = f.fact_id "
+                "WHERE facts_fts MATCH ? AND f.namespace = ?",
+                (match_query, namespace),
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"SELECT f.fact_id, f.content, f.category, f.status, f.trust_score, f.created_at "
+                "FROM facts f JOIN facts_fts fts ON fts.rowid = f.fact_id "
+                "WHERE facts_fts MATCH ? AND f.namespace = ? "
+                "ORDER BY fts.rank, f.trust_score DESC LIMIT ? OFFSET ?",
+                (match_query, namespace, page_size, offset),
+            ).fetchall()
+            return rows, total, "fts", None
+        except sqlite3.OperationalError:
+            return (*_literal_search(conn, namespace, query, page_size, offset), "literal",
+                    "FTS5 query could not be executed — showing literal search results instead.")
+
+    rows, total = _literal_search(conn, namespace, query, page_size, offset)
+    return rows, total, "literal", None
+
+
+def _literal_search(
+    conn: sqlite3.Connection, namespace: str, query: str, page_size: int, offset: int,
+) -> "tuple[list[sqlite3.Row], int]":
+    escaped = f"%{_escape_like(query)}%"
+    total = conn.execute(
+        "SELECT COUNT(*) FROM facts WHERE namespace = ? AND content LIKE ? ESCAPE '\\'",
+        (namespace, escaped),
+    ).fetchone()[0]
+    rows = conn.execute(
+        "SELECT fact_id, content, category, status, trust_score, created_at FROM facts "
+        "WHERE namespace = ? AND content LIKE ? ESCAPE '\\' "
+        "ORDER BY fact_id DESC LIMIT ? OFFSET ?",
+        (namespace, escaped, page_size, offset),
+    ).fetchall()
+    return rows, total
 
 
 def _supersession_chain(conn: sqlite3.Connection, fact_id: int, namespace: str) -> tuple[list[dict], "dict | None"]:
