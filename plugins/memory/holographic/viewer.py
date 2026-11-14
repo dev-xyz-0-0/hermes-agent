@@ -205,6 +205,7 @@ _SECURITY_HEADERS = {
 # ---------------------------------------------------------------------------
 
 _VIEWER_ASSETS_DIR = (Path(__file__).parent / "viewer_assets").resolve()
+_DASHBOARD_HTML_PATH = _VIEWER_ASSETS_DIR / "index.html"
 
 # name (as it appears after "/static/" in the URL) -> (relative path under
 # _VIEWER_ASSETS_DIR, Content-Type, cacheable). Pinned vendor assets are
@@ -217,6 +218,42 @@ _STATIC_ASSET_ALLOWLIST: "dict[str, tuple[str, str, bool]]" = {
     ),
     "vendor/vis-network.min.js": (
         "vendor/vis-network.min.js", "application/javascript; charset=utf-8", True,
+    ),
+    # Phase 7.2C — the dashboard's own CSS/JS. Not cacheable: unlike the
+    # pinned vendor files above, these change as the dashboard is developed,
+    # with no version segment in their URL to invalidate a stale cache.
+    "css/viewer.css": ("css/viewer.css", "text/css; charset=utf-8", False),
+    "js/app.js": ("js/app.js", "application/javascript; charset=utf-8", False),
+    "js/api.js": ("js/api.js", "application/javascript; charset=utf-8", False),
+    "js/charts.js": ("js/charts.js", "application/javascript; charset=utf-8", False),
+    "js/dashboard.js": ("js/dashboard.js", "application/javascript; charset=utf-8", False),
+    "js/facts.js": ("js/facts.js", "application/javascript; charset=utf-8", False),
+    "js/entities.js": ("js/entities.js", "application/javascript; charset=utf-8", False),
+    "js/search.js": ("js/search.js", "application/javascript; charset=utf-8", False),
+    "js/timeline.js": ("js/timeline.js", "application/javascript; charset=utf-8", False),
+    "js/utils.js": ("js/utils.js", "application/javascript; charset=utf-8", False),
+}
+
+# Phase 7.2C — the dashboard HTML needs a looser CSP than every other page
+# in this module (it loads local scripts), so it gets its own header set
+# rather than loosening `_SECURITY_HEADERS` globally. `script-src 'self'`
+# with no `unsafe-inline`/`unsafe-eval`; `connect-src 'self'` so the
+# dashboard's own `fetch()` calls to `/api/...` are allowed; everything else
+# stays as restrictive as `_SECURITY_HEADERS`.
+_DASHBOARD_SECURITY_HEADERS = {
+    **_SECURITY_HEADERS,
+    "Content-Security-Policy": (
+        "default-src 'none'; script-src 'self'; "
+        # style-src keeps 'unsafe-inline' (same as _SECURITY_HEADERS for
+        # every other page) because Chart.js sets the <canvas> element's
+        # `style` attribute directly for responsive sizing — confirmed via
+        # a real headless-Chrome run against this exact page, which
+        # reported "Refused to apply inline style" repeatedly until this
+        # was added. This is a style-only relaxation; script-src stays
+        # strict with no unsafe-inline/unsafe-eval, which is the actual
+        # requirement (CSS cannot execute script).
+        "style-src 'self' 'unsafe-inline'; "
+        "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     ),
 }
 
@@ -1559,6 +1596,21 @@ class _Handler(BaseHTTPRequestHandler):
         if not getattr(self, "_suppress_body", False):
             self.wfile.write(body)
 
+    def _send_dashboard_html(self, body: bytes) -> None:
+        """Phase 7.2C — the interactive dashboard shell gets its own,
+        looser-but-still-strict CSP (`_DASHBOARD_SECURITY_HEADERS`) instead
+        of `_SECURITY_HEADERS`, since it's the only page that loads local
+        JavaScript. `Cache-Control: no-store` either way — it's HTML, not a
+        pinned asset."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        for name, value in _DASHBOARD_SECURITY_HEADERS.items():
+            self.send_header(name, value)
+        self.end_headers()
+        if not getattr(self, "_suppress_body", False):
+            self.wfile.write(body)
+
     def _reject_method(self) -> None:
         if self._is_api_path():
             self._send_json(
@@ -1776,6 +1828,19 @@ class _Handler(BaseHTTPRequestHandler):
         # request path (see _STATIC_ASSET_ALLOWLIST's docstring above).
         if path.startswith("/static/"):
             self._dispatch_static(path[len("/static/"):])
+            return
+
+        # Phase 7.2C — the dashboard shell is a fixed, bundled file (never
+        # built from request data), so it's served the same way a static
+        # asset would be, just with the dashboard-specific CSP and its own
+        # Content-Type. It never touches the database either.
+        if path == "/dashboard":
+            try:
+                body = _DASHBOARD_HTML_PATH.read_bytes()
+            except OSError:
+                self._send_html(500, _PAGE_HEAD + "<h1>Internal error</h1>" + _PAGE_TAIL)
+                return
+            self._send_dashboard_html(body)
             return
 
         db_path = self.server.db_path  # type: ignore[attr-defined]

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hermes Holographic Memory Viewer</title>
+<link rel="stylesheet" href="/static/css/viewer.css">
+</head>
+<body>
+
+<noscript>
+  <div style="padding:40px;text-align:center;font-family:sans-serif">
+    <h1>Hermes Holographic Memory Viewer</h1>
+    <p>JavaScript is required for the interactive dashboard.</p>
+    <p>The plain, no-JavaScript namespace selector is available at <a href="/">/</a>.</p>
+  </div>
+</noscript>
+
+<header>
+  <h1>Hermes Holographic Memory Viewer</h1>
+  <div class="header-right">
+    <select id="namespaceSelect" title="Select a namespace"></select>
+    <span class="status">
+      <span class="status-dot loading" id="statusDot"></span>
+      <span id="statusText">Connecting&hellip;</span>
+    </span>
+    <button id="themeToggle" type="button" title="Toggle theme">&#x1F319;</button>
+  </div>
+</header>
+
+<div class="container">
+  <div class="stats" id="statsRow"></div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="dashboard">Overview</button>
+    <button class="tab" data-tab="facts">Facts</button>
+    <button class="tab" data-tab="search">Search</button>
+    <button class="tab" data-tab="entities">Entities</button>
+    <button class="tab" data-tab="timeline">Timeline</button>
+  </div>
+
+  <div class="tab-content active" id="tab-dashboard">
+    <div class="charts-row">
+      <div class="chart-box"><h3>Category distribution</h3><canvas id="chartCategories"></canvas></div>
+      <div class="chart-box"><h3>Trust score distribution</h3><canvas id="chartTrust"></canvas></div>
+    </div>
+    <div class="fact-list">
+      <h3>Recent facts</h3>
+      <div id="recentFacts"></div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-facts">
+    <div class="filters">
+      <select id="factCategory">
+        <option value="">All categories</option>
+        <option value="user_pref">user_pref</option>
+        <option value="project">project</option>
+        <option value="tool">tool</option>
+        <option value="general">general</option>
+      </select>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>ID</th><th>Content</th><th>Category</th><th>Status</th><th>Trust</th><th>Created</th></tr>
+        </thead>
+        <tbody id="factsBody"></tbody>
+      </table>
+    </div>
+    <div class="pagination" id="factsPagination"></div>
+  </div>
+
+  <div class="tab-content" id="tab-search">
+    <form class="search-box" id="searchForm">
+      <input type="text" id="searchInput" placeholder="Search facts in this namespace&hellip;">
+      <select id="searchMode">
+        <option value="literal">Literal (substring)</option>
+        <option value="fts">Full-text (FTS5)</option>
+      </select>
+      <button type="submit">Search</button>
+    </form>
+    <div class="search-mode-notice" id="searchModeNotice"></div>
+    <div id="searchResults"></div>
+  </div>
+
+  <div class="tab-content" id="tab-entities">
+    <div id="entityGrid" class="entity-grid"></div>
+    <h3 id="graphTitle" class="muted">Select an entity to see its relationships</h3>
+    <div class="graph-wrap">
+      <div class="graph-controls">
+        <button id="graphFitButton" type="button" title="Fit to view">Fit</button>
+      </div>
+      <div id="graph"></div>
+      <div class="graph-truncation-notice" id="graphTruncationNotice"></div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-timeline">
+    <div class="charts-row">
+      <div class="chart-box"><h3>Facts created per day</h3><canvas id="chartTimeline"></canvas></div>
+      <div class="chart-box"><h3>Average trust score per day</h3><canvas id="chartTimelineTrust"></canvas></div>
+    </div>
+    <p class="muted" id="timelineBasisNotice"></p>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="modalOverlay">
+  <div class="modal-content" id="factModal">
+    <div class="modal-header">
+      <span id="modalTitle">Fact detail</span>
+      <button id="modalClose" type="button" title="Close">&times;</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<script src="/static/vendor/chart.umd.min.js"></script>
+<script src="/static/vendor/vis-network.min.js"></script>
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>
