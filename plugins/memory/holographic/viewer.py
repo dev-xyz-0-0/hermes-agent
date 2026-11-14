@@ -108,6 +108,7 @@ from __future__ import annotations
 
 import contextlib
 import html
+import json
 import re
 import sqlite3
 import threading
@@ -134,6 +135,18 @@ DEFAULT_PAGE_SIZE = 25
 # into an arbitrarily large (if cheap, for SQLite) OFFSET. Picked generously
 # above any page count a real UI would ever produce via its own "next" link.
 MAX_PAGE_NUMBER = 10000
+
+# Phase 7.2B — the JSON API uses offset/limit (not page/per_page) query
+# parameters, matching the envelope shape in the API contract; `offset` is
+# clamped (never rejected — unlike `page` above, a large OFFSET doesn't grow
+# the result set returned, only how much of the index SQLite walks past, and
+# is bounded the same way a client's own "last page" link would produce) to
+# this value, which mirrors MAX_PAGE_NUMBER's intent at JSON-API scale.
+MAX_API_OFFSET = MAX_PAGE_NUMBER * MAX_PAGE_SIZE
+
+# Phase 7.2B §B7 — /api/timeline buckets by day; bounded so a request can
+# never force an unbounded number of GROUP BY buckets into one response.
+TIMELINE_MAX_DAYS = 90
 
 # Phase 7.1D — bounds how long any single request's database connection may
 # spend executing SQL (checked via a SQLite progress handler — see
@@ -491,6 +504,43 @@ def _parse_str(params: dict, key: str) -> "str | None":
     if values is None:
         return None
     return values[0]
+
+
+def _parse_path_int(segment: str) -> "int | None":
+    """Parse a URL path segment (e.g. the `{id}` in `/api/facts/{id}`) as a
+    non-negative integer, or None if it isn't one — callers turn None into a
+    400, never a 500 from a stray `int()` exception or a negative row id."""
+    try:
+        value = int(segment)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.2B — JSON API pagination/error helpers. `limit`/`offset` (not
+# `page`/`per_page`) to match the API's own envelope shape; `offset` is
+# clamped rather than rejected — see MAX_API_OFFSET's comment.
+# ---------------------------------------------------------------------------
+
+def _parse_api_limit(params: dict) -> int:
+    return max(1, min(MAX_PAGE_SIZE, _parse_int(params, "limit", DEFAULT_PAGE_SIZE)))
+
+
+def _parse_api_offset(params: dict) -> int:
+    return max(0, min(MAX_API_OFFSET, _parse_int(params, "offset", 0)))
+
+
+def _pagination_meta(limit: int, offset: int, total: int) -> dict:
+    return {"limit": limit, "offset": offset, "total": total, "has_more": offset + limit < total}
+
+
+def _api_error(code: str, message: str) -> dict:
+    """The one error envelope shape every /api/* route uses. `message` must
+    always be a fixed, hand-written string — never an exception's own
+    `str(exc)` or anything else that could leak a database path or a raw
+    namespace/identity value into a response body."""
+    return {"error": {"code": code, "message": message}}
 
 
 # ---------------------------------------------------------------------------
@@ -1078,6 +1128,368 @@ def _render_entity(conn: sqlite3.Connection, entity_id: int, digest: str, namesp
 
 
 # ---------------------------------------------------------------------------
+# Phase 7.2B — namespace-scoped JSON API. Every function below is a plain
+# read-only query builder returning a JSON-serializable dict; none of them
+# touches the HTTP layer directly (see `_Handler._dispatch_api`). They
+# deliberately reuse the exact same namespace-resolution, redaction,
+# pagination, FTS5, and relationship-traversal helpers the HTML routes above
+# use — no second database-connection manager, FTS5 integration, or
+# namespace implementation exists for the API.
+# ---------------------------------------------------------------------------
+
+def _api_namespaces(conn: sqlite3.Connection, params: dict, *, show_raw_identity: bool) -> dict:
+    """GET /api/namespaces — the opaque namespace selector. Never returns an
+    individual fact, a relationship label, or (unless `--show-raw-identity`
+    was passed at server start) a raw namespace identity — mirrors
+    `_render_index`'s own query and the same explicit active/superseded/
+    unknown three-way split (Phase 7.1F §F2)."""
+    limit = _parse_api_limit(params)
+    offset = _parse_api_offset(params)
+    page_rows = conn.execute(
+        """
+        SELECT namespace,
+               COUNT(*) AS total,
+               SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
+               SUM(CASE WHEN status = 'superseded' THEN 1 ELSE 0 END) AS superseded,
+               SUM(CASE WHEN status NOT IN ('active', 'superseded') THEN 1 ELSE 0 END) AS unknown
+        FROM facts GROUP BY namespace ORDER BY namespace
+        LIMIT ? OFFSET ?
+        """,
+        (limit, offset),
+    ).fetchall()
+    namespace_count = conn.execute("SELECT COUNT(DISTINCT namespace) FROM facts").fetchone()[0]
+    tombstones_by_ns: dict[str, int] = {}
+    if _table_exists(conn, "forgotten_facts"):
+        for ns, count in conn.execute(
+            "SELECT namespace, COUNT(*) FROM forgotten_facts GROUP BY namespace"
+        ).fetchall():
+            tombstones_by_ns[ns or ""] = count
+
+    namespaces = []
+    for ns, total, active, superseded, unknown in page_rows:
+        ns = ns or ""
+        digest = _namespace_digest(ns) if ns else ""
+        entry = {
+            "namespace": digest,
+            "total": total,
+            "active": active or 0,
+            "superseded": superseded or 0,
+            "unknown": unknown or 0,
+            "forgotten": tombstones_by_ns.get(ns, 0),
+        }
+        if show_raw_identity and ns:
+            entry["raw_identity"] = ns
+        namespaces.append(entry)
+    return {"namespaces": namespaces, "pagination": _pagination_meta(limit, offset, namespace_count)}
+
+
+def _api_overview(conn: sqlite3.Connection, namespace: str, digest: str) -> dict:
+    """GET /api/overview?ns=... — scoped counts and summary metrics, using
+    only verified production columns (Phase 7.2B §B7). Every query below
+    filters on `namespace = ?` as the authoritative scope — no global
+    aggregate leaks into a per-namespace response."""
+    status_row = conn.execute(
+        """
+        SELECT
+          COUNT(*) AS total,
+          SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
+          SUM(CASE WHEN status = 'superseded' THEN 1 ELSE 0 END) AS superseded,
+          SUM(CASE WHEN status NOT IN ('active', 'superseded') THEN 1 ELSE 0 END) AS unknown
+        FROM facts WHERE namespace = ?
+        """,
+        (namespace,),
+    ).fetchone()
+    entity_count = conn.execute(
+        """
+        SELECT COUNT(DISTINCT fe.entity_id) FROM fact_entities fe
+        JOIN facts f ON f.fact_id = fe.fact_id WHERE f.namespace = ?
+        """,
+        (namespace,),
+    ).fetchone()[0]
+    relationship_count = 0
+    if _table_exists(conn, "entity_relationships"):
+        relationship_count = conn.execute(
+            "SELECT COUNT(*) FROM entity_relationships WHERE namespace = ?", (namespace,),
+        ).fetchone()[0]
+    categories = conn.execute(
+        "SELECT category, COUNT(*) FROM facts WHERE namespace = ? GROUP BY category ORDER BY category",
+        (namespace,),
+    ).fetchall()
+    trust_buckets = conn.execute(
+        """
+        SELECT CAST(trust_score * 10 AS INTEGER) AS bucket, COUNT(*) AS count
+        FROM facts WHERE namespace = ? GROUP BY bucket ORDER BY bucket
+        """,
+        (namespace,),
+    ).fetchall()
+    tombstone_count = 0
+    if _table_exists(conn, "forgotten_facts"):
+        tombstone_count = conn.execute(
+            "SELECT COUNT(*) FROM forgotten_facts WHERE namespace = ?", (namespace,),
+        ).fetchone()[0]
+    recent_rows = conn.execute(
+        "SELECT fact_id, content, category, status, trust_score, created_at FROM facts "
+        "WHERE namespace = ? ORDER BY fact_id DESC LIMIT ?",
+        (namespace, DEFAULT_PAGE_SIZE),
+    ).fetchall()
+    recent_facts = [
+        {
+            "fact_id": r["fact_id"],
+            "content": _redact(r["content"]),
+            "category": r["category"],
+            "status": r["status"],
+            "trust_score": r["trust_score"],
+            "created_at": r["created_at"],
+        }
+        for r in recent_rows
+    ]
+    return {
+        "namespace": digest,
+        "facts": {
+            "total": status_row["total"],
+            "active": status_row["active"] or 0,
+            "superseded": status_row["superseded"] or 0,
+            "unknown": status_row["unknown"] or 0,
+            "forgotten": tombstone_count,
+        },
+        "entities_total": entity_count,
+        "relationships_total": relationship_count,
+        "categories": {row[0]: row[1] for row in categories},
+        "trust_distribution": [{"bucket": b * 10, "count": c} for b, c in trust_buckets],
+        "recent_facts": recent_facts,
+    }
+
+
+def _api_facts(conn: sqlite3.Connection, namespace: str, digest: str, params: dict) -> dict:
+    """GET /api/facts?ns=... — paginated facts, optionally filtered by
+    `category` (a small fixed enum the app itself assigns, not freeform user
+    content — same as the HTML route's unredacted rendering of it)."""
+    limit = _parse_api_limit(params)
+    offset = _parse_api_offset(params)
+    category = _parse_str(params, "category")
+    clauses = ["namespace = ?"]
+    sql_params: list = [namespace]
+    if category:
+        clauses.append("category = ?")
+        sql_params.append(category)
+    where = " AND ".join(clauses)
+    total = conn.execute(f"SELECT COUNT(*) FROM facts WHERE {where}", sql_params).fetchone()[0]
+    rows = conn.execute(
+        f"SELECT fact_id, content, category, status, trust_score, created_at, updated_at FROM facts "
+        f"WHERE {where} ORDER BY fact_id DESC LIMIT ? OFFSET ?",
+        [*sql_params, limit, offset],
+    ).fetchall()
+    facts = [
+        {
+            "fact_id": r["fact_id"],
+            "content": _redact(r["content"]),
+            "category": r["category"],
+            "status": r["status"],
+            "trust_score": r["trust_score"],
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+        }
+        for r in rows
+    ]
+    return {"namespace": digest, "facts": facts, "pagination": _pagination_meta(limit, offset, total)}
+
+
+def _api_fact_detail(conn: sqlite3.Connection, namespace: str, digest: str, fact_id: int) -> "dict | None":
+    """GET /api/facts/{id}?ns=... — None means "not found in this
+    namespace", which the caller turns into a 404 (never a fallback to an
+    unscoped lookup)."""
+    row = _fact_in_namespace(conn, fact_id, namespace)
+    if row is None:
+        return None
+    ancestors, successor = _supersession_chain(conn, fact_id, namespace)
+    return {
+        "namespace": digest,
+        "fact": {
+            "fact_id": row["fact_id"],
+            "content": _redact(row["content"]),
+            "category": row["category"],
+            "tags": _redact(row["tags"]),
+            "status": row["status"],
+            "trust_score": row["trust_score"],
+            "confidence": row["confidence"],
+            "source_type": row["source_type"],
+            "extraction_method": row["extraction_method"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        },
+        "revision": {
+            # _supersession_chain already redacted `content` on both of
+            # these — never re-redact-and-double-escape here.
+            "ancestors": [
+                {"fact_id": a["fact_id"], "status": a["status"], "content": a["content"], "created_at": a["created_at"]}
+                for a in ancestors
+            ],
+            "successor": (
+                {"fact_id": successor["fact_id"], "status": successor["status"], "content": successor["content"]}
+                if successor else None
+            ),
+        },
+    }
+
+
+def _api_search(conn: sqlite3.Connection, namespace: str, digest: str, params: dict) -> dict:
+    """GET /api/search?ns=... — reuses `_search_namespace_facts` byte-for-
+    byte (no separate FTS5 integration or query builder for the API)."""
+    limit = _parse_api_limit(params)
+    offset = _parse_api_offset(params)
+    query = _parse_str(params, "q") or ""
+    requested_mode = _parse_str(params, "mode") or "literal"
+    rows, total, mode_used, fallback_reason = _search_namespace_facts(
+        conn, namespace, query, requested_mode, limit, offset,
+    )
+    results = [
+        {
+            "fact_id": r["fact_id"],
+            "content": _redact(r["content"]),
+            "category": r["category"],
+            "status": r["status"],
+            "trust_score": r["trust_score"],
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    ]
+    return {
+        "namespace": digest,
+        "query": query,
+        "mode_requested": requested_mode,
+        "mode_used": mode_used,
+        "fallback_reason": fallback_reason,
+        "results": results,
+        "pagination": _pagination_meta(limit, offset, total),
+    }
+
+
+def _api_entities(conn: sqlite3.Connection, namespace: str, digest: str, params: dict) -> dict:
+    """GET /api/entities?ns=... — entities scoped to this namespace via
+    their fact links (an entity with zero facts in this namespace never
+    appears, even if it's shared by name with another namespace via
+    `entity_relationships` — consistent with how entities are globally
+    resolved by name but namespace-scoped only at the association level;
+    see the module docstring)."""
+    limit = _parse_api_limit(params)
+    offset = _parse_api_offset(params)
+    total = conn.execute(
+        """
+        SELECT COUNT(*) FROM (
+          SELECT DISTINCT fe.entity_id FROM fact_entities fe
+          JOIN facts f ON f.fact_id = fe.fact_id WHERE f.namespace = ?
+        )
+        """,
+        (namespace,),
+    ).fetchone()[0]
+    rows = conn.execute(
+        """
+        SELECT e.entity_id, e.name, e.entity_type, COUNT(DISTINCT fe.fact_id) AS fact_count
+        FROM entities e
+        JOIN fact_entities fe ON fe.entity_id = e.entity_id
+        JOIN facts f ON f.fact_id = fe.fact_id
+        WHERE f.namespace = ?
+        GROUP BY e.entity_id ORDER BY e.entity_id
+        LIMIT ? OFFSET ?
+        """,
+        (namespace, limit, offset),
+    ).fetchall()
+    entities = [
+        {
+            "entity_id": r["entity_id"],
+            "name": _redact(r["name"]),
+            "entity_type": r["entity_type"],
+            "fact_count": r["fact_count"],
+        }
+        for r in rows
+    ]
+    return {"namespace": digest, "entities": entities, "pagination": _pagination_meta(limit, offset, total)}
+
+
+def _api_entity_graph(conn: sqlite3.Connection, namespace: str, digest: str, entity_id: int) -> "dict | None":
+    """GET /api/entities/{id}/graph?ns=... — None means "not found in this
+    namespace" (checked via the same `_entity_in_namespace` the HTML `/entity`
+    route uses). Reuses `relationships.list_relationships`/`traverse`
+    through the same `_ReadOnlyStoreView` and `_TRAVERSAL_LIMITS` the HTML
+    route uses — no separate traversal implementation for the API."""
+    if not _entity_in_namespace(conn, entity_id, namespace):
+        return None
+    row = conn.execute(
+        "SELECT entity_id, name, entity_type FROM entities WHERE entity_id = ?", (entity_id,),
+    ).fetchone()
+    name = _redact(row["name"]) if row else f"entity {entity_id}"
+
+    view = _ReadOnlyStoreView(conn)
+    edges = relationships_module.list_relationships(
+        view, entity_id, namespace=namespace, direction="both", limit=MAX_PAGE_SIZE,
+    )
+    traversal = relationships_module.traverse(view, entity_id, namespace=namespace, limits=_TRAVERSAL_LIMITS)
+
+    entity_names: dict[int, str] = {}
+    if traversal.nodes:
+        placeholders = ",".join("?" * len(traversal.nodes))
+        for r in conn.execute(
+            f"SELECT entity_id, name FROM entities WHERE entity_id IN ({placeholders})", list(traversal.nodes),
+        ):
+            entity_names[r["entity_id"]] = _redact(r["name"])
+
+    return {
+        "namespace": digest,
+        "entity": {
+            "entity_id": entity_id,
+            "name": name,
+            "entity_type": row["entity_type"] if row else None,
+        },
+        "relationships": [
+            {
+                "source_entity_id": e.source_entity_id,
+                "target_entity_id": e.target_entity_id,
+                "relationship_type": _redact(e.relationship_type),
+                "strength": e.strength,
+                "confidence": e.confidence,
+            }
+            for e in edges
+        ],
+        "graph": {
+            "nodes": [
+                {"entity_id": nid, "name": entity_names.get(nid, f"entity {nid}")}
+                for nid in sorted(traversal.nodes)
+            ],
+            "edges": [
+                {
+                    "source_entity_id": e.source_entity_id,
+                    "target_entity_id": e.target_entity_id,
+                    "relationship_type": _redact(e.relationship_type),
+                }
+                for e in traversal.edges
+            ],
+            "truncated": traversal.truncated,
+            "truncated_reason": traversal.truncated_reason,
+        },
+    }
+
+
+def _api_timeline(conn: sqlite3.Connection, namespace: str, digest: str, params: dict) -> dict:
+    """GET /api/timeline?ns=... — bucketed by `DATE(created_at)` only
+    (Phase 7.2B §B7: a timeline entry means "a fact was created that day",
+    never "something happened" from `updated_at`, which a trust-score bump
+    or recall-count increment also changes). Bounded to `TIMELINE_MAX_DAYS`
+    buckets regardless of what a client requests."""
+    days_requested = max(1, min(TIMELINE_MAX_DAYS, _parse_int(params, "days", 30)))
+    rows = conn.execute(
+        """
+        SELECT DATE(created_at) AS day, COUNT(*) AS count, AVG(trust_score) AS avg_trust
+        FROM facts WHERE namespace = ?
+        GROUP BY day ORDER BY day DESC LIMIT ?
+        """,
+        (namespace, days_requested),
+    ).fetchall()
+    days = [{"day": r["day"], "count": r["count"], "avg_trust": r["avg_trust"]} for r in rows]
+    days.reverse()
+    return {"namespace": digest, "timestamp_basis": "created_at", "days": days}
+
+
+# ---------------------------------------------------------------------------
 # HTTP server
 # ---------------------------------------------------------------------------
 
@@ -1114,6 +1526,23 @@ class _Handler(BaseHTTPRequestHandler):
         if not getattr(self, "_suppress_body", False):
             self.wfile.write(body)
 
+    def _send_json(self, status: int, data: dict, *, extra_headers: "dict[str, str] | None" = None) -> None:
+        encoded = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        for name, value in _SECURITY_HEADERS.items():
+            self.send_header(name, value)
+        if extra_headers:
+            for name, value in extra_headers.items():
+                self.send_header(name, value)
+        self.end_headers()
+        if not getattr(self, "_suppress_body", False):
+            self.wfile.write(encoded)
+
+    def _is_api_path(self) -> bool:
+        return urlsplit(self.path).path.startswith("/api/")
+
     def _send_static_asset(self, body: bytes, content_type: str, *, cacheable: bool) -> None:
         self.send_response(200)
         self.send_header("Content-Type", content_type)
@@ -1131,6 +1560,12 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _reject_method(self) -> None:
+        if self._is_api_path():
+            self._send_json(
+                405, _api_error("METHOD_NOT_ALLOWED", "The Holographic memory viewer is read-only."),
+                extra_headers={"Allow": "GET, HEAD"},
+            )
+            return
         self._send_plain(
             405,
             b"405 Method Not Allowed: the Holographic memory viewer is read-only.\n",
@@ -1217,9 +1652,18 @@ class _Handler(BaseHTTPRequestHandler):
             finally:
                 self.server.request_semaphore.release()  # type: ignore[attr-defined]
         except QueryDeadlineExceeded:
-            self._send_plain(503, b"503 Service Unavailable: a database query exceeded its execution deadline.\n")
+            if self._is_api_path():
+                self._send_json(503, _api_error("QUERY_DEADLINE_EXCEEDED", "A database query exceeded its execution deadline."))
+            else:
+                self._send_plain(503, b"503 Service Unavailable: a database query exceeded its execution deadline.\n")
         except Exception:
-            self._send_html(500, _PAGE_HEAD + "<h1>Internal error</h1>" + _PAGE_TAIL)
+            # Never the exception's own str(exc) or any database path —
+            # see _api_error's docstring for why the API side is a fixed
+            # string too.
+            if self._is_api_path():
+                self._send_json(500, _api_error("INTERNAL_ERROR", "An internal error occurred."))
+            else:
+                self._send_html(500, _PAGE_HEAD + "<h1>Internal error</h1>" + _PAGE_TAIL)
 
     def _dispatch_static(self, name: str) -> None:
         resolved = _resolve_static_asset(name)
@@ -1229,6 +1673,96 @@ class _Handler(BaseHTTPRequestHandler):
         file_path, content_type, cacheable = resolved
         body = file_path.read_bytes()
         self._send_static_asset(body, content_type, cacheable=cacheable)
+
+    def _resolve_required_namespace(self, conn: sqlite3.Connection, params: dict) -> "tuple[str | None, str | None, bool]":
+        """Every /api/ route except /api/namespaces requires `ns` and
+        resolves it server-side via `_resolve_namespace` — identical
+        resolution to the HTML `/namespace`/`/fact`/`/entity` routes, never
+        a raw namespace string accepted from the client. Sends the error
+        response itself and returns `(None, None, False)` on failure, so
+        callers can `if not ok: return` without duplicating the error
+        envelope."""
+        digest = _parse_str(params, "ns")
+        if digest is None:
+            self._send_json(400, _api_error("MISSING_NAMESPACE", "The ns query parameter is required."))
+            return None, None, False
+        namespace = _resolve_namespace(conn, digest)
+        if namespace is None:
+            self._send_json(404, _api_error("INVALID_NAMESPACE", "Namespace not found"))
+            return None, None, False
+        return namespace, digest, True
+
+    def _dispatch_api(self, conn: sqlite3.Connection, path: str, params: dict, show_raw_identity: bool) -> None:
+        if path == "/api/namespaces":
+            self._send_json(200, _api_namespaces(conn, params, show_raw_identity=show_raw_identity))
+            return
+
+        if path == "/api/overview":
+            namespace, digest, ok = self._resolve_required_namespace(conn, params)
+            if not ok:
+                return
+            self._send_json(200, _api_overview(conn, namespace, digest))
+            return
+
+        if path == "/api/facts":
+            namespace, digest, ok = self._resolve_required_namespace(conn, params)
+            if not ok:
+                return
+            self._send_json(200, _api_facts(conn, namespace, digest, params))
+            return
+
+        if path.startswith("/api/facts/"):
+            fact_id = _parse_path_int(path[len("/api/facts/"):])
+            if fact_id is None:
+                self._send_json(400, _api_error("INVALID_FACT_ID", "The fact id must be a non-negative integer."))
+                return
+            namespace, digest, ok = self._resolve_required_namespace(conn, params)
+            if not ok:
+                return
+            result = _api_fact_detail(conn, namespace, digest, fact_id)
+            if result is None:
+                self._send_json(404, _api_error("NOT_FOUND", "Fact not found in this namespace"))
+                return
+            self._send_json(200, result)
+            return
+
+        if path == "/api/search":
+            namespace, digest, ok = self._resolve_required_namespace(conn, params)
+            if not ok:
+                return
+            self._send_json(200, _api_search(conn, namespace, digest, params))
+            return
+
+        if path == "/api/entities":
+            namespace, digest, ok = self._resolve_required_namespace(conn, params)
+            if not ok:
+                return
+            self._send_json(200, _api_entities(conn, namespace, digest, params))
+            return
+
+        if path.startswith("/api/entities/") and path.endswith("/graph"):
+            entity_id = _parse_path_int(path[len("/api/entities/"):-len("/graph")])
+            if entity_id is None:
+                self._send_json(400, _api_error("INVALID_ENTITY_ID", "The entity id must be a non-negative integer."))
+                return
+            namespace, digest, ok = self._resolve_required_namespace(conn, params)
+            if not ok:
+                return
+            result = _api_entity_graph(conn, namespace, digest, entity_id)
+            if result is None:
+                self._send_json(404, _api_error("NOT_FOUND", "Entity not found in this namespace"))
+                return
+            self._send_json(200, result)
+            return
+
+        if path == "/api/timeline":
+            namespace, digest, ok = self._resolve_required_namespace(conn, params)
+            if not ok:
+                return
+            self._send_json(200, _api_timeline(conn, namespace, digest, params))
+            return
+
+        self._send_json(404, _api_error("NOT_FOUND", "Unknown API route"))
 
     def _dispatch(self) -> None:
         parsed = urlsplit(self.path)
@@ -1247,17 +1781,32 @@ class _Handler(BaseHTTPRequestHandler):
         db_path = self.server.db_path  # type: ignore[attr-defined]
         show_raw_identity = self.server.show_raw_identity  # type: ignore[attr-defined]
 
+        is_api = path.startswith("/api/")
+
         if len(params) > MAX_QUERY_PARAM_COUNT:
-            self._send_html(400, _PAGE_HEAD + "<h1>Too many query parameters</h1>" + _PAGE_TAIL)
+            if is_api:
+                self._send_json(400, _api_error("TOO_MANY_PARAMETERS", "Too many query parameters."))
+            else:
+                self._send_html(400, _PAGE_HEAD + "<h1>Too many query parameters</h1>" + _PAGE_TAIL)
             return
         if any(len(v) > MAX_SEARCH_LENGTH for v in params.get("q", [])):
-            self._send_html(400, _PAGE_HEAD + "<h1>Search query too long</h1>" + _PAGE_TAIL)
+            if is_api:
+                self._send_json(400, _api_error("SEARCH_QUERY_TOO_LONG", "Search query too long."))
+            else:
+                self._send_html(400, _PAGE_HEAD + "<h1>Search query too long</h1>" + _PAGE_TAIL)
             return
         if _parse_int(params, "page", 1) > MAX_PAGE_NUMBER:
-            self._send_html(400, _PAGE_HEAD + "<h1>Page number too large</h1>" + _PAGE_TAIL)
+            if is_api:
+                self._send_json(400, _api_error("PAGE_NUMBER_TOO_LARGE", "Page number too large."))
+            else:
+                self._send_html(400, _PAGE_HEAD + "<h1>Page number too large</h1>" + _PAGE_TAIL)
             return
 
         with _connection(db_path) as conn:
+            if is_api:
+                self._dispatch_api(conn, path, params, show_raw_identity)
+                return
+
             if path in ("/", "/index", "/index.html"):
                 self._send_html(200, _render_index(conn, show_raw_identity=show_raw_identity, params=params))
                 return
