@@ -106,6 +106,7 @@ section 11 and implementation-plan.md's "Phase 7" / "9.10"):
 
 from __future__ import annotations
 
+import contextlib
 import html
 import re
 import sqlite3
@@ -222,6 +223,15 @@ class NonLoopbackBindingNotSupported(ValueError):
     section for why this is a hard refusal, not a warning."""
 
 
+class UnsupportedSchemaError(ValueError):
+    """Raised by `create_server` (Phase 7.1C) when the database at
+    `db_path` isn't a valid SQLite file, or is missing a table/column the
+    viewer's own queries depend on. Always raised at server-construction
+    time, before any socket is opened — never automatically repaired or
+    migrated; the message names exactly what's missing so the operator can
+    run the normal `hermes memory` maintenance/migration path instead."""
+
+
 @dataclass
 class ViewerOptions:
     host: str = "127.0.0.1"
@@ -241,13 +251,102 @@ def _validate_host(host: str) -> str:
 
 
 def _open_conn(db_path: "str | Path") -> sqlite3.Connection:
-    """Open `db_path` strictly read-only (mode=ro URI) — identical technique
-    to diagnostics.run_diagnostics. Any accidental write raises
-    sqlite3.OperationalError instead of silently succeeding."""
-    uri = f"file:{Path(db_path)}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Open `db_path` strictly read-only (mode=ro URI) — identical base
+    technique to diagnostics.run_diagnostics, hardened further for Phase
+    7.1C. Any accidental write still raises sqlite3.OperationalError instead
+    of silently succeeding (the mode=ro URI flag alone already guarantees
+    that); `PRAGMA query_only=ON` makes the same guarantee structural at
+    the connection level too, as defense in depth.
+
+    `resolve(strict=True)` raises FileNotFoundError up front if the file is
+    missing — the viewer must never create a database — and normalizes
+    symlinks before handing the path to SQLite. `timeout=2.0` (connection-
+    level) plus `PRAGMA busy_timeout=2000` bound how long a read ever waits
+    on a lock held by a concurrent writer (store.py runs in
+    journal_mode=WAL, so the viewer must coexist with one), rather than
+    blocking indefinitely. If pragma setup itself fails partway through,
+    the connection is closed before re-raising so no file descriptor leaks
+    on that error path.
+    """
+    resolved = Path(db_path).resolve(strict=True)
+    uri = f"file:{resolved}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        conn.execute("PRAGMA busy_timeout = 2000")
+        return conn
+    except Exception:
+        conn.close()
+        raise
+
+
+@contextlib.contextmanager
+def _connection(db_path: "str | Path"):
+    """Context manager guaranteeing `conn.close()` regardless of how the
+    body exits (Phase 7.1C §C2) — `with sqlite3.connect(...)` only manages
+    the transaction (commit/rollback), not the connection's lifetime, so
+    this is deliberately a separate wrapper rather than relying on
+    `sqlite3.Connection`'s own context-manager protocol."""
+    conn = _open_conn(db_path)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+# Required tables/columns the viewer's own queries depend on — checked at
+# `create_server` time (never per-request) via PRAGMA table_info, the same
+# introspection technique store.py's own migrations already use. Optional
+# tables are column-checked only if present; if genuinely absent,
+# `_table_exists` already degrades those features gracefully elsewhere in
+# this module (unchanged by this phase).
+_REQUIRED_TABLE_COLUMNS = {
+    "facts": {
+        "fact_id", "content", "category", "tags", "trust_score", "status",
+        "superseded_by", "source_type", "extraction_method", "confidence",
+        "created_at", "updated_at", "namespace",
+    },
+    "entities": {"entity_id", "name", "entity_type"},
+    "fact_entities": {"fact_id", "entity_id"},
+}
+_OPTIONAL_TABLE_COLUMNS = {
+    "entity_relationships": {
+        "relationship_id", "source_entity_id", "target_entity_id",
+        "relationship_type", "namespace", "strength", "confidence", "status",
+    },
+    "forgotten_facts": {"namespace"},
+}
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> "set[str]":
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _validate_schema(conn: sqlite3.Connection) -> None:
+    """Raise `UnsupportedSchemaError` with an actionable message if `conn`
+    is missing a table/column the viewer's queries require. Never attempts
+    repair or migration — see `UnsupportedSchemaError`'s docstring."""
+    problems: list[str] = []
+    for table, required_cols in _REQUIRED_TABLE_COLUMNS.items():
+        if not _table_exists(conn, table):
+            problems.append(f"required table {table!r} is missing")
+            continue
+        missing = required_cols - _table_columns(conn, table)
+        if missing:
+            problems.append(f"table {table!r} is missing column(s): {', '.join(sorted(missing))}")
+    for table, required_cols in _OPTIONAL_TABLE_COLUMNS.items():
+        if not _table_exists(conn, table):
+            continue
+        missing = required_cols - _table_columns(conn, table)
+        if missing:
+            problems.append(f"optional table {table!r} is present but missing column(s): {', '.join(sorted(missing))}")
+    if problems:
+        raise UnsupportedSchemaError(
+            "Holographic memory viewer: unsupported database schema — " + "; ".join(problems) +
+            ". The viewer never attempts automatic schema repair or migration; run the normal "
+            "hermes memory maintenance/migration path against this database instead."
+        )
 
 
 def _redact(text: "str | None") -> str:
@@ -834,8 +933,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_html(400, _PAGE_HEAD + "<h1>Search query too long</h1>" + _PAGE_TAIL)
             return
 
-        conn = _open_conn(db_path)
-        try:
+        with _connection(db_path) as conn:
             if path in ("/", "/index", "/index.html"):
                 self._send_html(200, _render_index(conn, show_raw_identity=show_raw_identity, params=params))
                 return
@@ -887,8 +985,6 @@ class _Handler(BaseHTTPRequestHandler):
                 return
 
             self._send_html(404, _PAGE_HEAD + "<h1>Not found</h1>" + _PAGE_TAIL)
-        finally:
-            conn.close()
 
     def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A002
         # Avoid default stderr request logging (noisy under tests and no
@@ -913,8 +1009,12 @@ def create_server(
     """Construct (but do not start) the viewer's HTTP server.
 
     Raises `NonLoopbackBindingNotSupported` before any socket is opened if
-    `host` is not a loopback address — see the module docstring. `port=0`
-    lets the OS assign an ephemeral free port (what tests use); the CLI
+    `host` is not a loopback address — see the module docstring. Raises
+    `UnsupportedSchemaError` (Phase 7.1C) if `db_path` isn't a valid SQLite
+    database, or is missing a table/column the viewer's queries require —
+    checked once here, at construction time, rather than only surfacing
+    later as a generic request-time 500. `port=0` lets the OS assign an
+    ephemeral free port (what tests use); the CLI
     (`hermes_cli/memory_setup.cmd_viewer`) picks a fixed default port for
     interactive use.
     """
@@ -922,4 +1022,11 @@ def create_server(
     db_path = Path(db_path)
     if not db_path.exists():
         raise FileNotFoundError(f"Holographic memory database not found: {db_path}")
+    try:
+        with _connection(db_path) as conn:
+            _validate_schema(conn)
+    except sqlite3.DatabaseError as exc:
+        raise UnsupportedSchemaError(
+            f"Holographic memory viewer: {db_path} does not look like a valid SQLite database: {exc}"
+        ) from exc
     return ViewerServer((host, port), db_path, show_raw_identity=show_raw_identity)

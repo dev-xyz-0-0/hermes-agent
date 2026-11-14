@@ -253,13 +253,21 @@ class TestSecurityHeaders:
         self._assert_headers(headers)
 
     def test_headers_present_on_500(self, tmp_path):
-        """A corrupted sqlite file forces the catch-all 500 path."""
-        db_path = tmp_path / "corrupt.db"
-        db_path.write_bytes(b"not a real sqlite database")
+        """A valid database at startup that becomes unreadable afterward
+        (e.g. truncated/corrupted on disk while the viewer is already
+        running) still forces the generic catch-all 500 path, with no
+        detail leaked. A file that's already invalid AT startup is instead
+        rejected earlier, by `create_server` itself — see Phase 7.1C's
+        `UnsupportedSchemaError` and `test_holographic_viewer_sqlite.py`."""
+        from plugins.memory.holographic.store import MemoryStore
+
+        db_path = tmp_path / "memory_store.db"
+        MemoryStore(db_path=db_path, hrr_dim=32).close()
         server = _viewer.create_server(db_path, port=0)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
+            db_path.write_bytes(b"not a real sqlite database any more")
             port = server.server_address[1]
             status, headers, body = _raw_request("127.0.0.1", port, "GET", "/")
             assert status == 500
