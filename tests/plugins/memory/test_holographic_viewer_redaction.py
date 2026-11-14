@@ -25,7 +25,7 @@ NS = "telegram:chat_REDACT"
 
 # Synthetic secret-shaped values only — fabricated, never real.
 _API_KEY = "sk-ant-abcdefghijklmnopqrstuvwxyz0123456789"
-_FAKE_KEY = "AKIAABCDEFGHIJKLMNOP"
+_FAKE_AWS_KEY = "AKIAABCDEFGHIJKLMNOP"
 _BEARER_TOKEN = "Bearer abcdefghijklmnopqrstuvwxyz0123456789ABCD"
 _PRIVATE_KEY_BLOCK = "-----BEGIN RSA PRIVATE KEY-----"
 _SEED_PHRASE_SENTENCE = "the recovery phrase is: apple banana cherry delta echo foxtrot golf hotel"
@@ -55,7 +55,7 @@ def redaction_db(tmp_path):
     conn.execute(
         "INSERT INTO facts (content, category, tags, trust_score, status, namespace) "
         "VALUES (?, 'general', ?, 0.5, 'active', ?)",
-        (f"API key leaked: {_API_KEY}", f"aws={_FAKE_KEY}", NS),
+        (f"API key leaked: {_API_KEY}", f"aws={_FAKE_AWS_KEY}", NS),
     )
     content_fact_id = conn.execute("SELECT fact_id FROM facts WHERE namespace = ?", (NS,)).fetchone()["fact_id"]
 
@@ -93,7 +93,7 @@ def redaction_db(tmp_path):
     # A second entity + a relationship whose TYPE string is secret-shaped.
     conn.execute("INSERT INTO entities (name) VALUES ('Peer')")
     peer_id = conn.execute("SELECT entity_id FROM entities WHERE name = 'Peer'").fetchone()["entity_id"]
-    store.upsert_relationship(entity_id, peer_id, f"shares-key-{_FAKE_KEY}", namespace=NS)
+    store.upsert_relationship(entity_id, peer_id, f"shares-key-{_FAKE_AWS_KEY}", namespace=NS)
 
     # A supersession chain whose OLD content is secret-shaped.
     old_id = store.add_fact("Old value before secret leak.", category="general", namespace=NS)
@@ -128,10 +128,10 @@ class TestContentAndTagsRedaction:
         assert "[REDACTED:SECRET]" in body
 
     def test_aws_key_in_tags_is_redacted(self, running):
-        fact_id = _fact_id_for(running, running.digest, _FAKE_KEY)
+        fact_id = _fact_id_for(running, running.digest, _FAKE_AWS_KEY)
         resp = running.get(f"/fact?ns={running.digest}&id={fact_id}")
         body = resp.body.decode("utf-8")
-        assert _FAKE_KEY not in body
+        assert _FAKE_AWS_KEY not in body
 
     def test_bearer_token_is_redacted(self, running):
         resp = running.get(f"/namespace?ns={running.digest}")
@@ -176,7 +176,7 @@ class TestRelationshipLabelRedaction:
         resp = running.get(f"/entity?ns={running.digest}&id={running.entity_id}")
         assert resp.status == 200
         body = resp.body.decode("utf-8")
-        assert _FAKE_KEY not in body
+        assert _FAKE_AWS_KEY not in body
         assert "[REDACTED:SECRET]" in body
 
 
