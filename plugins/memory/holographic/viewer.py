@@ -176,6 +176,52 @@ _SECURITY_HEADERS = {
     "Cache-Control": "no-store",
 }
 
+# ---------------------------------------------------------------------------
+# Phase 7.2A — static asset serving (vendored dashboard JS, pinned locally;
+# see viewer_assets/vendor/VENDORED.md). Deliberately NOT generic file
+# serving: `_STATIC_ASSET_ALLOWLIST` is a closed, hand-maintained map from a
+# public URL name to a real on-disk file, so an unrecognized or malformed
+# name (including any path-traversal or percent-encoded-traversal attempt —
+# `self.path` is never percent-decoded or normalized before this exact
+# string lookup) simply isn't a key and 404s. `_resolve_static_asset` adds a
+# second, independent check (the resolved real path must stay inside
+# `_VIEWER_ASSETS_DIR`) purely as defense against a future mistake in the
+# allowlist itself, not because the lookup above is believed to be
+# bypassable. No route here ever constructs a filesystem path out of
+# request data.
+# ---------------------------------------------------------------------------
+
+_VIEWER_ASSETS_DIR = (Path(__file__).parent / "viewer_assets").resolve()
+
+# name (as it appears after "/static/" in the URL) -> (relative path under
+# _VIEWER_ASSETS_DIR, Content-Type, cacheable). Pinned vendor assets are
+# immutable (the filename's content never changes without a version bump
+# recorded in VENDORED.md), so they're safe to cache aggressively, unlike
+# every other response this module sends.
+_STATIC_ASSET_ALLOWLIST: "dict[str, tuple[str, str, bool]]" = {
+    "vendor/chart.umd.min.js": (
+        "vendor/chart.umd.min.js", "application/javascript; charset=utf-8", True,
+    ),
+    "vendor/vis-network.min.js": (
+        "vendor/vis-network.min.js", "application/javascript; charset=utf-8", True,
+    ),
+}
+
+
+def _resolve_static_asset(name: str) -> "tuple[Path, str, bool] | None":
+    entry = _STATIC_ASSET_ALLOWLIST.get(name)
+    if entry is None:
+        return None
+    relative_path, content_type, cacheable = entry
+    resolved = (_VIEWER_ASSETS_DIR / relative_path).resolve()
+    try:
+        resolved.relative_to(_VIEWER_ASSETS_DIR)
+    except ValueError:
+        return None
+    if not resolved.is_file():
+        return None
+    return resolved, content_type, cacheable
+
 
 def _parse_netloc(value: str) -> "tuple[str | None, int | None]":
     """Parse a bare `host[:port]` value (no scheme) via urlsplit, which
@@ -1068,6 +1114,22 @@ class _Handler(BaseHTTPRequestHandler):
         if not getattr(self, "_suppress_body", False):
             self.wfile.write(body)
 
+    def _send_static_asset(self, body: bytes, content_type: str, *, cacheable: bool) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        headers = dict(_SECURITY_HEADERS)
+        if cacheable:
+            # Pinned, versioned vendor assets only — see
+            # _STATIC_ASSET_ALLOWLIST. Every other response in this module
+            # keeps the default `no-store`.
+            headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        for name, value in headers.items():
+            self.send_header(name, value)
+        self.end_headers()
+        if not getattr(self, "_suppress_body", False):
+            self.wfile.write(body)
+
     def _reject_method(self) -> None:
         self._send_plain(
             405,
@@ -1159,10 +1221,29 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception:
             self._send_html(500, _PAGE_HEAD + "<h1>Internal error</h1>" + _PAGE_TAIL)
 
+    def _dispatch_static(self, name: str) -> None:
+        resolved = _resolve_static_asset(name)
+        if resolved is None:
+            self._send_plain(404, b"404 Not Found\n")
+            return
+        file_path, content_type, cacheable = resolved
+        body = file_path.read_bytes()
+        self._send_static_asset(body, content_type, cacheable=cacheable)
+
     def _dispatch(self) -> None:
         parsed = urlsplit(self.path)
         params = parse_qs(parsed.query, keep_blank_values=True)
         path = parsed.path
+
+        # Phase 7.2A — static assets never touch the database, so this is
+        # handled before any connection is opened and before the
+        # query-parameter checks below (a static asset request carries no
+        # meaningful query string). `path` is the raw, never percent-decoded
+        # request path (see _STATIC_ASSET_ALLOWLIST's docstring above).
+        if path.startswith("/static/"):
+            self._dispatch_static(path[len("/static/"):])
+            return
+
         db_path = self.server.db_path  # type: ignore[attr-defined]
         show_raw_identity = self.server.show_raw_identity  # type: ignore[attr-defined]
 
