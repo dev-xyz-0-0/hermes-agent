@@ -7,10 +7,11 @@
 
 import { api } from "./api.js";
 import { el, clearChildren, closeFactModal } from "./utils.js";
+import { destroyAllCharts } from "./charts.js";
 import { loadDashboard } from "./dashboard.js";
-import { loadFacts, resetFactsState, setFactCategory } from "./facts.js";
-import { loadEntities, clearGraph, fitGraph } from "./entities.js";
-import { runSearch } from "./search.js";
+import { loadFacts, resetFactsState, setFactCategory, cancelPendingFactsRequest } from "./facts.js";
+import { loadEntities, clearGraph, clearEntityGrid, fitGraph } from "./entities.js";
+import { runSearch, cancelPendingSearch } from "./search.js";
 import { loadTimeline } from "./timeline.js";
 
 const state = {
@@ -104,15 +105,50 @@ async function loadActiveTab() {
   }
 }
 
+// Switching namespaces must immediately drop every previously rendered
+// view — not just the active tab's. A stale fact list, chart, graph, or
+// search result from the old namespace must never linger, including in a
+// tab that isn't currently visible (Phase 7.2D finding: a hidden tab's
+// DOM was left showing the previous namespace's content, un-refreshed,
+// until the user revisited it). This cancels every per-module request
+// each tab module can have in flight — not just the one covered by
+// `tabAbort` below — since facts.js/entities.js/search.js each make their
+// own AbortController for requests `loadActiveTab` doesn't directly await
+// (pagination clicks, the auto-selected entity graph, an on-demand
+// search), and those are otherwise free to resolve and repopulate the DOM
+// after this clear.
+function clearAllTabPanels() {
+  cancelPendingFactsRequest();
+  cancelPendingSearch();
+  destroyAllCharts();
+  clearGraph(); // also cancels entities.js's own pending graph request
+  clearEntityGrid();
+
+  const statsRow = document.getElementById("statsRow");
+  if (statsRow) clearChildren(statsRow);
+  const recentFacts = document.getElementById("recentFacts");
+  if (recentFacts) clearChildren(recentFacts);
+
+  const factsBody = document.getElementById("factsBody");
+  if (factsBody) clearChildren(factsBody);
+  const factsPagination = document.getElementById("factsPagination");
+  if (factsPagination) clearChildren(factsPagination);
+  const factCategory = document.getElementById("factCategory");
+  if (factCategory) factCategory.value = "";
+
+  const searchResults = document.getElementById("searchResults");
+  if (searchResults) clearChildren(searchResults);
+  const searchNotice = document.getElementById("searchModeNotice");
+  if (searchNotice) searchNotice.textContent = "";
+
+  const timelineNotice = document.getElementById("timelineBasisNotice");
+  if (timelineNotice) timelineNotice.textContent = "";
+}
+
 async function onNamespaceChange(event) {
   if (tabAbort) tabAbort.abort();
   state.namespace = event.target.value;
-  // Switching namespaces must drop every previously rendered view, not
-  // just the active tab — a stale graph or search result from the old
-  // namespace must never linger on screen.
-  clearGraph();
-  const searchResults = document.getElementById("searchResults");
-  if (searchResults) clearChildren(searchResults);
+  clearAllTabPanels();
   await loadActiveTab();
 }
 

@@ -427,6 +427,7 @@ class TestBlockingApprovalE2E:
 
         resolve_gateway_approval(session_key, "once")
         t.join(timeout=5)
+        assert not t.is_alive(), "agent_thread leaked past its join timeout"
 
         assert result_holder[0] is not None
         assert result_holder[0]["approved"] is True
@@ -472,6 +473,7 @@ class TestBlockingApprovalE2E:
 
         assert resolve_gateway_approval(session_key, "deny") == 1
         t.join(timeout=5)
+        assert not t.is_alive(), "agent_thread leaked past its join timeout"
 
         assert result_holder[0] is not None
         assert result_holder[0]["approved"] is False
@@ -510,6 +512,7 @@ class TestBlockingApprovalE2E:
         t = threading.Thread(target=agent_thread)
         t.start()
         t.join(timeout=10)
+        assert not t.is_alive(), "agent_thread leaked past its join timeout"
 
         assert result_holder[0]["approved"] is False
         assert "timed out" in result_holder[0]["message"]
@@ -567,6 +570,7 @@ class TestBlockingApprovalE2E:
 
         for t in threads:
             t.join(timeout=5)
+            assert not t.is_alive(), "agent thread leaked past its join timeout"
 
         assert all(r is not None for r in results)
         assert all(r["approved"] is True for r in results)
@@ -622,6 +626,7 @@ class TestBlockingApprovalE2E:
 
         for t in threads:
             t.join(timeout=5)
+            assert not t.is_alive(), "agent thread leaked past its join timeout"
 
         assert all(r is not None for r in results)
         assert sorted(r["approved"] for r in results) == [False, True]

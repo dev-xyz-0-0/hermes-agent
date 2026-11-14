@@ -16,6 +16,21 @@ export function resetFactsState(ns) {
   if (categorySelect) categorySelect.value = "";
 }
 
+// A pagination click calls loadFacts() with no external signal, so it
+// makes its own AbortController (below) — independent of app.js's
+// tab-level AbortController. If the namespace changes while that request
+// is still in flight (e.g. the user clicked "next" then switched
+// namespaces before it resolved), only this cancels it; app.js's own
+// AbortController never sees it. Must be called on every namespace
+// switch, regardless of which tab is active, or a stale page of facts
+// can still land after the DOM was cleared.
+export function cancelPendingFactsRequest() {
+  if (currentAbort) {
+    currentAbort.abort();
+    currentAbort = null;
+  }
+}
+
 export async function loadFacts({ signal } = {}) {
   if (currentAbort) currentAbort.abort();
   currentAbort = signal ? null : new AbortController();

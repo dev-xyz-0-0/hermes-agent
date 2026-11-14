@@ -9,6 +9,18 @@ import { el, clearChildren, truncate, formatScore, openFactModal } from "./utils
 
 let currentAbort = null;
 
+// The Search tab loads on demand (no app.js-level AbortController covers
+// it) — runSearch makes its own. If the namespace changes while a search
+// is still in flight, only this stops a stale-namespace result set from
+// landing afterward; must be called on every namespace switch regardless
+// of which tab is active.
+export function cancelPendingSearch() {
+  if (currentAbort) {
+    currentAbort.abort();
+    currentAbort = null;
+  }
+}
+
 export async function runSearch(ns, { q, mode }) {
   const results = document.getElementById("searchResults");
   const notice = document.getElementById("searchModeNotice");

@@ -50,7 +50,7 @@ The legacy `auto_extract` mechanism (if enabled instead of/alongside `auto_captu
 - **Transactional batch ingestion** — an internal/operator-only API for atomic, bounded, provenance-complete multi-fact writes (see [Batch Ingestion](#batch-ingestion)).
 - **Namespace-scoped entity relationships** — a bounded graph service with BFS traversal limits, populated by an explicit operator backfill command, not automatic extraction (see [Entity Relationships](#entity-relationships)).
 - **Operator maintenance commands** — `health`, `benchmark`, `rebuild-vectors`, `rebuild-banks`, `backfill-relationships`, `verify`, `restore`, and `viewer`, all local, profile-aware, and never exposed to the model or gateway (see [Operator Maintenance Commands](#operator-maintenance-commands)).
-- **Optional local diagnostic viewer** — loopback-only, read-only, opaque-by-default (see [Local Diagnostic Viewer](#local-diagnostic-viewer)).
+- **Optional local diagnostic viewer** — loopback-only, read-only, opaque-by-default, with both server-rendered pages and an interactive JS dashboard over a read-only JSON API (see [Local Diagnostic Viewer](#local-diagnostic-viewer)).
 - **Optional retrieval telemetry** — content-free, bounded-retention scoring telemetry for future offline weight evaluation, off by default (see [Retrieval Telemetry](#retrieval-telemetry)).
 
 **Requirements:** None — uses SQLite (always available). NumPy is optional; without it, HRR-only operations (`probe`/`related`/`reason`/`contradict`) fall back to keyword search (or, for `contradict`, an empty result — see [Memory Tools](#memory-tools)).
@@ -1183,6 +1183,114 @@ superseded facts get distinct colored status badges in every listing.
 Forgotten facts have no retrievable content at all — `remove_fact` hard-
 deletes the row — so they are represented honestly as an opaque tombstone
 *count* in a visually distinct badge, never a fabricated fact-like entry.
+
+### Interactive Dashboard (`/dashboard`)
+
+Alongside the server-rendered pages above, `GET /dashboard` serves a
+single-page, JavaScript-driven dashboard for the same read-only data —
+Overview, Facts, Search, Entities (with a relationship graph), and
+Timeline tabs. It is **additive, not a replacement**: `/`, `/namespace`,
+`/fact`, and `/entity` are unchanged and keep working exactly as before;
+nothing forces an operator onto the JS dashboard.
+
+**Vanilla JS, no framework, no build step.** The dashboard's HTML/CSS/JS
+live under `viewer_assets/` (`index.html`, `css/viewer.css`, and nine
+`js/*.js` ES modules — `app.js` is the only bootstrap entry point,
+`<script type="module">`). There is no React/Vue, no bundler, and no
+`npm`/Node.js dependency anywhere in the deployment path — the files are
+served exactly as they sit on disk.
+
+**Two vendored chart/graph libraries, pinned and local — never a CDN
+request.** Chart.js 4.4.7 and vis-network 9.1.9 are committed under
+`viewer_assets/vendor/`, with their version numbers embedded directly in
+the filename (`chart.umd.4.4.7.min.js`, `vis-network.9.1.9.min.js`) so a
+future version bump always ships under a new URL rather than overwriting
+bytes a browser already cached for a year (see the caching note below).
+Source URL, license, and SHA-256 checksum for each are recorded in
+`viewer_assets/vendor/VENDORED.md`, independently re-verified by a test
+that hashes the on-disk file.
+
+**`/static/...` — a closed allowlist, not generic file serving.** Every
+asset the dashboard loads (`css/viewer.css`, each `js/*.js` module, both
+vendored libraries) is served through one hand-maintained
+`name -> (path, content-type, cacheable)` map. An unrecognized name —
+including any path-traversal or percent-encoding attempt — simply isn't a
+key in that map and 404s; nothing here ever builds a filesystem path out
+of request data. The two pinned vendor files get a one-year immutable
+`Cache-Control`; the dashboard's own CSS/JS (which change as the
+dashboard is developed, with no version segment in their URL) stay
+`no-store`, same as every other response in this module.
+
+**A dashboard-specific, stricter CSP.** Every server-rendered page keeps
+its existing `default-src 'none'` policy unchanged (no scripts of any
+kind, inline or otherwise). The dashboard needs to load local scripts, so
+it gets its *own* header set — `script-src 'self'` with no
+`unsafe-inline`/`unsafe-eval` for JavaScript, under any circumstance — so
+tightening or loosening one page's policy can never accidentally affect
+the other's. The one exception, `style-src 'self' 'unsafe-inline'`, exists
+only because Chart.js sets the `<canvas>` element's `style` attribute
+directly for responsive sizing; this was confirmed by an actual
+headless-Chrome run against the page, not assumed, and only ever relaxes
+*styles* — CSS cannot execute script.
+
+**No new JSON write endpoints, ever.** The dashboard is powered by eight
+read-only, namespace-scoped JSON endpoints, every one a `GET`:
+
+| Endpoint | Returns |
+|---|---|
+| `/api/namespaces` | Every namespace's opaque digest, fact counts, and tombstone count — the dashboard's namespace selector. |
+| `/api/overview?ns=` | Scoped status counts, entity/relationship totals, category breakdown, trust-score distribution, and the most recent facts. |
+| `/api/facts?ns=` | Paginated fact list, optionally filtered by `category`. |
+| `/api/facts/{id}?ns=` | One fact's detail plus its supersession chain (ancestors/successor), exactly like the `/fact` HTML page. |
+| `/api/search?ns=` | Literal or FTS5 search — the frontend only ever sends raw `q`/`mode`; the server alone decides and reports back what actually ran (`mode_used`, `fallback_reason`). |
+| `/api/entities?ns=` | Paginated entity list for the namespace. |
+| `/api/entities/{id}/graph?ns=` | One entity's bounded relationship graph (same traversal limits as the `/entity` HTML page). |
+| `/api/timeline?ns=` | Fact-creation counts and average trust score per day, always bucketed by `created_at` (`timestamp_basis` is always `"created_at"` in the response — a trust-score bump or recall never counts as a new timeline event). |
+
+Every one of these requires `ns` (the same opaque digest `/namespace`/
+`/fact`/`/entity` already use) and resolves it server-side via the exact
+same `_resolve_namespace` function — a request can no more "unlock" a
+namespace through the JSON API than through the HTML pages. A missing
+`ns` is `400`; a `ns`/`id` that doesn't resolve is `404`. All content
+passes through the same `redact_secret_shapes()` redaction the HTML pages
+use. Pagination, query-parameter-count limits, and the SQLite execution
+deadline are the identical Phase 7.1A/7.1D protections, reused rather than
+reimplemented for the API.
+
+**Deliberately deferred: Benchmark, memory tiers, an activity/audit
+feed.** None of the three exist anywhere in the dashboard, by design, not
+by oversight — regression tests assert their complete absence from both
+the HTML and every JS file. `/api/benchmark` was never built: the real
+`run_benchmark()` requires a *writable* `MemoryStore` (it temporarily
+mutates `retrieval_count`/`updated_at`), which is structurally
+incompatible with this viewer's read-only guarantee — `hermes memory
+benchmark` (see [Operator Maintenance Commands](#operator-maintenance-commands))
+remains the correct way to run it. Memory tiers (a `tier:*` tag
+convention) and an activity feed have no verified, reliable schema
+backing in production data, so neither is fabricated or stubbed.
+
+**No injection surface, by construction.** Every dynamic render goes
+through one `el()` helper (`viewer_assets/js/utils.js`) that only ever
+assigns `.textContent` — never `.innerHTML` — and defensively throws if
+asked to set an `onXxx`-style prop; there are no inline event-handler
+attributes anywhere in the shipped HTML. The entity-relationship graph
+(rendered with vis-network) deliberately never sets the library's `title`
+tooltip option, since vis-network renders tooltips as DOM/HTML by
+default — node/edge *labels* are canvas-drawn plain text and are safe,
+but a tooltip would not be. These were verified, not just reviewed: a
+real headless-Chrome render with synthetic `<script>`/`onerror=` payloads
+seeded into fact content, an entity name, and a relationship label
+confirmed none of them execute or render as markup.
+
+**Namespace isolation holds under genuine request races, not just
+sequential requests.** Switching the namespace selector cancels every
+in-flight, namespace-scoped request — including ones the active tab's own
+`AbortController` doesn't directly cover, such as a Facts-tab pagination
+click, the Entities tab's auto-selected relationship-graph fetch, and an
+in-progress search — and immediately clears every tab's rendered content,
+including a tab that isn't currently visible. A slow response for the
+namespace you switched away from can never repopulate the screen after
+you've moved on, whether or not that tab is the one currently showing.
 
 ## Retrieval Telemetry
 

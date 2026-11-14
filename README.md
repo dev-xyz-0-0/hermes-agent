@@ -400,7 +400,7 @@ uv run pytest tests/gateway/test_fallback_eviction_release.py -q
 uv run pytest tests/gateway/test_session_expiry_watcher.py -q
 uv run pytest tests/plugins/memory/test_holographic_profiles.py -q
 uv run pytest tests/agent/test_auxiliary_client.py -q
-uv run pytest tests/agent/test_models_dev.py -q
+uv run pytest tests/tools/test_approval.py-q
 
  
 

@@ -109,6 +109,17 @@ function destroyGraphInstance() {
 }
 
 export function clearGraph() {
+  // selectEntity() makes its own AbortController (currentAbort, above),
+  // independent of app.js's tab-level one — the initial entities-list
+  // fetch is cancelled by that outer signal, but the auto-selected graph
+  // fetch that follows is not. If the namespace changes while that graph
+  // request is still in flight, aborting it here (unconditionally, even
+  // when the Entities tab isn't active) is the only thing stopping a
+  // stale-namespace graph from rendering after this clear.
+  if (currentAbort) {
+    currentAbort.abort();
+    currentAbort = null;
+  }
   destroyGraphInstance();
   const container = document.getElementById("graph");
   if (container) clearChildren(container);
@@ -116,6 +127,11 @@ export function clearGraph() {
   if (title) title.textContent = "Select an entity to see its relationships";
   const notice = document.getElementById("graphTruncationNotice");
   if (notice) notice.textContent = "";
+}
+
+export function clearEntityGrid() {
+  const grid = document.getElementById("entityGrid");
+  if (grid) clearChildren(grid);
 }
 
 export function fitGraph() {
