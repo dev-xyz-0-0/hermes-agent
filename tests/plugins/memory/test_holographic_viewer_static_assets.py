@@ -26,8 +26,8 @@ _ASSETS_DIR = Path(_viewer.__file__).parent / "viewer_assets"
 # Recorded independently of VENDORED.md so a corrupted/edited vendor file
 # fails this test even if VENDORED.md was edited to match it.
 _EXPECTED_CHECKSUMS = {
-    "vendor/chart.umd.min.js": "206b6e8bb00fc7bba2c7ee80ca41db3e9e05ba7be0aa35abeba9cfd5357f5d0e",
-    "vendor/vis-network.min.js": "f53f833ddb9bf97efe856bb0637d4fe88f39e39999c7e94a4b8afc8de8a1a2e5",
+    "vendor/chart.umd.4.4.7.min.js": "206b6e8bb00fc7bba2c7ee80ca41db3e9e05ba7be0aa35abeba9cfd5357f5d0e",
+    "vendor/vis-network.9.1.9.min.js": "f53f833ddb9bf97efe856bb0637d4fe88f39e39999c7e94a4b8afc8de8a1a2e5",
 }
 
 
@@ -63,8 +63,8 @@ class TestNoRuntimeCdnReferences:
 
 class TestAllowlistedAssetAccess:
     @pytest.mark.parametrize("name,expected_file", sorted({
-        "vendor/chart.umd.min.js": "chart.umd.min.js",
-        "vendor/vis-network.min.js": "vis-network.min.js",
+        "vendor/chart.umd.4.4.7.min.js": "chart.umd.4.4.7.min.js",
+        "vendor/vis-network.9.1.9.min.js": "vis-network.9.1.9.min.js",
     }.items()))
     def test_allowlisted_asset_served_with_correct_body(self, db_path, name, expected_file):
         s = _start_server(db_path)
@@ -79,7 +79,7 @@ class TestAllowlistedAssetAccess:
     def test_content_type_is_javascript(self, db_path):
         s = _start_server(db_path)
         try:
-            resp = s.get("/static/vendor/chart.umd.min.js")
+            resp = s.get("/static/vendor/chart.umd.4.4.7.min.js")
             assert resp.getheader("Content-Type") == "application/javascript; charset=utf-8"
         finally:
             s.stop()
@@ -87,7 +87,7 @@ class TestAllowlistedAssetAccess:
     def test_nosniff_header_present(self, db_path):
         s = _start_server(db_path)
         try:
-            resp = s.get("/static/vendor/chart.umd.min.js")
+            resp = s.get("/static/vendor/chart.umd.4.4.7.min.js")
             assert resp.getheader("X-Content-Type-Options") == "nosniff"
         finally:
             s.stop()
@@ -95,7 +95,7 @@ class TestAllowlistedAssetAccess:
     def test_vendor_assets_are_cacheable_unlike_every_other_response(self, db_path):
         s = _start_server(db_path)
         try:
-            resp = s.get("/static/vendor/chart.umd.min.js")
+            resp = s.get("/static/vendor/chart.umd.4.4.7.min.js")
             cache_control = resp.getheader("Cache-Control")
             assert cache_control != "no-store"
             assert "immutable" in cache_control
@@ -115,8 +115,8 @@ class TestAllowlistedAssetAccess:
     def test_head_matches_get_headers_with_no_body(self, db_path):
         s = _start_server(db_path)
         try:
-            get_resp = s.get("/static/vendor/vis-network.min.js")
-            head_resp = s.request("HEAD", "/static/vendor/vis-network.min.js")
+            get_resp = s.get("/static/vendor/vis-network.9.1.9.min.js")
+            head_resp = s.request("HEAD", "/static/vendor/vis-network.9.1.9.min.js")
             assert head_resp.status == 200
             assert head_resp.body == b""
             assert head_resp.getheader("Content-Length") == get_resp.getheader("Content-Length")
@@ -128,7 +128,7 @@ class TestAllowlistedAssetAccess:
 class TestUnknownAndTraversalRejection:
     @pytest.mark.parametrize("path", [
         "/static/vendor/unknown.js",
-        "/static/vendor/chart.umd.min.js.bak",
+        "/static/vendor/chart.umd.4.4.7.min.js.bak",
         "/static/does-not-exist.js",
         "/static/",
         "/static/vendor/",
@@ -136,7 +136,7 @@ class TestUnknownAndTraversalRejection:
         "/static/..%2f..%2f..%2fetc%2fpasswd",
         "/static/vendor%2f..%2f..%2fviewer.py",
         "/static/vendor\\..\\..\\viewer.py",
-        "/static/vendor/chart.umd.min.js/../../viewer.py",
+        "/static/vendor/chart.umd.4.4.7.min.js/../../viewer.py",
         "/static/vendor/%2e%2e/%2e%2e/viewer.py",
         "/static/vendor/chart.umd.min%2ejs",
     ])

@@ -79,7 +79,12 @@ function renderGraph(data, entityId) {
 
   currentGraph = new vis.Network(container, { nodes, edges }, {
     physics: { stabilization: { iterations: 100 } },
-    interaction: { hover: true, navigationButtons: true },
+    // navigationButtons is deliberately left off: vis-network renders them
+    // from base64 data: URI icons, which the strict dashboard CSP (no
+    // img-src, so default-src 'none' applies) blocks outright — the
+    // buttons would be invisible and non-functional. #graphFitButton
+    // (fitGraph()) already covers the one navigation action users need.
+    interaction: { hover: true, navigationButtons: false },
   });
 
   const notice = document.getElementById("graphTruncationNotice");

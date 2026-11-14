@@ -575,7 +575,7 @@ class TestLegacyRouteCompatibility:
         _, listing = _get_json(running, f"/api/facts?ns={running.digest_a}")
         fact_id = listing["facts"][0]["fact_id"]
         assert running.get(f"/fact?ns={running.digest_a}&id={fact_id}").status == 200
-        assert running.get("/static/vendor/chart.umd.min.js").status == 200
+        assert running.get("/static/vendor/chart.umd.4.4.7.min.js").status == 200
 
     def test_legacy_html_routes_are_unaffected_by_the_api_routing_branch(self, running):
         resp = running.get("/")

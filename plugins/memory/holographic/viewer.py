@@ -208,16 +208,17 @@ _VIEWER_ASSETS_DIR = (Path(__file__).parent / "viewer_assets").resolve()
 _DASHBOARD_HTML_PATH = _VIEWER_ASSETS_DIR / "index.html"
 
 # name (as it appears after "/static/" in the URL) -> (relative path under
-# _VIEWER_ASSETS_DIR, Content-Type, cacheable). Pinned vendor assets are
-# immutable (the filename's content never changes without a version bump
-# recorded in VENDORED.md), so they're safe to cache aggressively, unlike
-# every other response this module sends.
+# _VIEWER_ASSETS_DIR, Content-Type, cacheable). Pinned vendor assets carry
+# their version in the filename itself (Phase 7.2D) — a future version
+# bump gets a new filename/allowlist entry, never an in-place content swap
+# under the same URL, so the 1-year immutable Cache-Control below can
+# never serve stale bytes to a client that cached the old version.
 _STATIC_ASSET_ALLOWLIST: "dict[str, tuple[str, str, bool]]" = {
-    "vendor/chart.umd.min.js": (
-        "vendor/chart.umd.min.js", "application/javascript; charset=utf-8", True,
+    "vendor/chart.umd.4.4.7.min.js": (
+        "vendor/chart.umd.4.4.7.min.js", "application/javascript; charset=utf-8", True,
     ),
-    "vendor/vis-network.min.js": (
-        "vendor/vis-network.min.js", "application/javascript; charset=utf-8", True,
+    "vendor/vis-network.9.1.9.min.js": (
+        "vendor/vis-network.9.1.9.min.js", "application/javascript; charset=utf-8", True,
     ),
     # Phase 7.2C — the dashboard's own CSS/JS. Not cacheable: unlike the
     # pinned vendor files above, these change as the dashboard is developed,

@@ -7,6 +7,12 @@
         "serve",
         "--mcp"
       ]
+    },
+    "playwright": {
+      "command": "playwright-mcp",
+      "args": [
+        "--browser=chromium"
+      ]
     }
   }
 }

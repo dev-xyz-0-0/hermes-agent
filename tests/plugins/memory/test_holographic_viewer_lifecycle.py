@@ -184,7 +184,13 @@ class TestServerLifecycle:
         s.stop()
         assert not s.thread.is_alive()
         # The port should be free again immediately — no orphaned listener.
+        # SO_REUSEADDR here matters: the client connection from `s.get("/")`
+        # just above can still be sitting in TCP TIME_WAIT on this same
+        # port, which would make a plain bind() fail transiently even
+        # though the server's own listening socket was closed cleanly —
+        # that's a TIME_WAIT false negative, not an orphaned listener.
         probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind(("127.0.0.1", port))
         finally:

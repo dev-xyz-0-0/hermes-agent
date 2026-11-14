@@ -96,7 +96,7 @@ class TestExtendedStaticAllowlist:
     @pytest.mark.parametrize("name", sorted({
         "css/viewer.css", "js/app.js", "js/api.js", "js/charts.js", "js/dashboard.js",
         "js/facts.js", "js/entities.js", "js/search.js", "js/timeline.js", "js/utils.js",
-        "vendor/chart.umd.min.js", "vendor/vis-network.min.js",
+        "vendor/chart.umd.4.4.7.min.js", "vendor/vis-network.9.1.9.min.js",
     }))
     def test_approved_asset_is_served(self, db_path, name):
         s = _start_server(db_path)
@@ -135,7 +135,7 @@ class TestExtendedStaticAllowlist:
         s = _start_server(db_path)
         try:
             css_resp = s.get("/static/css/viewer.css")
-            vendor_resp = s.get("/static/vendor/chart.umd.min.js")
+            vendor_resp = s.get("/static/vendor/chart.umd.4.4.7.min.js")
             assert css_resp.getheader("Cache-Control") == "no-store"
             assert vendor_resp.getheader("Cache-Control") != "no-store"
             assert "immutable" in vendor_resp.getheader("Cache-Control")
