@@ -302,17 +302,36 @@ def _parse_str(params: dict, key: str) -> "str | None":
 # ---------------------------------------------------------------------------
 
 def _resolve_namespace(conn: sqlite3.Connection, digest: str) -> "str | None":
+    """Re-derive the raw namespace a client-supplied digest refers to.
+
+    A namespace digest is an identifier for selecting which EXISTING
+    namespace to view — re-derived from the real data every time — never an
+    authentication credential (same framing as Origin validation in Phase
+    7.1A); it proves nothing about who is asking, only which namespace they
+    asked to see.
+
+    Collects every DISTINCT raw namespace (from `facts` and
+    `entity_relationships`) whose digest matches into a set and returns the
+    single element only if exactly one matched. Zero matches is "not found"
+    (`None`); more than one distinct namespace hashing to the same digest —
+    a SHA-1 collision, practically impossible but handled defensively
+    rather than assumed away — is treated the same way (`None`, so the
+    caller 404s) rather than silently resolving to whichever was found
+    first.
+    """
     if digest == "":
         return ""
-    rows = conn.execute("SELECT DISTINCT namespace FROM facts").fetchall()
-    for (ns,) in rows:
+    candidates: "set[str]" = set()
+    for (ns,) in conn.execute("SELECT DISTINCT namespace FROM facts").fetchall():
         if _namespace_digest(ns or "") == digest:
-            return ns or ""
-    rows = conn.execute("SELECT DISTINCT namespace FROM entity_relationships").fetchall() if _table_exists(conn, "entity_relationships") else []
-    for (ns,) in rows:
-        if _namespace_digest(ns or "") == digest:
-            return ns or ""
-    return None
+            candidates.add(ns or "")
+    if _table_exists(conn, "entity_relationships"):
+        for (ns,) in conn.execute("SELECT DISTINCT namespace FROM entity_relationships").fetchall():
+            if _namespace_digest(ns or "") == digest:
+                candidates.add(ns or "")
+    if len(candidates) != 1:
+        return None
+    return next(iter(candidates))
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -656,7 +675,7 @@ def _render_entity(conn: sqlite3.Connection, entity_id: int, digest: str, namesp
     parts.append(f"<h2>Relationships ({len(edges)})</h2><table><tr><th>Source</th><th>Type</th><th>Target</th><th>Strength</th><th>Confidence</th></tr>")
     for e in edges:
         parts.append(
-            f"<tr><td>{e.source_entity_id}</td><td>{_esc(e.relationship_type)}</td><td>{e.target_entity_id}</td>"
+            f"<tr><td>{e.source_entity_id}</td><td>{_esc(_redact(e.relationship_type))}</td><td>{e.target_entity_id}</td>"
             f"<td>{e.strength:.2f}</td><td>{e.confidence:.2f}</td></tr>"
         )
     parts.append("</table>")
