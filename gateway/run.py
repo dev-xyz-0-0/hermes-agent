@@ -471,6 +471,7 @@ class GatewayRunner:
     # Class-level defaults so partial construction in tests doesn't
     # blow up on attribute access.
     _running_agents_ts: Dict[str, float] = {}
+    _task_runtime: Optional[Dict[str, Dict[str, Any]]] = None
     
     def __init__(self, config: Optional[GatewayConfig] = None):
         self.config = config or load_gateway_config()
@@ -503,6 +504,10 @@ class GatewayRunner:
         # Key: session_key, Value: AIAgent instance
         self._running_agents: Dict[str, Any] = {}
         self._running_agents_ts: Dict[str, float] = {}  # start timestamp per session
+        # Ephemeral, user-facing lifecycle snapshots for /status.  These are
+        # deliberately process-local: they describe the current/most recent
+        # turn and must not become part of the durable conversation record.
+        self._task_runtime: Dict[str, Dict[str, Any]] = {}
         self._pending_messages: Dict[str, str] = {}  # Queued messages during interrupt
         # Diagnostic-only ownership metadata for context-pressure notifications.
         self._last_context_warnings: Dict[str, Dict[str, Any]] = {}
@@ -2464,9 +2469,32 @@ class GatewayRunner:
         # same session — corrupting the transcript.
         self._running_agents[_quick_key] = _AGENT_PENDING_SENTINEL
         self._running_agents_ts[_quick_key] = time.time()
+        self._record_task_runtime(
+            _quick_key, state="starting", phase="Starting",
+            action="Preparing the agent", event="Task received", reset=True,
+        )
 
         try:
-            return await self._handle_message_with_agent(event, source, _quick_key)
+            result = await self._handle_message_with_agent(event, source, _quick_key)
+            terminal_state = (
+                (self.__dict__.get("_task_runtime") or {})
+                .get(_quick_key, {})
+                .get("state")
+            )
+            if terminal_state not in {"stopping", "failed"}:
+                self._record_task_runtime(
+                    _quick_key, state="idle", phase="Complete",
+                    action="Response delivered", event="Task completed",
+                )
+            return result
+        except Exception as exc:
+            self._record_task_runtime(
+                _quick_key, state="failed", phase="Stopped",
+                action="The task did not complete",
+                blocker=f"{type(exc).__name__}; see gateway logs for details",
+                event="Task failed",
+            )
+            raise
         finally:
             # If _run_agent replaced the sentinel with a real agent and
             # then cleaned it up, this is a no-op.  If we exited early
@@ -3481,6 +3509,7 @@ class GatewayRunner:
 
         # Reset the session
         new_entry = self.session_store.reset_session(session_key)
+        (self.__dict__.get("_task_runtime") or {}).pop(session_key, None)
 
         # Clear any session-scoped model override so the next agent picks up
         # the configured default instead of the previously switched model.
@@ -3565,16 +3594,111 @@ class GatewayRunner:
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _status_text(value: Any, limit: int = 160) -> str:
+        """Return compact, single-line status text safe for chat rendering."""
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if len(text) > limit:
+            text = text[: limit - 3].rstrip() + "..."
+        return text
+
+    def _record_task_runtime(
+        self,
+        session_key: str,
+        *,
+        state: Optional[str] = None,
+        phase: Optional[str] = None,
+        action: Optional[str] = None,
+        tool: Any = None,
+        blocker: Any = None,
+        event: Optional[str] = None,
+        reset: bool = False,
+    ) -> Dict[str, Any]:
+        """Create or update an ephemeral lifecycle snapshot for one session."""
+        now = time.time()
+        snapshots = self.__dict__.get("_task_runtime")
+        if snapshots is None:
+            snapshots = self._task_runtime = {}
+        if reset or session_key not in snapshots:
+            snapshots[session_key] = {
+                "state": "starting",
+                "phase": "Starting",
+                "action": "Preparing the agent",
+                "tool": None,
+                "blocker": None,
+                "started_at": now,
+                "updated_at": now,
+                "events": [],
+            }
+            # Prevent an unbounded process-lifetime cache on gateways serving
+            # many distinct chats. Active entries are refreshed and therefore
+            # naturally survive this oldest-first pruning.
+            if len(snapshots) > 1000:
+                oldest_key = min(
+                    (key for key in snapshots if key != session_key),
+                    key=lambda key: snapshots[key].get("updated_at", 0),
+                    default=None,
+                )
+                if oldest_key is not None:
+                    snapshots.pop(oldest_key, None)
+        snapshot = snapshots[session_key]
+        for key, value in (("state", state), ("phase", phase), ("action", action)):
+            if value is not None:
+                snapshot[key] = self._status_text(value)
+        if tool is not None:
+            snapshot["tool"] = self._status_text(tool, 80) or None
+        if blocker is not None:
+            snapshot["blocker"] = self._status_text(blocker)
+        snapshot["updated_at"] = now
+        if event:
+            snapshot.setdefault("events", []).append({
+                "at": now,
+                "message": self._status_text(event),
+            })
+            snapshot["events"] = snapshot["events"][-5:]
+        return snapshot
+
+    @staticmethod
+    def _human_duration(seconds: float) -> str:
+        seconds = max(0, int(seconds))
+        if seconds < 60:
+            return f"{seconds}s"
+        minutes, secs = divmod(seconds, 60)
+        if minutes < 60:
+            return f"{minutes}m {secs}s" if secs else f"{minutes}m"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+
+    @staticmethod
+    def _friendly_activity(activity: Dict[str, Any]) -> tuple[str, str]:
+        """Map internal activity descriptions to stable user-facing language."""
+        tool = activity.get("current_tool")
+        desc = str(activity.get("last_activity_desc") or "").lower()
+        if tool:
+            return "Using tools", f"Running {str(tool).replace('_', ' ')}"
+        if "receiving stream" in desc:
+            return "Thinking", "Receiving the model response"
+        if "waiting for provider" in desc or "starting api call" in desc:
+            return "Thinking", "Waiting for the model response"
+        if "api call" in desc and "completed" in desc:
+            return "Preparing response", "Preparing the response"
+        if "tool completed" in desc:
+            return "Thinking", "Reviewing the tool result"
+        if "initializ" in desc:
+            return "Starting", "Preparing the agent"
+        return "Thinking", "Processing your request"
+
     async def _handle_status_command(self, event: MessageEvent) -> str:
-        """Handle /status command."""
+        """Handle compact /status and diagnostic /status full commands."""
         source = event.source
         session_entry = self.session_store.get_or_create_session(source)
 
         connected_platforms = [p.value for p in self.adapters.keys()]
 
-        # Check if there's an active agent
         session_key = session_entry.session_key
-        is_running = session_key in self._running_agents
+        running_agent = self._running_agents.get(session_key)
+        is_running = running_agent is not None
+        full = event.get_command_args().strip().lower() == "full"
 
         title = None
         if self._session_db:
@@ -3583,21 +3707,83 @@ class GatewayRunner:
             except Exception:
                 title = None
 
-        lines = [
-            "📊 **Hermes Gateway Status**",
-            "",
-            f"**Session ID:** `{session_entry.session_id}`",
-        ]
-        if title:
-            lines.append(f"**Title:** {title}")
-        lines.extend([
-            f"**Created:** {session_entry.created_at.strftime('%Y-%m-%d %H:%M')}",
-            f"**Last Activity:** {session_entry.updated_at.strftime('%Y-%m-%d %H:%M')}",
-            f"**Tokens:** {session_entry.total_tokens:,}",
-            f"**Agent Running:** {'Yes ⚡' if is_running else 'No'}",
-            "",
-            f"**Connected Platforms:** {', '.join(connected_platforms)}",
-        ])
+        snapshot = (self.__dict__.get("_task_runtime") or {}).get(session_key)
+        activity: Dict[str, Any] = {}
+        if is_running and running_agent is not _AGENT_PENDING_SENTINEL and hasattr(running_agent, "get_activity_summary"):
+            try:
+                activity = running_agent.get_activity_summary() or {}
+            except Exception:
+                activity = {}
+
+        now = time.time()
+        if is_running:
+            if running_agent is _AGENT_PENDING_SENTINEL:
+                state, icon, phase, action = "Starting", "🟡", "Starting", "Preparing the agent"
+            elif snapshot and snapshot.get("state") == "waiting":
+                state, icon = "Waiting for you", "🟠"
+                phase = snapshot.get("phase") or "Waiting"
+                action = snapshot.get("action") or "Waiting for your input"
+            else:
+                state, icon = "Working", "🟢"
+                phase, action = self._friendly_activity(activity)
+        elif snapshot and snapshot.get("state") == "failed":
+            state, icon = "Failed", "🔴"
+            phase = snapshot.get("phase") or "Stopped"
+            action = snapshot.get("action") or "The task did not complete"
+        elif snapshot and snapshot.get("state") == "stopping":
+            state, icon = "Stopped", "🟠"
+            phase = snapshot.get("phase") or "Stopped"
+            action = snapshot.get("action") or "Stopped by request"
+        else:
+            state, icon, phase, action = "Idle", "⚪", None, None
+
+        task = self._status_text(title or "Current session task", 120)
+        lines = ["📊 **Hermes Gateway Status**", "", f"{icon} **{state}**", f"**Task:** {task}"]
+        if phase:
+            lines.append(f"**Phase:** {self._status_text(phase, 80)}")
+        if action:
+            lines.append(f"**Current action:** {self._status_text(action)}")
+
+        started_at = (snapshot or {}).get("started_at") or self._running_agents_ts.get(session_key)
+        updated_at = max(
+            float((snapshot or {}).get("updated_at") or 0),
+            float(activity.get("last_activity_ts") or 0),
+        ) or None
+        if is_running and started_at:
+            lines.append(f"**Active for:** {self._human_duration(now - started_at)}")
+        if updated_at:
+            lines.append(f"**Last update:** {self._human_duration(now - updated_at)} ago")
+        blocker = (snapshot or {}).get("blocker")
+        if blocker:
+            lines.append(f"**Blocker:** {self._status_text(blocker)}")
+
+        lines.extend(["", f"**Session:** `{session_entry.session_id}`"])
+        if full:
+            if activity:
+                current = activity.get("api_call_count", 0)
+                maximum = activity.get("max_iterations", 0)
+                lines.append(f"**API iteration:** {current}/{maximum} (activity counter)")
+                if activity.get("current_tool"):
+                    lines.append(f"**Current tool:** `{self._status_text(activity['current_tool'], 80)}`")
+            events = (snapshot or {}).get("events") or []
+            if events:
+                lines.extend(["", "**Recent activity:**"])
+                for item in events[-5:]:
+                    stamp = datetime.fromtimestamp(item["at"]).strftime("%H:%M:%S")
+                    lines.append(f"- `{stamp}` {self._status_text(item['message'])}")
+            lines.extend([
+                "",
+                f"**Created:** {session_entry.created_at.strftime('%Y-%m-%d %H:%M')}",
+                f"**Last Activity:** {session_entry.updated_at.strftime('%Y-%m-%d %H:%M')}",
+                f"**Tokens:** {session_entry.total_tokens:,}",
+            ])
+        else:
+            lines.append(f"**Tokens:** {session_entry.total_tokens:,}")
+        lines.append(f"**Connected:** {', '.join(connected_platforms)}")
+        if is_running:
+            lines.extend(["", "More: `/status full` · Stop: `/stop`"])
+        elif not full:
+            lines.extend(["", "More: `/status full`"])
 
         return "\n".join(lines)
     
@@ -3619,6 +3805,10 @@ class GatewayRunner:
             # Force-clean the sentinel so the session is unlocked.
             if session_key in self._running_agents:
                 del self._running_agents[session_key]
+            self._record_task_runtime(
+                session_key, state="stopping", phase="Stopped",
+                action="Stopped during startup", event="Task stopped by user",
+            )
             logger.info("HARD STOP (pending) for session %s — sentinel cleared", session_key[:20])
             return "⚡ Force-stopped. The agent was still starting — session unlocked."
         if agent:
@@ -3627,6 +3817,10 @@ class GatewayRunner:
             # keep it locked forever.
             if session_key in self._running_agents:
                 del self._running_agents[session_key]
+            self._record_task_runtime(
+                session_key, state="stopping", phase="Stopped",
+                action="Stopped by request", event="Task stopped by user",
+            )
             return "⚡ Force-stopped. The session is unlocked — you can send a new message."
         else:
             return "No active task to stop."
@@ -6009,6 +6203,11 @@ class GatewayRunner:
         _adapter = self.adapters.get(source.platform)
         if _adapter:
             _adapter.resume_typing_for_chat(source.chat_id)
+        self._record_task_runtime(
+            session_key, state="working", phase="Using tools",
+            action="Resuming the approved command", blocker="",
+            event="Command approved; agent resumed",
+        )
 
         count_msg = f" ({count} commands)" if count > 1 else ""
         logger.info("User approved %d dangerous command(s) via /approve%s", count, scope_msg)
@@ -6046,6 +6245,11 @@ class GatewayRunner:
         _adapter = self.adapters.get(source.platform)
         if _adapter:
             _adapter.resume_typing_for_chat(source.chat_id)
+        self._record_task_runtime(
+            session_key, state="working", phase="Thinking",
+            action="Reviewing the denied command", blocker="",
+            event="Command denied; agent resumed",
+        )
 
         count_msg = f" ({count} commands)" if count > 1 else ""
         logger.info("User denied %d dangerous command(s) via /deny", count)
@@ -7011,6 +7215,23 @@ class GatewayRunner:
         
         def progress_callback(event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
             """Callback invoked by agent on tool lifecycle events."""
+            if session_key:
+                _tool_label = str(tool_name or "tool").replace("_", " ")
+                if event_type == "tool.started":
+                    _action = f"Running {_tool_label}"
+                    if preview:
+                        _action += f": {preview}"
+                    self._record_task_runtime(
+                        session_key, state="working", phase="Using tools",
+                        action=_action, tool=tool_name or "", event=_action,
+                    )
+                elif event_type == "tool.completed":
+                    _failed = bool(kwargs.get("is_error"))
+                    self._record_task_runtime(
+                        session_key, state="working", phase="Thinking",
+                        action="Reviewing the tool result", tool="",
+                        event=f"{_tool_label} {'failed' if _failed else 'completed'}",
+                    )
             if not progress_queue:
                 return
 
@@ -7413,7 +7634,9 @@ class GatewayRunner:
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
-            agent.tool_progress_callback = progress_callback if tool_progress_enabled else None
+            # Always collect lifecycle state for /status.  The callback itself
+            # suppresses chat progress messages when tool progress is disabled.
+            agent.tool_progress_callback = progress_callback
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
             agent.stream_delta_callback = _stream_delta_cb
             agent.status_callback = _status_callback_sync
@@ -7489,6 +7712,13 @@ class GatewayRunner:
 
                 cmd = approval_data.get("command", "")
                 desc = approval_data.get("description", "dangerous command")
+                if session_key:
+                    self._record_task_runtime(
+                        session_key, state="waiting", phase="Waiting",
+                        action="Waiting for command approval",
+                        blocker="Your approval is required",
+                        event="Requested approval for a command",
+                    )
 
                 # Prefer button-based approval when the adapter supports it.
                 # Check the *class* for the method, not the instance — avoids
@@ -7714,6 +7944,10 @@ class GatewayRunner:
                 await asyncio.sleep(0.05)
             if session_key:
                 self._running_agents[session_key] = agent_holder[0]
+                self._record_task_runtime(
+                    session_key, state="working", phase="Thinking",
+                    action="Waiting for the model response", event="Agent started",
+                )
         
         tracking_task = asyncio.create_task(track_agent())
         
@@ -7855,6 +8089,13 @@ class GatewayRunner:
                     _timed_out_agent.interrupt("Execution timed out (inactivity)")
 
                 _timeout_mins = int(_agent_timeout // 60) or 1
+                if session_key:
+                    self._record_task_runtime(
+                        session_key, state="failed", phase="Stopped",
+                        action="Stopped after prolonged inactivity",
+                        blocker=f"No agent activity for {self._human_duration(_secs_ago)}",
+                        event="Task stopped after inactivity timeout",
+                    )
 
                 # Construct a user-facing message with diagnostic context.
                 _diag_lines = [

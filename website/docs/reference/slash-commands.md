@@ -115,7 +115,7 @@ The messaging gateway supports the following built-in commands inside Telegram, 
 |---------|-------------|
 | `/new` | Start a new conversation. |
 | `/reset` | Reset conversation history. |
-| `/status` | Show session info. |
+| `/status [full]` | Show current task state, phase, action, and session info. Use `full` for the activity counter, current tool, and recent lifecycle events; the counter reports agent iterations, not estimated completion. |
 | `/stop` | Kill all running background processes and interrupt the running agent. |
 | `/model [provider:model]` | Show or change the model. Supports provider switches (`/model zai:glm-5`), custom endpoints (`/model custom:model`), named custom providers (`/model custom:local:qwen`), and auto-detect (`/model custom`). |
 | `/provider` | Show provider availability and auth status. |

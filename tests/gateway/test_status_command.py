@@ -49,6 +49,8 @@ def _make_runner(session_entry: SessionEntry):
     runner.session_store.rewrite_transcript = MagicMock()
     runner.session_store.update_session = MagicMock()
     runner._running_agents = {}
+    runner._running_agents_ts = {}
+    runner._task_runtime = {}
     runner._pending_messages = {}
     runner._pending_approvals = {}
     runner._session_db = MagicMock()
@@ -79,14 +81,22 @@ async def test_status_command_reports_running_agent_without_interrupt(monkeypatc
     )
     runner = _make_runner(session_entry)
     running_agent = MagicMock()
+    running_agent.get_activity_summary.return_value = {
+        "last_activity_desc": "waiting for provider response (streaming)",
+        "current_tool": None,
+        "api_call_count": 1,
+        "max_iterations": 90,
+    }
     runner._running_agents[build_session_key(_make_source())] = running_agent
 
     result = await runner._handle_message(_make_event("/status"))
 
-    assert "**Session ID:** `sess-1`" in result
+    assert "🟢 **Working**" in result
+    assert "**Task:** Current session task" in result
+    assert "**Session:** `sess-1`" in result
     assert "**Tokens:** 321" in result
-    assert "**Agent Running:** Yes ⚡" in result
-    assert "**Title:**" not in result
+    assert "**Phase:** Thinking" in result
+    assert "**Current action:** Waiting for the model response" in result
     running_agent.interrupt.assert_not_called()
     assert runner._pending_messages == {}
 
@@ -107,8 +117,90 @@ async def test_status_command_includes_session_title_when_present():
 
     result = await runner._handle_message(_make_event("/status"))
 
-    assert "**Session ID:** `sess-1`" in result
-    assert "**Title:** My titled session" in result
+    assert "**Session:** `sess-1`" in result
+    assert "**Task:** My titled session" in result
+
+
+@pytest.mark.asyncio
+async def test_status_full_includes_activity_counter_tool_and_recent_events():
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        total_tokens=321,
+    )
+    runner = _make_runner(session_entry)
+    key = session_entry.session_key
+    running_agent = MagicMock()
+    running_agent.get_activity_summary.return_value = {
+        "last_activity_desc": "executing tool: web_search",
+        "seconds_since_activity": 1.0,
+        "current_tool": "web_search",
+        "api_call_count": 6,
+        "max_iterations": 90,
+    }
+    runner._running_agents[key] = running_agent
+    runner._record_task_runtime(
+        key, state="working", phase="Using tools", action="Running web search",
+        tool="web_search", event="Started web search", reset=True,
+    )
+
+    result = await runner._handle_message(_make_event("/status full"))
+
+    assert "**API iteration:** 6/90 (activity counter)" in result
+    assert "**Current tool:** `web_search`" in result
+    assert "**Recent activity:**" in result
+    assert "Started web search" in result
+    assert "**Created:**" in result
+
+
+@pytest.mark.asyncio
+async def test_status_reports_pending_agent_as_starting():
+    from gateway.run import _AGENT_PENDING_SENTINEL
+
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+    )
+    runner = _make_runner(session_entry)
+    runner._running_agents[session_entry.session_key] = _AGENT_PENDING_SENTINEL
+
+    result = await runner._handle_message(_make_event("/status"))
+
+    assert "🟡 **Starting**" in result
+    assert "**Current action:** Preparing the agent" in result
+
+
+@pytest.mark.asyncio
+async def test_status_reports_user_approval_blocker():
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+    )
+    runner = _make_runner(session_entry)
+    key = session_entry.session_key
+    runner._running_agents[key] = MagicMock()
+    runner._record_task_runtime(
+        key, state="waiting", phase="Waiting",
+        action="Waiting for command approval",
+        blocker="Your approval is required", reset=True,
+    )
+
+    result = await runner._handle_message(_make_event("/status"))
+
+    assert "🟠 **Waiting for you**" in result
+    assert "**Blocker:** Your approval is required" in result
 
 
 @pytest.mark.asyncio
@@ -173,7 +265,7 @@ async def test_status_command_bypasses_active_session_guard():
 
     async def fake_handler(event):
         handler_called_with.append(event)
-        return "📊 **Hermes Gateway Status**\n**Agent Running:** Yes ⚡"
+        return "📊 **Hermes Gateway Status**\n🟢 **Working**"
 
     # Concrete subclass to avoid abstract method errors
     class _ConcreteAdapter(BasePlatformAdapter):
@@ -209,6 +301,6 @@ async def test_status_command_bypasses_active_session_guard():
 
     assert handler_called_with, "/status handler was never called (event was queued or dropped)"
     assert sent, "/status response was never sent"
-    assert "Agent Running" in sent[0]
+    assert "Working" in sent[0]
     assert not interrupt_event.is_set(), "/status incorrectly triggered an agent interrupt"
     assert session_key not in adapter._pending_messages, "/status was incorrectly queued"
