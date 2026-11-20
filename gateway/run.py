@@ -7150,6 +7150,57 @@ class GatewayRunner:
         except Exception as e:
             logger.debug("Next-message expiration fallback check failed: %s", e)
 
+    async def _deliver_exec_approval_prompt(
+        self,
+        *,
+        adapter: Any,
+        chat_id: str,
+        session_key: str,
+        command: str,
+        description: str,
+        metadata: Optional[dict] = None,
+    ) -> None:
+        """Deliver button approval when possible, otherwise a short text prompt."""
+        if getattr(type(adapter), "send_exec_approval", None) is not None:
+            try:
+                result = await adapter.send_exec_approval(
+                    chat_id=chat_id,
+                    command=command,
+                    session_key=session_key,
+                    description=description,
+                    metadata=metadata,
+                )
+                if getattr(result, "success", False):
+                    return
+                logger.warning(
+                    "Button-based approval returned a soft failure; "
+                    "falling back to text: %s",
+                    getattr(result, "error", None) or "unknown error",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Button-based approval failed, falling back to text: %s",
+                    exc,
+                )
+
+        def _compact_preview(value: Any, limit: int) -> str:
+            compact = re.sub(r"\s+", " ", str(value or "")).strip()
+            return compact[: limit - 3] + "..." if len(compact) > limit else compact
+
+        message = (
+            "⚠️ Dangerous command requires approval\n"
+            f"Command: {_compact_preview(command, 200)}\n"
+            f"Reason: {_compact_preview(description, 300)}\n\n"
+            "Reply `/approve` to execute, `/approve session` to approve this pattern "
+            "for the session, `/approve always` to approve permanently, or `/deny` to cancel."
+        )
+        result = await adapter.send(chat_id, message, metadata=metadata)
+        if not getattr(result, "success", False):
+            logger.error(
+                "Failed to send text approval fallback: %s",
+                getattr(result, "error", None) or "unknown error",
+            )
+
     async def _run_agent(
         self,
         message: str,
@@ -7720,41 +7771,14 @@ class GatewayRunner:
                         event="Requested approval for a command",
                     )
 
-                # Prefer button-based approval when the adapter supports it.
-                # Check the *class* for the method, not the instance — avoids
-                # false positives from MagicMock auto-attribute creation in tests.
-                if getattr(type(_status_adapter), "send_exec_approval", None) is not None:
-                    try:
-                        asyncio.run_coroutine_threadsafe(
-                            _status_adapter.send_exec_approval(
-                                chat_id=_status_chat_id,
-                                command=cmd,
-                                session_key=_approval_session_key,
-                                description=desc,
-                                metadata=_status_thread_metadata,
-                            ),
-                            _loop_for_step,
-                        ).result(timeout=15)
-                        return
-                    except Exception as _e:
-                        logger.warning(
-                            "Button-based approval failed, falling back to text: %s", _e
-                        )
-
-                # Fallback: plain text approval prompt
-                cmd_preview = cmd[:200] + "..." if len(cmd) > 200 else cmd
-                msg = (
-                    f"⚠️ **Dangerous command requires approval:**\n"
-                    f"```\n{cmd_preview}\n```\n"
-                    f"Reason: {desc}\n\n"
-                    f"Reply `/approve` to execute, `/approve session` to approve this pattern "
-                    f"for the session, `/approve always` to approve permanently, or `/deny` to cancel."
-                )
                 try:
                     asyncio.run_coroutine_threadsafe(
-                        _status_adapter.send(
-                            _status_chat_id,
-                            msg,
+                        self._deliver_exec_approval_prompt(
+                            adapter=_status_adapter,
+                            chat_id=_status_chat_id,
+                            session_key=_approval_session_key,
+                            command=cmd,
+                            description=desc,
                             metadata=_status_thread_metadata,
                         ),
                         _loop_for_step,

@@ -45,8 +45,14 @@ def _ensure_telegram_mock():
 
 _ensure_telegram_mock()
 
-from gateway.platforms.telegram import TelegramAdapter
+from gateway.platforms.telegram import (
+    TelegramAdapter,
+    _truncate_utf16,
+    _utf16_length,
+    build_exec_approval_text,
+)
 from gateway.config import PlatformConfig
+from gateway.platforms.base import SendResult
 
 
 def _make_adapter():
@@ -146,8 +152,20 @@ class TestTelegramExecApproval:
         )
 
         kwargs = adapter._bot.send_message.call_args[1]
-        assert "..." in kwargs["text"]
+        assert "…" in kwargs["text"]
         assert len(kwargs["text"]) < 5000
+
+    def test_utf16_helpers_count_and_preserve_emoji(self):
+        assert _utf16_length("a🚀b") == 4
+        assert _truncate_utf16("a🚀b", 3) == "a…"
+
+    def test_complete_prompt_is_bounded_with_long_command_and_reason(self):
+        text = build_exec_approval_text("🚀" * 5000, "reason " * 2000)
+
+        assert _utf16_length(text) <= TelegramAdapter.MAX_MESSAGE_LENGTH
+        assert text.startswith("⚠️ Command Approval Required")
+        assert "\n\nReason: " in text
+        assert "…" in text
         
     @pytest.mark.asyncio
     async def test_does_not_use_parse_mode(self):
@@ -340,13 +358,49 @@ class TestTelegramExecApproval:
         kwargs = adapter._bot.send_message.call_args[1]
         text = kwargs["text"]
 
-        # New implementation truncates the command itself at 3500 chars.
-        assert ("x" * 3500) in text
-        assert ("x" * 3501) not in text
-        assert "..." in text
+        # The complete prompt, including its reason, stays inside Telegram's
+        # UTF-16-aware message budget.
+        assert _utf16_length(text) <= TelegramAdapter.MAX_MESSAGE_LENGTH
+        assert "…" in text
 
         # Still plain text.
         assert "parse_mode" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_retries_once_with_smaller_prompt_on_length_rejection(self):
+        adapter = _make_adapter()
+        mock_msg = MagicMock(message_id=42)
+        adapter._bot.send_message = AsyncMock(
+            side_effect=[RuntimeError("Message is too long"), mock_msg]
+        )
+
+        result = await adapter.send_exec_approval(
+            chat_id="12345",
+            command="x" * 10000,
+            session_key="s",
+            description="reason " * 1000,
+        )
+
+        assert result.success is True
+        assert adapter._bot.send_message.await_count == 2
+        first_text = adapter._bot.send_message.await_args_list[0].kwargs["text"]
+        retry_text = adapter._bot.send_message.await_args_list[1].kwargs["text"]
+        assert _utf16_length(first_text) <= 4096
+        assert _utf16_length(retry_text) <= 3500
+        assert len(adapter._approval_state) == 1
+
+    @pytest.mark.asyncio
+    async def test_does_not_retry_unrelated_or_ambiguous_failure(self):
+        adapter = _make_adapter()
+        adapter._bot.send_message = AsyncMock(side_effect=RuntimeError("Timed out"))
+
+        result = await adapter.send_exec_approval(
+            chat_id="12345", command="echo test", session_key="s"
+        )
+
+        assert result.success is False
+        assert adapter._bot.send_message.await_count == 1
+        assert adapter._approval_state == {}
 
 
     @pytest.mark.asyncio
@@ -432,6 +486,70 @@ class TestTelegramExecApproval:
         assert kwargs["message_thread_id"] == 111
 
 
+class _GatewayApprovalAdapter:
+    def __init__(self, button_result):
+        self.button_result = button_result
+        self.button_calls = []
+        self.send = AsyncMock(return_value=SendResult(success=True, message_id="fallback"))
+
+    async def send_exec_approval(self, **kwargs):
+        self.button_calls.append(kwargs)
+        return self.button_result
+
+
+class TestGatewayApprovalFallback:
+    @pytest.mark.asyncio
+    async def test_soft_button_failure_sends_short_text_fallback(self):
+        from gateway.run import GatewayRunner
+
+        runner = object.__new__(GatewayRunner)
+        adapter = _GatewayApprovalAdapter(
+            SendResult(success=False, error="Message is too long")
+        )
+
+        await runner._deliver_exec_approval_prompt(
+            adapter=adapter,
+            chat_id="12345",
+            session_key="session-key",
+            command=("dangerous command\n" * 100),
+            description=("long reason\n" * 100),
+            metadata={"thread_id": "99"},
+        )
+
+        adapter.send.assert_awaited_once()
+        args, kwargs = adapter.send.await_args
+        fallback = args[1]
+        assert args[0] == "12345"
+        assert kwargs["metadata"] == {"thread_id": "99"}
+        assert "/approve" in fallback
+        assert "/deny" in fallback
+        command_preview = fallback.split("Command: ", 1)[1].split("\nReason: ", 1)[0]
+        reason_preview = fallback.split("\nReason: ", 1)[1].split("\n\n", 1)[0]
+        assert len(command_preview) <= 200
+        assert len(reason_preview) <= 300
+        assert "\n" not in command_preview
+        assert "\n" not in reason_preview
+
+    @pytest.mark.asyncio
+    async def test_successful_button_send_skips_text_fallback(self):
+        from gateway.run import GatewayRunner
+
+        runner = object.__new__(GatewayRunner)
+        adapter = _GatewayApprovalAdapter(
+            SendResult(success=True, message_id="button-message")
+        )
+
+        await runner._deliver_exec_approval_prompt(
+            adapter=adapter,
+            chat_id="12345",
+            session_key="session-key",
+            command="echo test",
+            description="test",
+        )
+
+        adapter.send.assert_not_awaited()
+
+
 # ===========================================================================
 # _handle_callback_query — approval button clicks
 # ===========================================================================
@@ -480,6 +598,30 @@ class TestTelegramApprovalCallback:
 
         # State should be cleaned up
         assert 1 not in adapter._approval_state
+
+    @pytest.mark.asyncio
+    async def test_resolved_audit_text_stays_within_telegram_limit(self):
+        adapter = _make_adapter()
+        adapter._approval_state[1] = "some-session"
+
+        query = AsyncMock()
+        query.data = "ea:once:1"
+        query.message = MagicMock()
+        query.message.chat_id = 12345
+        query.message.text = build_exec_approval_text("🚀" * 5000, "r" * 2000)
+        query.from_user = MagicMock()
+        query.from_user.id = 123
+        query.from_user.first_name = "Approver 🚀"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+
+        update = MagicMock(callback_query=query)
+        with patch("tools.approval.resolve_gateway_approval", return_value=1):
+            await adapter._handle_callback_query(update, MagicMock())
+
+        resolved = query.edit_message_text.await_args.kwargs["text"]
+        assert resolved.startswith("✅ Approved once by Approver 🚀")
+        assert _utf16_length(resolved) <= TelegramAdapter.MAX_MESSAGE_LENGTH
 
     @pytest.mark.asyncio
     async def test_deny_button(self):
