@@ -7972,6 +7972,9 @@ class AIAgent:
                             **api_kwargs, token=credentials(),
                             on_delta=on_qoder_delta,
                             is_interrupted=lambda: self.is_interrupted,
+                            task_id=effective_task_id,
+                            session_id=self.session_id or "",
+                            workspace_root=os.getcwd(),
                         )
                         qoder_model = response.model
                         qoder_credits = response.qoder_credits

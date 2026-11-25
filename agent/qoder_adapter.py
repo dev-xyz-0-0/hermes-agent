@@ -4,6 +4,8 @@ import asyncio
 import importlib
 import json
 import os
+import re
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
@@ -12,6 +14,7 @@ REQUEST_TIMEOUT = 120
 INTERRUPT_TIMEOUT = 3
 CLEANUP_TIMEOUT = 15
 _CONTEXT_WINDOWS = {}
+_READ_TOOLS = ("read_file", "search_files")
 
 
 class QoderError(RuntimeError):
@@ -51,6 +54,10 @@ def _client(sdk, token, directory, model=None, system_prompt=None):
     env["QODER_CONFIG_DIR"] = directory
     env["HOME"] = directory
     env["USERPROFILE"] = directory
+    proxy = (
+        os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+        or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+    )
     return sdk.QoderSDKClient(options=sdk.QoderAgentOptions(
         auth=sdk.access_token(token),
         model=None if model == DEFAULT_MODEL else model,
@@ -63,7 +70,62 @@ def _client(sdk, token, directory, model=None, system_prompt=None):
         include_partial_messages=True,
         cwd=directory,
         env=env,
+        proxy=proxy,
     ))
+
+
+def _workspace_path(root, value):
+    path = Path(value).expanduser()
+    resolved = (Path(root) / path).resolve() if not path.is_absolute() else path.resolve()
+    try:
+        resolved.relative_to(Path(root).resolve())
+    except ValueError:
+        raise ValueError(f"Access denied outside the Qoder workspace: {value}") from None
+    return str(resolved)
+
+
+def _workspace_args(name, arguments, root):
+    arguments = dict(arguments)
+    if name in {"read_file", "write_file"} or (name == "patch" and arguments.get("mode", "replace") == "replace"):
+        arguments["path"] = _workspace_path(root, arguments.get("path", ""))
+    elif name == "search_files":
+        arguments["path"] = _workspace_path(root, arguments.get("path", "."))
+    elif name == "patch":
+        patch = arguments.get("patch", "")
+        def absolute_header(match):
+            return f"*** {match.group(1)} File: {_workspace_path(root, match.group(2).strip())}"
+        arguments["patch"] = re.sub(
+            r"^\*\*\*\s+(Update|Add|Delete)\s+File:\s*(.+)$",
+            absolute_header, patch, flags=re.MULTILINE,
+        )
+    return arguments
+
+
+def _workspace_mcp(sdk, root, task_id, session_id):
+    from model_tools import handle_function_call
+    from tools.registry import registry
+
+    names = list(_READ_TOOLS)
+    tools = []
+    for name in names:
+        schema = registry.get_schema(name)
+
+        async def dispatch(arguments, _name=name):
+            try:
+                safe_args = _workspace_args(_name, arguments, root)
+            except ValueError as exc:
+                return {"content": [{"type": "text", "text": str(exc)}], "is_error": True}
+
+            output = handle_function_call(
+                _name, safe_args, task_id=task_id, session_id=session_id,
+                enabled_tools=names,
+            )
+            return {"content": [{"type": "text", "text": output}]}
+
+        tools.append(sdk.tool(name, schema.get("description", ""), schema["parameters"])(dispatch))
+    server = sdk.create_sdk_mcp_server("hermes_workspace", tools=tools)
+    qualified = [f"mcp__hermes_workspace__{name}" for name in names]
+    return server, qualified
 
 
 async def _close(client, *, interrupt=False):
@@ -93,7 +155,7 @@ def discover_models(token):
         with TemporaryDirectory(prefix="hermes-qoder-") as directory:
             client = _client(sdk, token, directory)
             try:
-                async with asyncio.timeout(20):
+                async with asyncio.timeout(60):
                     await client.connect()
                     models = await client.get_available_models()
                     return {
@@ -169,7 +231,8 @@ def _prompt(messages):
     )
 
 
-def request(messages, model, token, on_delta, is_interrupted):
+def request(messages, model, token, on_delta, is_interrupted, *, task_id=None, session_id=None,
+            workspace_root=None):
     sdk = _sdk()
     system, prompt = _prompt(messages)
     deltas = []
@@ -177,6 +240,13 @@ def request(messages, model, token, on_delta, is_interrupted):
     async def complete():
         with TemporaryDirectory(prefix="hermes-qoder-") as directory:
             client = _client(sdk, token, directory, model, system)
+            if os.environ.get("HERMES_QODER_WORKSPACE_READ") == "1":
+                server, names = _workspace_mcp(
+                    sdk, workspace_root or os.getcwd(), task_id or directory, session_id or "",
+                )
+                client.options.mcp_servers = {"hermes_workspace": server}
+                client.options.tools = names
+                client.options.allowed_tools = names
             interrupted = False
             try:
                 async with asyncio.timeout(REQUEST_TIMEOUT):

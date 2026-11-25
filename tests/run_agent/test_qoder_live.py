@@ -208,6 +208,7 @@ def test_live_qoder_mcp_fixture_contract(live_qoder, tmp_path):
         )
         client.options.mcp_servers = {"hermes": sdk.create_sdk_mcp_server("hermes", tools=[lookup])}
         client.options.tools = [FIXTURE_TOOL]
+        client.options.allowed_tools = [FIXTURE_TOOL]
         observed = []
         final = None
         try:
@@ -227,6 +228,7 @@ def test_live_qoder_mcp_fixture_contract(live_qoder, tmp_path):
                         final = message.result
         finally:
             await qoder_adapter._close(client)
+        print(f"MCP observed tool blocks: {len(observed)}; fixture calls: {len(calls)}")
         assert observed == [FIXTURE_TOOL]
         assert calls == ["smoke-record"]
         assert final and record in final

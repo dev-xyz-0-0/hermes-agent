@@ -216,7 +216,15 @@ hermes model
 
 Set `QODER_PERSONAL_ACCESS_TOKEN` in the Hermes process environment or profile `.env` using a personal access token from the Qoder console. For a running gateway, apply the environment to the gateway service and restart it. In `hermes model`, choose **More providers** and then **Qoder**. In an existing chat, use `/model qoder` for the Qoder account default or `/model qoder:<model-id>` for an account-visible model. Add `--global` to save a chat model switch.
 
-Hermes stores the transcript and sends the bounded text history with each turn. Replies stream as they arrive. Qoder tools, Hermes tools, attachments, and Qoder Cloud Agent are outside this preview. Hermes reports Qoder credits when the SDK returns them. Auxiliary tasks use Hermes' auxiliary-provider configuration.
+Hermes stores the transcript and sends the bounded text history with each turn. Replies stream as they arrive. Attachments and Qoder Cloud Agent are outside this preview. Hermes reports Qoder credits when the SDK returns them. Auxiliary tasks use Hermes' auxiliary-provider configuration.
+
+An experimental read-only workspace bridge is available behind a second opt-in flag:
+
+```bash
+export HERMES_QODER_WORKSPACE_READ=1
+```
+
+It exposes only Hermes' existing `read_file` and `search_files` dispatch to Qoder, confines paths to the workspace active when the turn starts, and leaves file writes disabled. Do not enable it for untrusted workspaces. The bridge remains a pilot until the authenticated release checks below pass.
 
 [Qoder SDK authentication](https://docs.qoder.com/cli/sdk/authentication) · [Qoder Python SDK reference](https://docs.qoder.com/cli/sdk/references-python)
 
@@ -233,13 +241,13 @@ The suite exercises streaming, persisted history, cancellation and subprocess cl
 
 #### Pending work checklist
 
-Qoder is a text-only preview. The authenticated checks are pending because the workspace test process could not see the token.
+Qoder remains a text-only preview. Results below were recorded on 2026-11-25 with Qoder Agent SDK 1.0.17 and bundled `qodercli` 1.1.79.
 
-- [ ] After restarting the workspace, confirm that the test process can read `QODER_PERSONAL_ACCESS_TOKEN` without displaying it. Install the `qoder` extra in the Hermes test environment and run the authenticated suite above.
-- [ ] Verify streamed text, saved-session reload, cancellation and subprocess cleanup, model switching, and disabled tool access in the CLI and a disposable gateway session. Record the SDK and CLI versions and the results. Remove the text preview flag after these checks pass.
-- [ ] Verify the test-only MCP fixture lookup. Confirm exactly one invocation and that Qoder uses the returned value in its answer.
-- [ ] After the fixture test passes, implement the opt-in workspace read pilot through Hermes' file-tool dispatch. Verify allowed reads, denied paths, transcript persistence, and cancellation without duplicate dispatch.
-- [ ] After the read pilot passes, implement workspace edits through Hermes' file tools and approvals. Test that approved edits apply once, denied edits leave the file untouched, and retries or cancellation cannot replay an edit.
+- [x] The restarted test process can read `QODER_PERSONAL_ACCESS_TOKEN` without displaying it, and the `qoder` extra is installed in the Hermes test environment.
+- [ ] Authenticated suite: the initial direct-network run produced `1 passed, 3 failed` because Hermes removed the workspace proxy from the isolated qodercli environment. Passing the proxy through the SDK's dedicated `proxy` option restored authenticated requests. Streamed first turns now complete, but saved-session follow-ups and repeated model discovery still time out intermittently upstream; the latest focused rerun failed both checks. Cancellation/subprocess cleanup and disposable gateway release checks therefore remain blocked. Keep `HERMES_QODER_PREVIEW=1`.
+- [x] Test-only MCP fixture lookup: focused authenticated rerun passed with one observed tool block, exactly one fixture handler invocation, and the returned value in the final answer. The SDK requires the tool in both `tools` and `allowed_tools`.
+- [ ] Opt-in workspace read pilot implemented through Hermes `read_file` and `search_files` dispatch with workspace-root confinement. Deterministic tests pass for allowed dispatch and denied traversal. Authenticated verification of allowed reads, transcript persistence, and cancellation without duplicate dispatch remains blocked by the Qoder timeout issue above.
+- [ ] Workspace edits remain disabled. Implement them through Hermes file tools and one-shot approvals only after the authenticated read pilot passes; then verify approved-once, denied-untouched, and no replay after retry or cancellation.
 
 ## Custom & Self-Hosted LLM Providers
 

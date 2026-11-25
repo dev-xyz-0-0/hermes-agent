@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sys
 from types import SimpleNamespace
 
@@ -122,11 +123,56 @@ def test_qoder_request_replays_text_and_streams_once(qoder):
     assert client.options.model is None
     assert client.options.tools == client.options.skills == client.options.setting_sources == []
     assert client.options.mcp_servers == {}
+    assert client.options.proxy == os.environ.get("HTTPS_PROXY")
     assert client.disconnected
     assert deltas == ["Hello"]
     assert response.choices[0].message.content == "Hello"
     assert response.usage.total_tokens == 13
     assert response.qoder_credits == 0.2
+
+
+def test_qoder_client_uses_lowercase_proxy_fallback(qoder, monkeypatch, tmp_path):
+    clients, _ = qoder
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    monkeypatch.setenv("https_proxy", "http://proxy.example:8080")
+
+    qoder_adapter._client(qoder_adapter._sdk(), "test-token", str(tmp_path))
+
+    assert clients[-1].options.proxy == "http://proxy.example:8080"
+
+
+def test_qoder_workspace_paths_stay_inside_root(tmp_path):
+    inside = qoder_adapter._workspace_args("read_file", {"path": "notes.txt"}, tmp_path)
+    assert inside["path"] == str(tmp_path / "notes.txt")
+    with pytest.raises(ValueError, match="outside the Qoder workspace"):
+        qoder_adapter._workspace_args("read_file", {"path": "../secret.txt"}, tmp_path)
+
+
+def test_qoder_workspace_reads_dispatch_through_hermes(monkeypatch, tmp_path):
+    class FakeSDK:
+        @staticmethod
+        def tool(name, description, schema):
+            return lambda handler: SimpleNamespace(name=name, handler=handler)
+
+        @staticmethod
+        def create_sdk_mcp_server(name, tools):
+            return SimpleNamespace(name=name, tools=tools)
+
+    dispatched = []
+    monkeypatch.setattr("model_tools.handle_function_call", lambda name, args, **kw: dispatched.append((name, args)) or '{"success": true}')
+    server, names = qoder_adapter._workspace_mcp(FakeSDK, tmp_path, "turn-1", "session-1")
+    read = next(tool for tool in server.tools if tool.name == "read_file")
+    arguments = {"path": "file.txt"}
+
+    result = asyncio.run(read.handler(arguments))
+
+    assert names == [
+        "mcp__hermes_workspace__read_file", "mcp__hermes_workspace__search_files",
+    ]
+    assert result["content"][0]["text"] == '{"success": true}'
+    assert len(dispatched) == 1
+    assert dispatched[0][1]["path"] == str(tmp_path / "file.txt")
 
 
 def test_qoder_cancellation_interrupts_and_disconnects(qoder):
