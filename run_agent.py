@@ -8452,6 +8452,21 @@ class AIAgent:
                             "error": str(api_error),
                         }
 
+                    if self.api_mode == "qoder_sdk" and getattr(api_error, "tool_dispatched", False):
+                        self._emit_status(str(api_error))
+                        self._stream_callback = None
+                        self.clear_interrupt()
+                        self._persist_session(messages, conversation_history)
+                        self._cleanup_task_resources(effective_task_id)
+                        return {
+                            "final_response": "",
+                            "messages": messages,
+                            "api_calls": api_call_count,
+                            "completed": False,
+                            "partial": False,
+                            "error": str(api_error),
+                        }
+
                     # -----------------------------------------------------------
                     # Surrogate character recovery.  UnicodeEncodeError happens
                     # when the messages contain lone surrogates (U+D800..U+DFFF)

@@ -142,6 +142,7 @@ include = ["agent", "tools", "tools.*", "hermes_cli", "gateway", "gateway.*", "c
 testpaths = ["tests"]
 markers = [
     "integration: marks tests requiring external services (API keys, Modal, etc.)",
+    "test_timeout(seconds): overrides the default 30-second per-test alarm",
 ]
 addopts = "-m 'not integration' -n auto"
 asyncio_mode = "auto"

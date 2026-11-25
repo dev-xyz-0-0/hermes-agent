@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -15,13 +16,16 @@ INTERRUPT_TIMEOUT = 3
 CLEANUP_TIMEOUT = 15
 _CONTEXT_WINDOWS = {}
 _READ_TOOLS = ("read_file", "search_files")
+_WRITE_TOOLS = ("write_file", "patch")
+logger = logging.getLogger(__name__)
 
 
 class QoderError(RuntimeError):
-    def __init__(self, message, *, status_code=None, partial_text=""):
+    def __init__(self, message, *, status_code=None, partial_text="", tool_dispatched=False):
         super().__init__(message)
         self.status_code = status_code
         self.partial_text = partial_text
+        self.tool_dispatched = tool_dispatched
 
 
 def preview_enabled():
@@ -101,28 +105,59 @@ def _workspace_args(name, arguments, root):
     return arguments
 
 
-def _workspace_mcp(sdk, root, task_id, session_id):
+def _workspace_mcp(sdk, root, task_id, session_id, *, allow_write=False,
+                   dispatched_tools=None):
     from model_tools import handle_function_call
+    from tools.approval import request_explicit_approval
     from tools.registry import registry
 
-    names = list(_READ_TOOLS)
+    names = list(_READ_TOOLS) + (list(_WRITE_TOOLS) if allow_write else [])
+    dispatched_tools = dispatched_tools if dispatched_tools is not None else set()
+    edit_results = {}
     tools = []
-    for name in names:
-        schema = registry.get_schema(name)
-
-        async def dispatch(arguments, _name=name):
+    def make_dispatch(name):
+        async def dispatch(arguments):
             try:
-                safe_args = _workspace_args(_name, arguments, root)
+                safe_args = _workspace_args(name, arguments, root)
             except ValueError as exc:
                 return {"content": [{"type": "text", "text": str(exc)}], "is_error": True}
 
+            edit_key = None
+            if name in _WRITE_TOOLS:
+                edit_key = (name, json.dumps(safe_args, sort_keys=True, ensure_ascii=False))
+                if edit_key in edit_results:
+                    return edit_results[edit_key]
+                edit_results[edit_key] = {
+                    "content": [{"type": "text", "text": "Duplicate edit dispatch denied."}],
+                    "is_error": True,
+                }
+                approved = request_explicit_approval(
+                    title=f"Qoder workspace {name}",
+                    description="Qoder requested a workspace edit through Hermes file tools.",
+                    command=f"{name} {safe_args.get('path', 'workspace patch')}",
+                )
+                if not approved:
+                    denied = {
+                        "content": [{"type": "text", "text": "Workspace edit denied."}],
+                        "is_error": True,
+                    }
+                    edit_results[edit_key] = denied
+                    return denied
+
+            dispatched_tools.add(name)
             output = handle_function_call(
-                _name, safe_args, task_id=task_id, session_id=session_id,
+                name, safe_args, task_id=task_id, session_id=session_id,
                 enabled_tools=names,
             )
-            return {"content": [{"type": "text", "text": output}]}
+            result = {"content": [{"type": "text", "text": output}]}
+            if edit_key is not None:
+                edit_results[edit_key] = result
+            return result
+        return dispatch
 
-        tools.append(sdk.tool(name, schema.get("description", ""), schema["parameters"])(dispatch))
+    for name in names:
+        schema = registry.get_schema(name)
+        tools.append(sdk.tool(name, schema.get("description", ""), schema["parameters"])(make_dispatch(name)))
     server = sdk.create_sdk_mcp_server("hermes_workspace", tools=tools)
     qualified = [f"mcp__hermes_workspace__{name}" for name in names]
     return server, qualified
@@ -236,22 +271,31 @@ def request(messages, model, token, on_delta, is_interrupted, *, task_id=None, s
     sdk = _sdk()
     system, prompt = _prompt(messages)
     deltas = []
+    dispatched_tools = set()
 
     async def complete():
         with TemporaryDirectory(prefix="hermes-qoder-") as directory:
             client = _client(sdk, token, directory, model, system)
+            allowed_qoder_tools = set()
             if os.environ.get("HERMES_QODER_WORKSPACE_READ") == "1":
                 server, names = _workspace_mcp(
                     sdk, workspace_root or os.getcwd(), task_id or directory, session_id or "",
+                    allow_write=os.environ.get("HERMES_QODER_WORKSPACE_WRITE") == "1",
+                    dispatched_tools=dispatched_tools,
                 )
                 client.options.mcp_servers = {"hermes_workspace": server}
                 client.options.tools = names
                 client.options.allowed_tools = names
+                allowed_qoder_tools.update(names)
             interrupted = False
             try:
                 async with asyncio.timeout(REQUEST_TIMEOUT):
                     await client.connect(prompt)
-                    return await _receive(sdk, client, model, deltas, on_delta)
+                    return await _receive(
+                        sdk, client, model, deltas, on_delta,
+                        allowed_tools=allowed_qoder_tools,
+                        dispatched_tools=dispatched_tools,
+                    )
             except (asyncio.CancelledError, TimeoutError):
                 interrupted = True
                 raise
@@ -276,6 +320,8 @@ def request(messages, model, token, on_delta, is_interrupted, *, task_id=None, s
     except Exception as exc:
         if isinstance(exc, InterruptedError):
             raise
+        if isinstance(exc, QoderError):
+            exc.tool_dispatched = exc.tool_dispatched or bool(dispatched_tools)
         if isinstance(exc, QoderError) and not deltas:
             raise
         if isinstance(exc, TimeoutError):
@@ -283,14 +329,19 @@ def request(messages, model, token, on_delta, is_interrupted, *, task_id=None, s
         if isinstance(exc, QoderError):
             message = str(exc)
         else:
+            logger.exception("Qoder SDK request failed before error normalization")
             message = f"Qoder SDK request failed ({type(exc).__name__}). Check credentials and the bundled qodercli."
         raise QoderError(
             message, status_code=getattr(exc, "status_code", None),
             partial_text="".join(deltas),
+            tool_dispatched=bool(dispatched_tools),
         ) from None
 
 
-async def _receive(sdk, client, model, deltas, on_delta):
+async def _receive(sdk, client, model, deltas, on_delta, *, allowed_tools=None,
+                   dispatched_tools=None):
+    allowed_tools = set(allowed_tools or ())
+    dispatched_tools = dispatched_tools if dispatched_tools is not None else set()
     complete_text = []
     credits = []
     seen_requests = set()
@@ -312,7 +363,9 @@ async def _receive(sdk, client, model, deltas, on_delta):
                     seen_requests.add(request_id)
             for block in message.content:
                 if isinstance(block, sdk.ToolUseBlock):
-                    raise QoderError("Qoder returned a tool call during a text-only turn.")
+                    if block.name not in allowed_tools:
+                        raise QoderError("Qoder returned a tool call during a text-only turn.")
+                    dispatched_tools.add(block.name)
                 if isinstance(block, sdk.TextBlock):
                     complete_text.append(block.text)
         elif isinstance(message, sdk.ResultMessage):

@@ -224,7 +224,15 @@ An experimental read-only workspace bridge is available behind a second opt-in f
 export HERMES_QODER_WORKSPACE_READ=1
 ```
 
-It exposes only Hermes' existing `read_file` and `search_files` dispatch to Qoder, confines paths to the workspace active when the turn starts, and leaves file writes disabled. Do not enable it for untrusted workspaces. The bridge remains a pilot until the authenticated release checks below pass.
+It exposes only Hermes' existing `read_file` and `search_files` dispatch to Qoder and confines paths to the workspace active when the turn starts. File writes remain disabled unless the separate write flag below is also enabled. Do not enable it for untrusted workspaces. The bridge remains a pilot until the authenticated release checks below pass.
+
+After validating the read pilot, workspace edits can be enabled separately:
+
+```bash
+export HERMES_QODER_WORKSPACE_WRITE=1
+```
+
+The write flag has effect only when `HERMES_QODER_WORKSPACE_READ=1` is also set. It exposes Hermes' existing `write_file` and `patch` tools, confines their targets to the workspace, and requires a one-shot Hermes approval for every distinct edit. Duplicate dispatches in the same turn reuse the first result rather than applying the edit again.
 
 [Qoder SDK authentication](https://docs.qoder.com/cli/sdk/authentication) · [Qoder Python SDK reference](https://docs.qoder.com/cli/sdk/references-python)
 
@@ -244,10 +252,10 @@ The suite exercises streaming, persisted history, cancellation and subprocess cl
 Qoder remains a text-only preview. Results below were recorded on 2026-11-25 with Qoder Agent SDK 1.0.17 and bundled `qodercli` 1.1.79.
 
 - [x] The restarted test process can read `QODER_PERSONAL_ACCESS_TOKEN` without displaying it, and the `qoder` extra is installed in the Hermes test environment.
-- [ ] Authenticated suite: the initial direct-network run produced `1 passed, 3 failed` because Hermes removed the workspace proxy from the isolated qodercli environment. Passing the proxy through the SDK's dedicated `proxy` option restored authenticated requests. Streamed first turns now complete, but saved-session follow-ups and repeated model discovery still time out intermittently upstream; the latest focused rerun failed both checks. Cancellation/subprocess cleanup and disposable gateway release checks therefore remain blocked. Keep `HERMES_QODER_PREVIEW=1`.
+- [ ] Authenticated text suite: direct SDK and Hermes-adapter probes both completed two first turns, two saved-history follow-ups, and repeated discovery. Connect took 4.5–6.5s, first chunks 6.0–8.6s from startup, final results 6.6–9.1s, discovery under 0.1s after connect, and disconnect about 10s. The apparent intermittent failures were the test harness's cumulative 30-second `SIGALRM`, which interrupted the main thread after Qoder had already returned successful results. Qoder live tests now use an explicit 180-second per-test budget; production request timeouts and retries were not changed. The final authenticated suite passed `6 passed in 300.67s`, including repeated CLI/in-process gateway model selection and switch-back. A gateway session connected to an external disposable test chat is still pending because no test-chat credentials were available, so keep `HERMES_QODER_PREVIEW=1`.
 - [x] Test-only MCP fixture lookup: focused authenticated rerun passed with one observed tool block, exactly one fixture handler invocation, and the returned value in the final answer. The SDK requires the tool in both `tools` and `allowed_tools`.
-- [ ] Opt-in workspace read pilot implemented through Hermes `read_file` and `search_files` dispatch with workspace-root confinement. Deterministic tests pass for allowed dispatch and denied traversal. Authenticated verification of allowed reads, transcript persistence, and cancellation without duplicate dispatch remains blocked by the Qoder timeout issue above.
-- [ ] Workspace edits remain disabled. Implement them through Hermes file tools and one-shot approvals only after the authenticated read pilot passes; then verify approved-once, denied-untouched, and no replay after retry or cancellation.
+- [x] Opt-in workspace read pilot: authenticated checks passed for an allowed read through Hermes dispatch, traversal denial before dispatch, transcript persistence, and cancellation with exactly one read dispatch.
+- [x] Opt-in workspace edit pilot: Qoder tool blocks are accepted only for explicitly enabled workspace tools, post-dispatch failures are non-retryable, duplicate edit dispatches reuse the first result, and SDK handlers use a true single-argument signature. Authenticated checks passed for approved-once writes, denied edits leaving the file untouched, and cancellation with exactly one write dispatch. File writes remain behind both workspace opt-in flags and one-shot Hermes approvals.
 
 ## Custom & Self-Hosted LLM Providers
 

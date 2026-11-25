@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -163,6 +164,7 @@ def test_qoder_workspace_reads_dispatch_through_hermes(monkeypatch, tmp_path):
     monkeypatch.setattr("model_tools.handle_function_call", lambda name, args, **kw: dispatched.append((name, args)) or '{"success": true}')
     server, names = qoder_adapter._workspace_mcp(FakeSDK, tmp_path, "turn-1", "session-1")
     read = next(tool for tool in server.tools if tool.name == "read_file")
+    assert len(inspect.signature(read.handler).parameters) == 1
     arguments = {"path": "file.txt"}
 
     result = asyncio.run(read.handler(arguments))
@@ -173,6 +175,65 @@ def test_qoder_workspace_reads_dispatch_through_hermes(monkeypatch, tmp_path):
     assert result["content"][0]["text"] == '{"success": true}'
     assert len(dispatched) == 1
     assert dispatched[0][1]["path"] == str(tmp_path / "file.txt")
+
+
+def test_qoder_workspace_edit_approval_and_replay(monkeypatch, tmp_path):
+    class FakeSDK:
+        @staticmethod
+        def tool(name, description, schema):
+            return lambda handler: SimpleNamespace(name=name, handler=handler)
+
+        @staticmethod
+        def create_sdk_mcp_server(name, tools):
+            return SimpleNamespace(name=name, tools=tools)
+
+    approvals = []
+    dispatched = []
+    monkeypatch.setattr(
+        "tools.approval.request_explicit_approval",
+        lambda **kwargs: approvals.append(kwargs) or True,
+    )
+    monkeypatch.setattr(
+        "model_tools.handle_function_call",
+        lambda name, args, **kwargs: dispatched.append((name, args)) or '{"success": true}',
+    )
+    server, _ = qoder_adapter._workspace_mcp(
+        FakeSDK, tmp_path, "turn-edit", "session-1", allow_write=True,
+    )
+    write = next(tool for tool in server.tools if tool.name == "write_file")
+    arguments = {"path": "file.txt", "content": "changed"}
+
+    first = asyncio.run(write.handler(arguments))
+    replay = asyncio.run(write.handler(arguments))
+
+    assert first == replay
+    assert len(approvals) == 1
+    assert len(dispatched) == 1
+    assert dispatched[0][1]["path"] == str(tmp_path / "file.txt")
+
+
+def test_qoder_workspace_denied_edit_never_dispatches(monkeypatch, tmp_path):
+    class FakeSDK:
+        @staticmethod
+        def tool(name, description, schema):
+            return lambda handler: SimpleNamespace(name=name, handler=handler)
+
+        @staticmethod
+        def create_sdk_mcp_server(name, tools):
+            return SimpleNamespace(name=name, tools=tools)
+
+    dispatched = []
+    monkeypatch.setattr("tools.approval.request_explicit_approval", lambda **kwargs: False)
+    monkeypatch.setattr("model_tools.handle_function_call", lambda *args, **kwargs: dispatched.append(args))
+    server, _ = qoder_adapter._workspace_mcp(
+        FakeSDK, tmp_path, "turn-denied", "session-1", allow_write=True,
+    )
+    write = next(tool for tool in server.tools if tool.name == "write_file")
+
+    denied = asyncio.run(write.handler({"path": "file.txt", "content": "changed"}))
+
+    assert denied["is_error"]
+    assert not dispatched
 
 
 def test_qoder_cancellation_interrupts_and_disconnects(qoder):
@@ -192,6 +253,28 @@ def test_qoder_failure_after_output_retains_partial_text(qoder):
     assert error.value.status_code == 503
     assert error.value.partial_text == "Hello"
     assert clients[0].disconnected
+
+
+def test_qoder_allows_explicit_workspace_tool_block(qoder):
+    _, output = qoder
+    tool_name = "mcp__hermes_workspace__read_file"
+    output.insert(1, AssistantMessage(
+        model="qoder-model", usage={}, message_id=None, uuid=None,
+        content=[ToolUseBlock(name=tool_name)],
+    ))
+    dispatched = set()
+
+    class Client:
+        async def receive_response(self):
+            for item in output:
+                yield item
+
+    response = asyncio.run(qoder_adapter._receive(
+        qoder_adapter._sdk(), Client(), "qoder-model", [], lambda text: None,
+        allowed_tools={tool_name}, dispatched_tools=dispatched,
+    ))
+    assert response.choices[0].message.content == "Hello"
+    assert dispatched == {tool_name}
 
 
 def test_agent_qoder_turn_and_saved_history(qoder, monkeypatch):
@@ -234,6 +317,24 @@ def test_qoder_post_delta_error_does_not_replay(qoder, monkeypatch):
     assert result["final_response"] == "Hello"
     assert len(clients) == 1
     assert clients[0].disconnected
+
+
+def test_qoder_post_tool_error_does_not_replay(qoder, monkeypatch):
+    from tests.run_agent.test_provider_parity import _make_agent
+
+    calls = []
+
+    def fail_after_tool(**kwargs):
+        calls.append(kwargs)
+        raise qoder_adapter.QoderError("tool follow-up failed", tool_dispatched=True)
+
+    monkeypatch.setattr(qoder_adapter, "request", fail_after_tool)
+    agent = _make_agent(monkeypatch, "qoder")
+    result = agent.run_conversation("Question")
+
+    assert not result["completed"]
+    assert result["error"] == "tool follow-up failed"
+    assert len(calls) == 1
 
 
 def test_switch_from_qoder_restores_hermes_tools(qoder, monkeypatch):

@@ -3,12 +3,15 @@
 import asyncio
 import os
 import threading
+import time
 from importlib.metadata import version
 from uuid import uuid4
 
 import pytest
 
 from agent import qoder_adapter
+
+pytestmark = pytest.mark.test_timeout(180)
 
 FIXTURE_TOOL = "mcp__hermes__lookup_fixture"
 
@@ -56,14 +59,36 @@ def test_live_qoder_text_and_cancellation(live_qoder, monkeypatch, tmp_path):
     from run_agent import AIAgent
 
     processes = []
+    stages = []
     sdk = qoder_adapter._sdk()
     real_client = sdk.QoderSDKClient
 
     class ObservedClient(real_client):
         async def connect(self, prompt=None):
+            started = time.monotonic()
+            stages.append(("connect_start", prompt is not None, 0.0))
             await super().connect(prompt)
+            stages.append(("connect_done", prompt is not None, time.monotonic() - started))
             if prompt is not None:
                 processes.append(self._transport._process)
+
+        async def receive_response(self):
+            started = time.monotonic()
+            first = True
+            async for message in super().receive_response():
+                if first:
+                    stages.append(("receive_first", type(message).__name__, time.monotonic() - started))
+                    first = False
+                if isinstance(message, sdk.ResultMessage):
+                    stages.append(("receive_result", message.subtype, time.monotonic() - started))
+                yield message
+
+        async def disconnect(self):
+            started = time.monotonic()
+            try:
+                return await super().disconnect()
+            finally:
+                stages.append(("disconnect", True, time.monotonic() - started))
 
     monkeypatch.setattr(sdk, "QoderSDKClient", ObservedClient)
     version_client = qoder_adapter._client(sdk, live_qoder, str(tmp_path))
@@ -114,6 +139,11 @@ def test_live_qoder_text_and_cancellation(live_qoder, monkeypatch, tmp_path):
         "What phrase did I ask you to remember? Reply with the phrase only.",
         conversation_history=history,
     )
+    print("Qoder stages:", [(name, detail, round(elapsed, 3)) for name, detail, elapsed in stages])
+    print("Qoder followup status:", {
+        "completed": followup.get("completed"), "partial": followup.get("partial"),
+        "error": followup.get("error"), "final_response": followup.get("final_response"),
+    })
     assert followup["completed"]
     assert "copper lantern" in followup["final_response"].lower()
     denied = restarted.run_conversation(
@@ -139,15 +169,14 @@ def test_live_qoder_text_and_cancellation(live_qoder, monkeypatch, tmp_path):
 
 
 def test_live_qoder_cli_and_gateway_selection(live_qoder, monkeypatch, tmp_path):
-    from tests.cli.test_cli_provider_resolution import _import_cli
     from tests.gateway.test_model_switch_persistence import _make_runner, _make_source
     from gateway.platforms.base import MessageEvent
+    import cli
     import gateway.run
 
     catalog = qoder_adapter.discover_models(live_qoder)
     assert catalog, "Qoder returned no enabled models."
     model = next(iter(catalog))
-    cli = _import_cli()
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-selection-fixture")
     monkeypatch.setattr(
         "hermes_cli.models.validate_requested_model", lambda *a, **kw: {"accepted": True},
@@ -234,3 +263,149 @@ def test_live_qoder_mcp_fixture_contract(live_qoder, tmp_path):
         assert final and record in final
 
     asyncio.run(exercise())
+
+
+def test_live_qoder_workspace_read_pilot(live_qoder, monkeypatch, tmp_path):
+    import model_tools
+
+    from hermes_state import SessionDB
+    from run_agent import AIAgent
+
+    monkeypatch.setenv("HERMES_QODER_WORKSPACE_READ", "1")
+    allowed_marker = "workspace-allowed-" + uuid4().hex
+    denied_marker = "workspace-denied-" + uuid4().hex
+    allowed_path = tmp_path / "allowed.txt"
+    denied_path = tmp_path.parent / ("outside-" + uuid4().hex + ".txt")
+    allowed_path.write_text(allowed_marker, encoding="utf-8")
+    denied_path.write_text(denied_marker, encoding="utf-8")
+
+    calls = []
+    dispatch_results = []
+    real_dispatch = model_tools.handle_function_call
+
+    def observed_dispatch(name, arguments, *args, **kwargs):
+        calls.append((name, dict(arguments)))
+        result = real_dispatch(name, arguments, *args, **kwargs)
+        dispatch_results.append(result)
+        return result
+
+    monkeypatch.setattr(model_tools, "handle_function_call", observed_dispatch)
+
+    def make_agent(**kwargs):
+        return AIAgent(
+            model=qoder_adapter.DEFAULT_MODEL, provider="qoder", quiet_mode=True,
+            skip_context_files=True, skip_memory=True, **kwargs,
+        )
+
+    db_path = tmp_path / "workspace-state.db"
+    db = SessionDB(db_path)
+    try:
+        agent = make_agent(session_db=db)
+        allowed = agent.run_conversation(
+            f"Use read_file exactly once to read {allowed_path.name}. Reply with its exact contents."
+        )
+        session_id = agent.session_id
+    finally:
+        db.close()
+    print("Workspace dispatches:", calls, dispatch_results)
+    assert allowed["completed"] and allowed_marker in allowed["final_response"]
+    assert [name for name, _ in calls] == ["read_file"]
+    assert calls[0][1]["path"] == str(allowed_path)
+
+    reopened = SessionDB(db_path)
+    try:
+        history = reopened.get_messages_as_conversation(session_id)
+    finally:
+        reopened.close()
+    assert any(allowed_marker in message.get("content", "") for message in history)
+
+    before_denied = len(calls)
+    denied = make_agent(persist_session=False).run_conversation(
+        f"Use read_file to read {denied_path}. Reply with the result."
+    )
+    assert denied["completed"]
+    assert denied_marker not in denied["final_response"]
+    assert len(calls) == before_denied
+
+    cancel_calls = []
+    cancel_agent = make_agent(persist_session=False)
+
+    def interrupting_dispatch(name, arguments, *args, **kwargs):
+        cancel_calls.append((name, dict(arguments)))
+        result = real_dispatch(name, arguments, *args, **kwargs)
+        cancel_agent.interrupt()
+        return result
+
+    monkeypatch.setattr(model_tools, "handle_function_call", interrupting_dispatch)
+    cancelled = cancel_agent.run_conversation(
+        f"Use read_file exactly once to read {allowed_path.name}, then explain its contents at length."
+    )
+    assert cancelled["interrupted"]
+    assert [name for name, _ in cancel_calls] == ["read_file"]
+    assert allowed_path.read_text(encoding="utf-8") == allowed_marker
+
+
+def test_live_qoder_workspace_write_pilot(live_qoder, monkeypatch, tmp_path):
+    import model_tools
+
+    from run_agent import AIAgent
+
+    monkeypatch.setenv("HERMES_QODER_WORKSPACE_READ", "1")
+    monkeypatch.setenv("HERMES_QODER_WORKSPACE_WRITE", "1")
+
+    def make_agent(**kwargs):
+        return AIAgent(
+            model=qoder_adapter.DEFAULT_MODEL, provider="qoder", quiet_mode=True,
+            skip_context_files=True, skip_memory=True, **kwargs,
+        )
+
+    target = tmp_path / "editable.txt"
+    target.write_text("before", encoding="utf-8")
+    real_dispatch = model_tools.handle_function_call
+    calls = []
+
+    def observed_dispatch(name, arguments, *args, **kwargs):
+        calls.append((name, dict(arguments)))
+        return real_dispatch(name, arguments, *args, **kwargs)
+
+    monkeypatch.setattr(model_tools, "handle_function_call", observed_dispatch)
+    monkeypatch.setattr("tools.approval.request_explicit_approval", lambda **kwargs: True)
+    approved = make_agent(persist_session=False).run_conversation(
+        f"Use write_file exactly once to replace {target.name} with the exact text approved-once."
+    )
+    assert approved["completed"]
+    assert target.read_text(encoding="utf-8") == "approved-once"
+    assert [name for name, _ in calls if name in {"write_file", "patch"}] == ["write_file"]
+
+    calls.clear()
+    denied_approvals = []
+    monkeypatch.setattr(
+        "tools.approval.request_explicit_approval",
+        lambda **kwargs: denied_approvals.append(kwargs) or False,
+    )
+    denied = make_agent(persist_session=False).run_conversation(
+        f"Use write_file exactly once to replace {target.name} with the exact text denied-change."
+    )
+    assert denied["completed"]
+    assert target.read_text(encoding="utf-8") == "approved-once"
+    assert len(denied_approvals) == 1
+    assert not [name for name, _ in calls if name in {"write_file", "patch"}]
+
+    calls.clear()
+    cancel_agent = make_agent(persist_session=False)
+    monkeypatch.setattr("tools.approval.request_explicit_approval", lambda **kwargs: True)
+
+    def interrupting_dispatch(name, arguments, *args, **kwargs):
+        calls.append((name, dict(arguments)))
+        result = real_dispatch(name, arguments, *args, **kwargs)
+        if name in {"write_file", "patch"}:
+            cancel_agent.interrupt()
+        return result
+
+    monkeypatch.setattr(model_tools, "handle_function_call", interrupting_dispatch)
+    cancelled = cancel_agent.run_conversation(
+        f"Use write_file exactly once to replace {target.name} with the exact text cancelled-once, then explain the edit at length."
+    )
+    assert cancelled["interrupted"]
+    assert target.read_text(encoding="utf-8") == "cancelled-once"
+    assert [name for name, _ in calls if name in {"write_file", "patch"}] == ["write_file"]
