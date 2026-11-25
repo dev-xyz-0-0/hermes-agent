@@ -210,11 +210,24 @@ Qoder is an opt-in text chat provider using the official Qoder Agent SDK and its
 
 ```bash
 uv pip install -e '.[qoder]'
-export HERMES_QODER_PREVIEW=1
 hermes model
 ```
 
-Set `QODER_PERSONAL_ACCESS_TOKEN` in the Hermes process environment or profile `.env` using a personal access token from the Qoder console. For a running gateway, apply the environment to the gateway service and restart it. In `hermes model`, choose **More providers** and then **Qoder**. In an existing chat, use `/model qoder` for the Qoder account default or `/model qoder:<model-id>` for an account-visible model. Add `--global` to save a chat model switch.
+Add the token and preview settings to the `.env` loaded by your Hermes process (normally `~/.hermes/.env`):
+
+```dotenv
+QODER_PERSONAL_ACCESS_TOKEN=your_qoder_personal_access_token
+HERMES_QODER_PREVIEW=1
+HERMES_QODER_WORKSPACE_READ=1
+```
+
+`HERMES_QODER_WORKSPACE_READ` is optional. Enable it only when Qoder should be able to use Hermes' confined `read_file` and `search_files` tools in the active workspace. To allow edits as well, add the separate write opt-in:
+
+```dotenv
+HERMES_QODER_WORKSPACE_WRITE=1
+```
+
+Keep the `.env` private and out of version control. For a running gateway, apply the environment to the gateway service and restart it after making changes. In `hermes model`, choose **More providers** and then **Qoder**. In an existing chat, use `/model qoder` for the Qoder account default or `/model qoder:<model-id>` for an account-visible model. Add `--global` to save a chat model switch.
 
 Hermes stores the transcript and sends the bounded text history with each turn. Replies stream as they arrive. Attachments and Qoder Cloud Agent are outside this preview. Hermes reports Qoder credits when the SDK returns them. Auxiliary tasks use Hermes' auxiliary-provider configuration.
 
