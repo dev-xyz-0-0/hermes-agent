@@ -169,7 +169,10 @@ def test_live_qoder_text_and_cancellation(live_qoder, monkeypatch, tmp_path):
 
 
 def test_live_qoder_cli_and_gateway_selection(live_qoder, monkeypatch, tmp_path):
+    import threading
+
     from tests.gateway.test_model_switch_persistence import _make_runner, _make_source
+    from gateway.session import build_session_key
     from gateway.platforms.base import MessageEvent
     import cli
     import gateway.run
@@ -213,6 +216,67 @@ def test_live_qoder_cli_and_gateway_selection(live_qoder, monkeypatch, tmp_path)
         assert runtime["provider"] == "openrouter"
 
     asyncio.run(exercise_gateway())
+
+    monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "off")
+    monkeypatch.setattr(gateway.run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(
+        gateway.run, "_resolve_gateway_model",
+        lambda config=None: qoder_adapter.DEFAULT_MODEL,
+    )
+    monkeypatch.setattr(gateway.run, "_resolve_runtime_agent_kwargs", lambda: {
+        "provider": "qoder", "api_key": "sdk-managed", "base_url": "", "api_mode": "qoder_sdk",
+    })
+    monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda config, platform: [])
+
+    def prepare_live_runner():
+        live_runner = _make_runner()
+        live_runner._prefill_messages = []
+        live_runner._ephemeral_system_prompt = ""
+        live_runner._reasoning_config = None
+        live_runner._provider_routing = {}
+        live_runner._fallback_model = None
+        live_runner._agent_cache = {}
+        live_runner._agent_cache_lock = threading.Lock()
+        live_runner.config.streaming.enabled = False
+        telegram = live_runner.adapters[source.platform]
+        telegram.has_pending_interrupt.return_value = False
+        telegram.get_pending_message.return_value = None
+        return live_runner
+
+    async def exercise_disposable_gateway_chat():
+        source = _make_source()
+        session_key = build_session_key(source)
+        first_runner = prepare_live_runner()
+        first_runner._session_model_overrides[session_key] = {
+            "model": qoder_adapter.DEFAULT_MODEL, "provider": "qoder",
+            "api_key": "sdk-managed", "base_url": "", "api_mode": "qoder_sdk",
+        }
+        first = await first_runner._run_agent(
+            message="Remember the phrase violet harbor. Reply with the phrase only.",
+            context_prompt="", history=[], source=source,
+            session_id="qoder-disposable-gateway", session_key=session_key,
+        )
+        assert "violet harbor" in first["final_response"].lower()
+
+        restarted_runner = prepare_live_runner()
+        restarted_runner._session_model_overrides[session_key] = dict(
+            first_runner._session_model_overrides[session_key]
+        )
+        followup = await restarted_runner._run_agent(
+            message="What phrase did I ask you to remember? Reply with the phrase only.",
+            context_prompt="", history=first["messages"], source=source,
+            session_id="qoder-disposable-gateway", session_key=session_key,
+        )
+        assert "violet harbor" in followup["final_response"].lower()
+
+        switched = await restarted_runner._handle_model_command(MessageEvent(
+            text="/model anthropic/claude-sonnet-4 --provider openrouter", source=source,
+        ))
+        assert "Model switched" in switched
+        _, runtime = restarted_runner._resolve_session_agent_runtime(source=source)
+        assert runtime["provider"] == "openrouter"
+
+    asyncio.run(exercise_disposable_gateway_chat())
 
 
 def test_live_qoder_mcp_fixture_contract(live_qoder, tmp_path):
