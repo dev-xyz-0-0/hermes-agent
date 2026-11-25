@@ -257,6 +257,40 @@ Qoder remains a text-only preview. Results below were recorded on 2026-11-25 wit
 - [x] Opt-in workspace read pilot: authenticated checks passed for an allowed read through Hermes dispatch, traversal denial before dispatch, transcript persistence, and cancellation with exactly one read dispatch.
 - [x] Opt-in workspace edit pilot: Qoder tool blocks are accepted only for explicitly enabled workspace tools, post-dispatch failures are non-retryable, duplicate edit dispatches reuse the first result, and SDK handlers use a true single-argument signature. Authenticated checks passed for approved-once writes, denied edits leaving the file untouched, and cancellation with exactly one write dispatch. File writes remain behind both workspace opt-in flags and one-shot Hermes approvals.
 
+#### Disposable Telegram release runbook
+
+The connected-chat release check is currently blocked. A presence-only environment audit on 2026-11-25 found `QODER_PERSONAL_ACCESS_TOKEN`, but not `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USERS`, `TELEGRAM_HOME_CHANNEL`, or `OPENROUTER_API_KEY`. No Telegram message was sent. Supply a disposable bot token, put only the explicitly authorized tester's numeric user ID in `TELEGRAM_ALLOWED_USERS`, set the private test chat ID in `TELEGRAM_HOME_CHANNEL`, and supply an OpenRouter key for the final provider switch. Keep all values in the process environment; do not paste them into chat or test logs.
+
+Use a temporary Hermes profile and workspace so the restart preserves the test conversation while file access remains confined to synthetic data:
+
+```bash
+QODER_SMOKE_ROOT="$(mktemp -d)"
+chmod 700 "$QODER_SMOKE_ROOT"
+mkdir -p "$QODER_SMOKE_ROOT/profile" "$QODER_SMOKE_ROOT/workspace"
+printf '%s\n' 'allowed-read-marker' > "$QODER_SMOKE_ROOT/workspace/read-allowed.txt"
+printf '%s\n' 'approved-before' > "$QODER_SMOKE_ROOT/workspace/approved.txt"
+printf '%s\n' 'denied-before' > "$QODER_SMOKE_ROOT/workspace/denied.txt"
+printf '%s\n' 'outside-marker' > "$QODER_SMOKE_ROOT/outside-denied.txt"
+cd "$QODER_SMOKE_ROOT/workspace"
+HERMES_HOME="$QODER_SMOKE_ROOT/profile" \
+  HERMES_QODER_PREVIEW=1 \
+  HERMES_QODER_WORKSPACE_READ=1 \
+  HERMES_QODER_WORKSPACE_WRITE=1 \
+  hermes gateway
+```
+
+Run the following checks only in the authorized private chat. Save sanitized timestamps, request IDs, gateway logs, and before/after file hashes; never save credential values or Telegram tokens.
+
+- [ ] Select Qoder with `/model qoder`, request a multi-part synthetic response, and observe streamed delivery rather than only a final message.
+- [ ] Ask Qoder to remember a synthetic nonce. Stop the foreground gateway, rerun the same command with the same `HERMES_HOME` and working directory, and verify a follow-up can recover the nonce from saved history.
+- [ ] Switch to a known OpenRouter model with `/model openrouter:<model>` and verify the next response uses OpenRouter.
+- [ ] Ask Qoder to read `read-allowed.txt` and return its marker. Then request the absolute path to `outside-denied.txt` and verify denial occurs before Hermes file-tool dispatch.
+- [ ] Ask Qoder to replace `approved-before` in `approved.txt` with a synthetic value. Click `✅ Allow Once` and verify one dispatch and the exact expected file hash. Clicking the resolved button again must not apply another edit.
+- [ ] Ask for a different edit to `denied.txt`, click `❌ Deny`, and verify zero write dispatches and an unchanged file hash.
+- [ ] Start a deliberately long Qoder turn, send `/stop` while it is active, and verify the chat reports that the session was force-stopped. Confirm the Qoder subprocess exits, no tool invocation is replayed, and a new synthetic message succeeds in the same chat.
+
+Record the connected platform, Qoder Agent SDK version, bundled CLI version, gateway commit, and pass/fail evidence for every item above in this checklist. Keep `HERMES_QODER_PREVIEW=1` until the live text, restart, switch-back, and cancellation checks pass. Once they pass, remove only the text preview gate; workspace reads and writes must remain independently opt-in.
+
 ## Custom & Self-Hosted LLM Providers
 
 Hermes Agent works with **any OpenAI-compatible API endpoint**. If a server implements `/v1/chat/completions`, you can point Hermes at it. This means you can use local models, GPU inference servers, multi-provider routers, or any third-party API.
