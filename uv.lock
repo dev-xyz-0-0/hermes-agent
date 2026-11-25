@@ -1672,7 +1672,7 @@ wheels = [
 
 [[package]]
 name = "hermes-agent"
-version = "0.10.9"
+version = "0.10.10"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
@@ -1763,6 +1763,9 @@ modal = [
 pty = [
     { name = "ptyprocess", marker = "sys_platform != 'win32'" },
     { name = "pywinpty", marker = "sys_platform == 'win32'" },
+]
+qoder = [
+    { name = "qoder-agent-sdk" },
 ]
 rl = [
     { name = "atroposlib" },
@@ -1860,6 +1863,7 @@ requires-dist = [
     { name = "python-telegram-bot", extras = ["webhooks"], marker = "extra == 'messaging'", specifier = "==22.7" },
     { name = "pywinpty", marker = "sys_platform == 'win32' and extra == 'pty'", specifier = "==2.0.15" },
     { name = "pyyaml", specifier = "==6.0.3" },
+    { name = "qoder-agent-sdk", marker = "extra == 'qoder'", specifier = "==1.0.17" },
     { name = "requests", specifier = "==2.33.1" },
     { name = "rich", specifier = "==14.3.4" },
     { name = "simple-term-menu", marker = "extra == 'cli'", specifier = "==1.6.6" },
@@ -1874,7 +1878,7 @@ requires-dist = [
     { name = "wandb", marker = "extra == 'rl'", specifier = "==0.26.1" },
     { name = "yc-bench", marker = "python_full_version >= '3.12' and extra == 'yc-bench'", git = "https://github.com/collinear-ai/yc-bench.git?rev=bfb0c88062450f46341bd9a5298903fc2e952a5c" },
 ]
-provides-extras = ["modal", "daytona", "messaging", "cron", "slack", "matrix", "cli", "tts-premium", "voice", "pty", "honcho", "mcp", "homeassistant", "sms", "acp", "dingtalk", "feishu", "rl", "yc-bench", "all"]
+provides-extras = ["qoder", "modal", "daytona", "messaging", "cron", "slack", "matrix", "cli", "tts-premium", "voice", "pty", "honcho", "mcp", "homeassistant", "sms", "acp", "dingtalk", "feishu", "rl", "yc-bench", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -4119,6 +4123,25 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/da/92/1446574745d74df0c92e6aa4a7b0b3130706a4142b2d1a5869f2eaa423c6/pyyaml-6.0.3-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:16249ee61e95f858e83976573de0f5b2893b3677ba71c9dd36b9cf8be9ac6d65", size = 829923, upload-time = "2025-09-25T21:32:54.537Z" },
     { url = "https://files.pythonhosted.org/packages/f0/7a/1c7270340330e575b92f397352af856a8c06f230aa3e76f86b39d01b416a/pyyaml-6.0.3-cp314-cp314t-win_amd64.whl", hash = "sha256:4ad1906908f2f5ae4e5a8ddfce73c320c2a1429ec52eafd27138b7f1cbe341c9", size = 174062, upload-time = "2025-09-25T21:32:55.767Z" },
     { url = "https://files.pythonhosted.org/packages/f1/12/de94a39c2ef588c7e6455cfbe7343d3b2dc9d6b6b2f40c4c6565744c873d/pyyaml-6.0.3-cp314-cp314t-win_arm64.whl", hash = "sha256:ebc55a14a21cb14062aa4162f906cd962b28e2e9ea38f9b4391244cd8de4ae0b", size = 149341, upload-time = "2025-09-25T21:32:56.828Z" },
+]
+
+[[package]]
+name = "qoder-agent-sdk"
+version = "1.0.17"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "mcp" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1a/fc/d2c7e548b81d18ac7f26efba6b3fe04226c7e6272920b327a1b99454efd9/qoder_agent_sdk-1.0.17.tar.gz", hash = "sha256:4eb73920f8d5efd8d2abd1f4997350f2ef974682a56eb8587d123134c9656740", size = 174764, upload-time = "2026-10-27T12:00:51.507Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dd/e2/6080dee2c098439b9f67751cd98d25f64fe3ffadab4ae6707db66cbd8269/qoder_agent_sdk-1.0.17-py3-none-macosx_11_0_arm64.whl", hash = "sha256:ad401296a7a889d39f7dbe95b0502e184a2d221c3f1394ee46451c03f33a3bad", size = 67947982, upload-time = "2026-10-27T11:59:44.029Z" },
+    { url = "https://files.pythonhosted.org/packages/72/7d/290e81980d69498ff60fc55c9e7534866a171464a3d3d20bf66f58c9359b/qoder_agent_sdk-1.0.17-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:1fd6c0d26ffaf2dc9c3c6525a3dbe36eb3948845bf0b2e8d404fc13c17b2326d", size = 72520592, upload-time = "2026-10-27T11:59:55.801Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/e5/7109c51de4304fa86a1a89b0fae6307f2cb81d91456b6074a866b9038271/qoder_agent_sdk-1.0.17-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:830d501ab1830b07a16ca260303ba001af5cad02fffb058270f408a231c9351d", size = 78126343, upload-time = "2026-10-27T12:00:06.832Z" },
+    { url = "https://files.pythonhosted.org/packages/43/16/266582dbb4bc813c684160bdf4f48696cda5f4c0e8ef45b3db1287e99f1a/qoder_agent_sdk-1.0.17-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:74b3d752cda87f9466d53153d4e2a834367d2917ee026ef294cf143cb311008a", size = 78495978, upload-time = "2026-10-27T12:00:17.335Z" },
+    { url = "https://files.pythonhosted.org/packages/b1/12/5190f5667b5b98d52508ed602cd8b3737184674136701d6ccce08ec192fe/qoder_agent_sdk-1.0.17-py3-none-musllinux_1_2_aarch64.whl", hash = "sha256:ac3e5845914508dddb6f80e2f9e49ed07b3133acf3447f0b12c27440c55a37cc", size = 75592875, upload-time = "2026-10-27T12:00:26.562Z" },
+    { url = "https://files.pythonhosted.org/packages/22/57/7f8160e2d5816c5d0f4a9cbfd2ad540eb9d1751564da03d755273e9ebc03/qoder_agent_sdk-1.0.17-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:4cb1779315e4e2f701bb4c61d45643562b8f27435fb5ea7eacdfcb85b25b0cc7", size = 76005805, upload-time = "2026-10-27T12:00:34.302Z" },
+    { url = "https://files.pythonhosted.org/packages/86/ca/c202eebb853d706d7b044bb8af49775cd4006cf93af2c1db098fbc24a845/qoder_agent_sdk-1.0.17-py3-none-win_amd64.whl", hash = "sha256:2c5cc459eb55e3b64e38c180a7a2e9d25d046e14ed405f4750efacbbfc3a3c55", size = 98579709, upload-time = "2026-10-27T12:00:48.935Z" },
 ]
 
 [[package]]

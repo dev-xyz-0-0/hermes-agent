@@ -1,0 +1,245 @@
+import asyncio
+import json
+import sys
+from types import SimpleNamespace
+
+import pytest
+
+from agent import qoder_adapter
+from hermes_cli.model_switch import switch_model
+from hermes_cli.runtime_provider import resolve_runtime_provider
+
+
+class StreamEvent(SimpleNamespace):
+    pass
+
+
+class AssistantMessage(SimpleNamespace):
+    pass
+
+
+class TextBlock(SimpleNamespace):
+    pass
+
+
+class ToolUseBlock(SimpleNamespace):
+    pass
+
+
+class ResultMessage(SimpleNamespace):
+    pass
+
+
+@pytest.fixture
+def qoder(monkeypatch):
+    clients = []
+    output = [
+        StreamEvent(event={
+            "type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hello"},
+        }),
+        AssistantMessage(
+            model="qoder-model", usage={"credits": 0.2, "request_id": "abc"},
+            content=[TextBlock(text="Hello")],
+        ),
+        ResultMessage(
+            subtype="success", is_error=False, error_code=None, result="Hello",
+            usage={"input_tokens": 11, "output_tokens": 2}, total_credits=0.2,
+        ),
+    ]
+
+    class Client:
+        def __init__(self, options):
+            self.options = options
+            self.prompt = None
+            self.interrupted = False
+            self.disconnected = False
+            clients.append(self)
+
+        async def connect(self, prompt=None):
+            self.prompt = prompt
+
+        async def get_available_models(self):
+            return [
+                {"value": "qoder-model", "isEnabled": True},
+                {"value": "disabled", "isEnabled": False},
+            ]
+
+        async def receive_response(self):
+            for item in output:
+                if item is None:
+                    await asyncio.sleep(60)
+                else:
+                    yield item
+
+        async def interrupt(self):
+            self.interrupted = True
+
+        async def disconnect(self):
+            self.disconnected = True
+
+    monkeypatch.setenv("HERMES_QODER_PREVIEW", "1")
+    monkeypatch.setenv("QODER_PERSONAL_ACCESS_TOKEN", "test-token")
+    monkeypatch.setitem(sys.modules, "qoder_agent_sdk", SimpleNamespace(
+        QoderSDKClient=Client, QoderAgentOptions=SimpleNamespace, access_token=lambda value: value,
+        StreamEvent=StreamEvent, AssistantMessage=AssistantMessage, TextBlock=TextBlock,
+        ToolUseBlock=ToolUseBlock, ResultMessage=ResultMessage,
+    ))
+    return clients, output
+
+
+def test_qoder_preview_credentials_and_model_selection(qoder, monkeypatch):
+    assert resolve_runtime_provider(requested="qoder")["api_mode"] == "qoder_sdk"
+    assert resolve_runtime_provider(requested="qoder")["api_key"] != "test-token"
+    args = dict(current_provider="openrouter", current_model="other")
+    assert switch_model("qoder:qoder-model", **args).success
+    assert switch_model("qoder", **args).new_model == qoder_adapter.DEFAULT_MODEL
+    assert not switch_model("qoder:disabled", **args).success
+    monkeypatch.delenv("QODER_PERSONAL_ACCESS_TOKEN")
+    assert "QODER_PERSONAL_ACCESS_TOKEN" in switch_model("qoder", **args).error_message
+    monkeypatch.delenv("HERMES_QODER_PREVIEW")
+    assert "HERMES_QODER_PREVIEW" in switch_model("qoder", **args).error_message
+
+
+def test_qoder_request_replays_text_and_streams_once(qoder):
+    clients, output = qoder
+    output.insert(2, AssistantMessage(model="qoder-model", content=[], usage={"credits": 0.2, "request_id": "abc"}))
+    deltas = []
+    response = qoder_adapter.request(
+        [
+            {"role": "system", "content": "System instruction"},
+            {"role": "user", "content": [
+                {"type": "text", "text": "First"}, {"type": "image_url", "image_url": "omit me"},
+            ]},
+            {"role": "assistant", "content": "Prior answer"},
+            {"role": "user", "content": "Follow-up"},
+        ],
+        qoder_adapter.DEFAULT_MODEL, "test-token", deltas.append, lambda: False,
+    )
+    client = clients[0]
+    history = json.loads(client.prompt.split("\n", 1)[1])
+    assert [turn["content"] for turn in history] == ["First", "Prior answer", "Follow-up"]
+    assert client.options.system_prompt == "System instruction"
+    assert client.options.model is None
+    assert client.options.tools == client.options.skills == client.options.setting_sources == []
+    assert client.options.mcp_servers == {}
+    assert client.disconnected
+    assert deltas == ["Hello"]
+    assert response.choices[0].message.content == "Hello"
+    assert response.usage.total_tokens == 13
+    assert response.qoder_credits == 0.2
+
+
+def test_qoder_cancellation_interrupts_and_disconnects(qoder):
+    clients, output = qoder
+    output[1:] = [None]
+    with pytest.raises(InterruptedError):
+        qoder_adapter.request([], "qoder-model", "test-token", lambda text: None, lambda: True)
+    assert clients[0].interrupted
+    assert clients[0].disconnected
+
+
+def test_qoder_failure_after_output_retains_partial_text(qoder):
+    clients, output = qoder
+    output[-1] = ResultMessage(subtype="error_during_execution", is_error=True, error_code=10500)
+    with pytest.raises(qoder_adapter.QoderError) as error:
+        qoder_adapter.request([], "qoder-model", "test-token", lambda text: None, lambda: False)
+    assert error.value.status_code == 503
+    assert error.value.partial_text == "Hello"
+    assert clients[0].disconnected
+
+
+def test_agent_qoder_turn_and_saved_history(qoder, monkeypatch):
+    from tests.run_agent.test_provider_parity import _make_agent
+
+    clients, _ = qoder
+    agent = _make_agent(monkeypatch, "qoder")
+    agent.model = qoder_adapter.DEFAULT_MODEL
+    deltas = []
+    first = agent.run_conversation("First", stream_callback=deltas.append)
+    assert first["completed"], first
+    assert first["final_response"] == "Hello"
+    assert first["model"] == "qoder-model"
+    assert first["qoder_credits"] == 0.2
+    assert "Hello" in deltas
+    second = agent.run_conversation("Follow-up", conversation_history=first["messages"])
+    assert second["completed"], second
+    assert "First" in clients[-1].prompt
+    assert "Hello" in clients[-1].prompt
+    assert "Follow-up" in clients[-1].prompt
+    attachment = [{"type": "image_url", "image_url": {"url": "https://example.com/photo.png"}}]
+    assert not agent.run_conversation(attachment)["completed"]
+
+
+def test_qoder_missing_optional_sdk(qoder, monkeypatch):
+    monkeypatch.setitem(sys.modules, "qoder_agent_sdk", None)
+    with pytest.raises(qoder_adapter.QoderError, match="Install the Qoder SDK"):
+        qoder_adapter.credentials()
+
+
+def test_qoder_post_delta_error_does_not_replay(qoder, monkeypatch):
+    from tests.run_agent.test_provider_parity import _make_agent
+
+    clients, output = qoder
+    output[-1] = ResultMessage(subtype="error_during_execution", is_error=True, error_code=10500)
+    agent = _make_agent(monkeypatch, "qoder")
+    result = agent.run_conversation("Question", stream_callback=lambda text: None)
+    assert result["partial"]
+    assert not result["completed"]
+    assert result["final_response"] == "Hello"
+    assert len(clients) == 1
+    assert clients[0].disconnected
+
+
+def test_switch_from_qoder_restores_hermes_tools(qoder, monkeypatch):
+    from tests.run_agent.test_provider_parity import _make_agent
+
+    messages = [{"role": "user", "content": "Question"}]
+    agent = _make_agent(monkeypatch, "qoder")
+    assert "tools" not in agent._build_api_kwargs(messages)
+    agent.switch_model(
+        new_model="other", new_provider="openrouter", api_key="test",
+        base_url="https://openrouter.ai/api/v1", api_mode="chat_completions",
+    )
+    assert agent._build_api_kwargs(messages)["tools"]
+
+
+def test_qoder_setup_persists_validated_model(qoder, monkeypatch):
+    from hermes_cli import config, main
+
+    config.save_config({"model": {
+        "provider": "openrouter", "default": "old", "base_url": "https://example.com",
+    }})
+
+    def choose(labels, *, default=0):
+        return next(
+            index for index, label in enumerate(labels)
+            if label.startswith(("More providers", "Qoder (", "qoder-model"))
+        )
+
+    monkeypatch.setattr(main, "_prompt_provider_choice", choose)
+    main.select_provider_and_model()
+    assert config.read_raw_config()["model"] == {"provider": "qoder", "default": "qoder-model"}
+
+
+def test_qoder_pre_delta_failure_can_fall_back(qoder, monkeypatch):
+    from tests.run_agent.test_provider_parity import _make_agent
+
+    clients, output = qoder
+    output[:] = [ResultMessage(subtype="error_during_execution", is_error=True, error_code=10605)]
+    agent = _make_agent(monkeypatch, "qoder")
+    agent._fallback_chain = [{"provider": "openrouter", "model": "fallback"}]
+    fallback_client = SimpleNamespace(base_url="https://openrouter.ai/api/v1", api_key="fallback-key")
+    monkeypatch.setattr("agent.auxiliary_client.resolve_provider_client", lambda *a, **kw: (fallback_client, "fallback"))
+    monkeypatch.setattr(agent, "_interruptible_streaming_api_call", lambda *a, **kw: SimpleNamespace(
+        choices=[SimpleNamespace(
+            finish_reason="stop", message=SimpleNamespace(content="Fallback answer", tool_calls=None),
+        )],
+        usage=None,
+    ))
+
+    result = agent.run_conversation("Question")
+    assert result["completed"], result
+    assert result["final_response"] == "Fallback answer"
+    assert result["provider"] == "openrouter"
+    assert len(clients) == 1
+    assert clients[0].disconnected

@@ -430,6 +430,31 @@ def switch_model(
     resolved_alias = ""
     new_model = raw_input.strip()
     target_provider = current_provider
+    if not explicit_provider and (new_model == "qoder" or new_model.startswith("qoder:")):
+        explicit_provider = explicit_provider or "qoder"
+        new_model = new_model.partition(":")[2]
+    if explicit_provider == "qoder" or (not explicit_provider and current_provider == "qoder"):
+        from agent.qoder_adapter import DEFAULT_MODEL, QoderError, credentials, discover_models
+
+        new_model = new_model or DEFAULT_MODEL
+        label = "Qoder (text only)"
+        try:
+            runtime = resolve_runtime_provider(requested="qoder")
+            models = discover_models(credentials())
+            if new_model != DEFAULT_MODEL and new_model not in models:
+                raise QoderError(f"Qoder model '{new_model}' is unavailable for this account.")
+        except Exception as exc:
+            return ModelSwitchResult(
+                success=False, target_provider="qoder", provider_label=label,
+                is_global=is_global, error_message=str(exc),
+            )
+        return ModelSwitchResult(
+            success=True, new_model=new_model, target_provider="qoder",
+            provider_changed=current_provider != "qoder",
+            api_key=runtime["api_key"], base_url="", api_mode="qoder_sdk",
+            provider_label=label, is_global=is_global,
+            warning_message="Qoder supports text chat in this preview.",
+        )
 
     # =================================================================
     # PATH A: Explicit --provider given
@@ -730,7 +755,8 @@ def list_authenticated_providers(
         fetch_models_dev,
         get_provider_info as _mdev_pinfo,
     )
-    from hermes_cli.models import OPENROUTER_MODELS, _PROVIDER_MODELS
+    from agent.qoder_adapter import preview_enabled
+    from hermes_cli.models import OPENROUTER_MODELS, _PROVIDER_MODELS, provider_model_ids
 
     results: List[dict] = []
     seen_slugs: set = set()
@@ -782,7 +808,7 @@ def list_authenticated_providers(
     # --- 2. Check Hermes-only providers (nous, openai-codex, copilot) ---
     from hermes_cli.providers import HERMES_OVERLAYS
     for pid, overlay in HERMES_OVERLAYS.items():
-        if pid in seen_slugs:
+        if pid in seen_slugs or (pid == "qoder" and not preview_enabled()):
             continue
         # Check if credentials exist
         has_creds = False
@@ -801,7 +827,7 @@ def list_authenticated_providers(
             continue
 
         # Use curated list
-        model_ids = curated.get(pid, [])
+        model_ids = provider_model_ids(pid) if pid == "qoder" else curated.get(pid, [])
         total = len(model_ids)
         top = model_ids[:max_models]
 

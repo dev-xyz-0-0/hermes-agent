@@ -167,6 +167,13 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("MINIMAX_API_KEY",),
         base_url_env_var="MINIMAX_BASE_URL",
     ),
+    "qoder": ProviderConfig(
+        id="qoder",
+        name="Qoder",
+        auth_type="api_key",
+        inference_base_url="",
+        api_key_env_vars=("QODER_PERSONAL_ACCESS_TOKEN",),
+    ),
     "anthropic": ProviderConfig(
         id="anthropic",
         name="Anthropic",
@@ -876,7 +883,7 @@ def resolve_provider(
     try:
         auth_store = _load_auth_store()
         active = auth_store.get("active_provider")
-        if active and active in PROVIDER_REGISTRY:
+        if active and active != "qoder" and active in PROVIDER_REGISTRY:
             status = get_auth_status(active)
             if status.get("logged_in"):
                 return active
@@ -893,7 +900,7 @@ def resolve_provider(
         # GitHub tokens are commonly present for repo/tool access but should not
         # hijack inference auto-selection unless the user explicitly chooses
         # Copilot/GitHub Models as the provider.
-        if pid == "copilot":
+        if pid in {"copilot", "qoder"}:
             continue
         for env_var in pconfig.api_key_env_vars:
             if has_usable_secret(os.getenv(env_var, "")):

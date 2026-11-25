@@ -970,6 +970,10 @@ def select_provider_and_model(args=None):
         ("alibaba", "Alibaba Cloud / DashScope Coding (Qwen + multi-provider)"),
     ]
 
+    from agent.qoder_adapter import preview_enabled
+    if preview_enabled():
+        extended_providers.append(("qoder", "Qoder (text chat preview)"))
+
     # Add user-defined custom providers from config.yaml
     custom_providers_cfg = config.get("custom_providers") or []
     _custom_provider_map = {}  # key → {name, base_url, api_key}
@@ -1050,6 +1054,29 @@ def select_provider_and_model(args=None):
         _model_flow_openai_codex(config, current_model)
     elif selected_provider == "xai-oauth":
         _model_flow_xai_oauth(config, current_model)
+    elif selected_provider == "qoder":
+        from agent.qoder_adapter import DEFAULT_MODEL, credentials, discover_models
+        from hermes_cli.config import read_raw_config, save_config
+
+        try:
+            models = [DEFAULT_MODEL, *discover_models(credentials())]
+        except Exception as exc:
+            print(f"Qoder setup failed: {exc}")
+            return
+        index = _prompt_provider_choice(
+            [*models, "Cancel"], default=models.index(current_model) if current_model in models else 0,
+        )
+        if index is None or index == len(models):
+            return
+        saved = read_raw_config()
+        model_config = saved.get("model")
+        model_config = dict(model_config) if isinstance(model_config, dict) else {}
+        for key in ("base_url", "api_key", "api_mode"):
+            model_config.pop(key, None)
+        model_config.update(provider="qoder", default=models[index])
+        saved["model"] = model_config
+        save_config(saved)
+        print(f"Selected Qoder model {models[index]} (text only).")
     elif selected_provider == "copilot-acp":
         _model_flow_copilot_acp(config, current_model)
     elif selected_provider == "copilot":

@@ -2952,6 +2952,12 @@ class GatewayRunner:
             message_text = f"[{source.user_name}] {message_text}"
 
         if event.media_urls:
+            media_model, media_runtime = self._resolve_session_agent_runtime(
+                source=source, session_key=session_key,
+            )
+            media_route = self._resolve_turn_agent_config(message_text, media_model, media_runtime)
+            if media_route["runtime"].get("api_mode") == "qoder_sdk":
+                return "Qoder currently supports text chat only."
             image_paths = []
             for i, path in enumerate(event.media_urls):
                 # Check media_types if available; otherwise infer from message type
@@ -4091,8 +4097,9 @@ class GatewayRunner:
             lines.append("`/model <name> --global` — persist")
             return "\n".join(lines)
 
-        # Perform the switch
-        result = _switch_model(
+        # Model discovery can start a subprocess or make a remote request.
+        result = await asyncio.to_thread(
+            _switch_model,
             raw_input=model_input,
             current_provider=current_provider,
             current_model=current_model,
@@ -4154,10 +4161,15 @@ class GatewayRunner:
                         cfg = yaml.safe_load(f) or {}
                 else:
                     cfg = {}
-                model_cfg = cfg.setdefault("model", {})
+                model_cfg = cfg.get("model")
+                model_cfg = dict(model_cfg) if isinstance(model_cfg, dict) else {}
+                cfg["model"] = model_cfg
                 model_cfg["default"] = result.new_model
                 model_cfg["provider"] = result.target_provider
-                if result.base_url:
+                if result.api_mode == "qoder_sdk":
+                    for key in ("base_url", "api_key", "api_mode"):
+                        model_cfg.pop(key, None)
+                elif result.base_url:
                     model_cfg["base_url"] = result.base_url
                 from hermes_cli.config import save_config
                 save_config(cfg)

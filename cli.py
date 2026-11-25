@@ -1805,6 +1805,14 @@ class HermesCLI:
         current_model = (self.model or "").strip()
         changed = False
 
+        if resolved_provider == "qoder":
+            from agent.qoder_adapter import DEFAULT_MODEL
+
+            if self._model_is_default and current_model == _DEFAULT_CONFIG_MODEL:
+                self.model = DEFAULT_MODEL
+                return True
+            return False
+
         if resolved_provider == "copilot":
             try:
                 from hermes_cli.models import copilot_model_api_mode, normalize_copilot_model_id
@@ -2309,7 +2317,7 @@ class HermesCLI:
                 print("\n⚠️  Provider resolver returned an empty API key. "
                       "Set OPENROUTER_API_KEY or run: hermes setup")
                 return False
-        if not isinstance(base_url, str) or not base_url:
+        if resolved_api_mode != "qoder_sdk" and (not isinstance(base_url, str) or not base_url):
             print("\n⚠️  Provider resolver returned an empty base URL. "
                   "Check your provider config or run: hermes setup")
             return False
@@ -3875,7 +3883,12 @@ class HermesCLI:
         self.model = result.new_model
         self.provider = result.target_provider
         self.requested_provider = result.target_provider
-        if result.api_key:
+        if result.api_mode == "qoder_sdk":
+            self.api_key = result.api_key
+            self.base_url = ""
+            self._explicit_api_key = None
+            self._explicit_base_url = None
+        elif result.api_key:
             self.api_key = result.api_key
             self._explicit_api_key = result.api_key
         if result.base_url:
@@ -3948,7 +3961,19 @@ class HermesCLI:
             _cprint(f"    ⚠ {result.warning_message}")
 
         # Persistence
-        if persist_global:
+        if persist_global and result.api_mode == "qoder_sdk":
+            from hermes_cli.config import read_raw_config, save_config
+
+            config = read_raw_config()
+            model_config = config.get("model")
+            model_config = dict(model_config) if isinstance(model_config, dict) else {}
+            for key in ("base_url", "api_key", "api_mode"):
+                model_config.pop(key, None)
+            model_config.update(provider="qoder", default=result.new_model)
+            config["model"] = model_config
+            save_config(config)
+            _cprint("    Saved to config.yaml (--global)")
+        elif persist_global:
             save_config_value("model.default", result.new_model)
             if result.provider_changed:
                 save_config_value("model.provider", result.target_provider)
@@ -6589,6 +6614,9 @@ class HermesCLI:
             return None
 
         turn_route = self._resolve_turn_agent_config(message)
+        if images and turn_route["runtime"].get("api_mode") == "qoder_sdk":
+            _cprint("Qoder currently supports text chat only.")
+            return None
         if turn_route["signature"] != self._active_agent_route_signature:
             self.agent = None
 

@@ -641,7 +641,9 @@ class AIAgent:
         self.provider = provider_name or ""
         self.acp_command = acp_command or command
         self.acp_args = list(acp_args or args or [])
-        if api_mode in {"chat_completions", "codex_responses", "anthropic_messages"}:
+        if self.provider == "qoder":
+            self.api_mode = "qoder_sdk"
+        elif api_mode in {"chat_completions", "codex_responses", "anthropic_messages"}:
             self.api_mode = api_mode
         elif self.provider == "openai-codex":
             self.api_mode = "codex_responses"
@@ -801,7 +803,15 @@ class AIAgent:
         self._anthropic_client = None
         self._is_anthropic_oauth = False
 
-        if self.api_mode == "anthropic_messages":
+        if self.api_mode == "qoder_sdk":
+            from agent.qoder_adapter import credentials
+
+            credentials()
+            self.api_key = "sdk-managed"
+            self.base_url = ""
+            self.client = None
+            self._client_kwargs = {}
+        elif self.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
             # Only fall back to ANTHROPIC_TOKEN when the provider is actually Anthropic.
             # Other anthropic_messages providers (MiniMax, Alibaba, etc.) must use their own API key.
@@ -1472,13 +1482,16 @@ class AIAgent:
         # ── Swap core runtime fields ──
         self.model = new_model
         self.provider = new_provider
-        self.base_url = base_url or self.base_url
+        self.base_url = "" if api_mode == "qoder_sdk" else (base_url or self.base_url)
         self.api_mode = api_mode
         if api_key:
             self.api_key = api_key
 
         # ── Build new client ──
-        if api_mode == "anthropic_messages":
+        if api_mode == "qoder_sdk":
+            self.client = None
+            self._client_kwargs = {}
+        elif api_mode == "anthropic_messages":
             from agent.anthropic_adapter import (
                 build_anthropic_client,
                 resolve_anthropic_token,
@@ -2840,18 +2853,22 @@ class AIAgent:
             # Fallback to hardcoded identity
             prompt_parts = [DEFAULT_AGENT_IDENTITY]
 
+        valid_tools = self.valid_tool_names if self.api_mode != "qoder_sdk" else set()
+        if self.api_mode == "qoder_sdk":
+            prompt_parts.append("This is a text-only chat. You have no tools or workspace access.")
+
         # Tool-aware behavioral guidance: only inject when the tools are loaded
         tool_guidance = []
-        if "memory" in self.valid_tool_names:
+        if "memory" in valid_tools:
             tool_guidance.append(MEMORY_GUIDANCE)
-        if "session_search" in self.valid_tool_names:
+        if "session_search" in valid_tools:
             tool_guidance.append(SESSION_SEARCH_GUIDANCE)
-        if "skill_manage" in self.valid_tool_names:
+        if "skill_manage" in valid_tools:
             tool_guidance.append(SKILLS_GUIDANCE)
         if tool_guidance:
             prompt_parts.append(" ".join(tool_guidance))
 
-        nous_subscription_prompt = build_nous_subscription_prompt(self.valid_tool_names)
+        nous_subscription_prompt = build_nous_subscription_prompt(valid_tools)
         if nous_subscription_prompt:
             prompt_parts.append(nous_subscription_prompt)
         # Tool-use enforcement: tells the model to actually call tools instead
@@ -2861,7 +2878,7 @@ class AIAgent:
         #   true  — always inject (all models)
         #   false — never inject
         #   list  — custom model-name substrings to match
-        if self.valid_tool_names:
+        if valid_tools:
             _enforce = self._tool_use_enforcement
             _inject = False
             if _enforce is True or (isinstance(_enforce, str) and _enforce.lower() in ("true", "always", "yes", "on")):
@@ -2923,17 +2940,17 @@ class AIAgent:
             except Exception:
                 pass
 
-        has_skills_tools = any(name in self.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
+        has_skills_tools = any(name in valid_tools for name in ['skills_list', 'skill_view', 'skill_manage'])
         if has_skills_tools:
             avail_toolsets = {
                 toolset
                 for toolset in (
-                    get_toolset_for_tool(tool_name) for tool_name in self.valid_tool_names
+                    get_toolset_for_tool(tool_name) for tool_name in valid_tools
                 )
                 if toolset
             }
             skills_prompt = build_skills_system_prompt(
-                available_tools=self.valid_tool_names,
+                available_tools=valid_tools,
                 available_toolsets=avail_toolsets,
             )
         else:
@@ -5265,7 +5282,7 @@ class AIAgent:
         self._fallback_index += 1
         fb_provider = (fb.get("provider") or "").strip().lower()
         fb_model = (fb.get("model") or "").strip()
-        if not fb_provider or not fb_model:
+        if not fb_provider or not fb_model or fb_provider == "qoder":
             return self._try_activate_fallback()  # skip invalid, try next
 
         # Use centralized router for client construction.
@@ -5410,7 +5427,9 @@ class AIAgent:
             self._use_prompt_caching = rt["use_prompt_caching"]
 
             # ── Rebuild client for the primary provider ──
-            if self.api_mode == "anthropic_messages":
+            if self.api_mode == "qoder_sdk":
+                self.client = None
+            elif self.api_mode == "anthropic_messages":
                 from agent.anthropic_adapter import build_anthropic_client
                 self._anthropic_api_key = rt["anthropic_api_key"]
                 self._anthropic_base_url = rt["anthropic_base_url"]
@@ -5688,6 +5707,8 @@ class AIAgent:
 
     def _build_api_kwargs(self, api_messages: list) -> dict:
         """Build the keyword arguments dict for the active API mode."""
+        if self.api_mode == "qoder_sdk":
+            return {"messages": api_messages, "model": self.model}
         if self.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_kwargs
             anthropic_messages = self._prepare_anthropic_messages_for_api(api_messages)
@@ -7370,6 +7391,20 @@ class AIAgent:
         # No-op when _fallback_activated is False (gateway, first turn, etc.).
         self._restore_primary_runtime()
 
+        if self.api_mode == "qoder_sdk":
+            from agent.qoder_adapter import has_attachment
+
+            if has_attachment(user_message):
+                return {
+                    "final_response": "Qoder currently supports text chat only.",
+                    "messages": list(conversation_history or []),
+                    "api_calls": 0,
+                    "completed": False,
+                }
+
+        qoder_credits = None
+        qoder_model = None
+
         # Sanitize surrogate characters from user input.  Clipboard paste from
         # rich-text editors (Google Docs, Word, etc.) can inject lone surrogates
         # that are invalid UTF-8 and crash JSON serialization in the OpenAI SDK.
@@ -7461,7 +7496,8 @@ class AIAgent:
         # Skill trigger is checked AFTER the agent loop completes, based on
         # how many tool iterations THIS turn used.
         _should_review_memory = False
-        if (self._memory_nudge_interval > 0
+        if (self.api_mode != "qoder_sdk"
+                and self._memory_nudge_interval > 0
                 and "memory" in self.valid_tool_names
                 and self._memory_store):
             self._turns_since_memory += 1
@@ -7720,7 +7756,8 @@ class AIAgent:
 
             # Track tool-calling iterations for skill nudge.
             # Counter resets whenever skill_manage is actually used.
-            if (self._skill_nudge_interval > 0
+            if (self.api_mode != "qoder_sdk"
+                    and self._skill_nudge_interval > 0
                     and "skill_manage" in self.valid_tool_names):
                 self._iters_since_skill += 1
             
@@ -7884,7 +7921,7 @@ class AIAgent:
                             api_mode=self.api_mode,
                             api_call_count=api_call_count,
                             message_count=len(api_messages),
-                            tool_count=len(self.tools or []),
+                            tool_count=0 if self.api_mode == "qoder_sdk" else len(self.tools or []),
                             approx_input_tokens=approx_tokens,
                             request_char_count=total_chars,
                             max_tokens=self.max_tokens,
@@ -7923,7 +7960,24 @@ class AIAgent:
                         if isinstance(getattr(self, "client", None), Mock):
                             _use_streaming = False
 
-                    if _use_streaming:
+                    if self.api_mode == "qoder_sdk":
+                        from agent.qoder_adapter import credentials, request as qoder_request
+
+                        def on_qoder_delta(text):
+                            _stop_spinner()
+                            self._touch_activity("Qoder stream")
+                            self._fire_stream_delta(text)
+
+                        response = qoder_request(
+                            **api_kwargs, token=credentials(),
+                            on_delta=on_qoder_delta,
+                            is_interrupted=lambda: self.is_interrupted,
+                        )
+                        qoder_model = response.model
+                        qoder_credits = response.qoder_credits
+                        if qoder_credits is not None:
+                            self._vprint(f"{self.log_prefix}Qoder credits used: {response.qoder_credits:g}", force=True)
+                    elif _use_streaming:
                         response = self._interruptible_streaming_api_call(
                             api_kwargs, on_first_delta=_stop_spinner
                         )
@@ -8379,6 +8433,21 @@ class AIAgent:
                         thinking_spinner = None
                     if self.thinking_callback:
                         self.thinking_callback("")
+
+                    if self.api_mode == "qoder_sdk" and getattr(api_error, "partial_text", ""):
+                        self._emit_status(str(api_error))
+                        self._stream_callback = None
+                        self.clear_interrupt()
+                        self._persist_session(messages, conversation_history)
+                        self._cleanup_task_resources(effective_task_id)
+                        return {
+                            "final_response": api_error.partial_text,
+                            "messages": messages,
+                            "api_calls": api_call_count,
+                            "completed": False,
+                            "partial": True,
+                            "error": str(api_error),
+                        }
 
                     # -----------------------------------------------------------
                     # Surrogate character recovery.  UnicodeEncodeError happens
@@ -9788,6 +9857,10 @@ class AIAgent:
             "cost_status": self.session_cost_status,
             "cost_source": self.session_cost_source,
         }
+        if qoder_model:
+            result["model"] = qoder_model
+        if qoder_credits is not None:
+            result["qoder_credits"] = qoder_credits
         self._response_was_previewed = False
         
         # Include interrupt message if one triggered the interrupt
@@ -9802,7 +9875,8 @@ class AIAgent:
 
         # Check skill trigger NOW — based on how many tool iterations THIS turn used.
         _should_review_skills = False
-        if (self._skill_nudge_interval > 0
+        if (self.api_mode != "qoder_sdk"
+                and self._skill_nudge_interval > 0
                 and self._iters_since_skill >= self._skill_nudge_interval
                 and "skill_manage" in self.valid_tool_names):
             _should_review_skills = True

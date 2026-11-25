@@ -74,6 +74,10 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="openai_chat",
         extra_env_vars=("COPILOT_GITHUB_TOKEN", "GH_TOKEN"),
     ),
+    "qoder": HermesOverlay(
+        transport="qoder_sdk",
+        extra_env_vars=("QODER_PERSONAL_ACCESS_TOKEN",),
+    ),
     "anthropic": HermesOverlay(
         transport="anthropic_messages",
         extra_env_vars=("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
@@ -263,6 +267,7 @@ _LABEL_OVERRIDES: Dict[str, str] = {
 # -- Transport → API mode mapping ---------------------------------------------
 
 TRANSPORT_TO_API_MODE: Dict[str, str] = {
+    "qoder_sdk": "qoder_sdk",
     "openai_chat": "chat_completions",
     "anthropic_messages": "anthropic_messages",
     "codex_responses": "codex_responses",
@@ -381,6 +386,7 @@ LABELS: Dict[str, str] = {
     "xai-oauth": "xAI Grok OAuth",
     "copilot-acp": "GitHub Copilot ACP",
     "github-copilot": "GitHub Copilot",
+    "qoder": "Qoder (text only)",
     "anthropic": "Anthropic",
     "zai": "Z.AI / GLM",
     "kimi-for-coding": "Kimi / Moonshot",

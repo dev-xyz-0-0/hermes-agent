@@ -38,6 +38,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+qoder = ["qoder-agent-sdk==1.0.17"]
 modal = ["modal==1.4.2"]
 daytona = ["daytona==0.171.0"]
 

@@ -611,6 +611,22 @@ def resolve_runtime_provider(
 ) -> Dict[str, Any]:
     """Resolve runtime provider credentials for agent execution."""
     requested_provider = resolve_requested_provider(requested)
+    if requested_provider == "qoder":
+        from agent.qoder_adapter import QoderError, credentials
+
+        try:
+            credentials()
+        except QoderError as exc:
+            raise AuthError(str(exc)) from None
+        return {
+            "provider": "qoder",
+            "requested_provider": requested_provider,
+            "api_mode": "qoder_sdk",
+            "base_url": "",
+            "api_key": "sdk-managed",
+            "source": "QODER_PERSONAL_ACCESS_TOKEN",
+        }
+
 
     custom_runtime = _resolve_named_custom_runtime(
         requested_provider=requested_provider,

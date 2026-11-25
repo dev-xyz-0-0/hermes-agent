@@ -204,6 +204,43 @@ You can append routing suffixes to model names: `:fastest` (default), `:cheapest
 
 The base URL can be overridden with `HF_BASE_URL`.
 
+### Qoder preview
+
+Qoder is an opt-in text chat provider using the official Qoder Agent SDK and its bundled CLI. In your Hermes environment, install the optional dependency and enable the preview.
+
+```bash
+uv pip install -e '.[qoder]'
+export HERMES_QODER_PREVIEW=1
+hermes model
+```
+
+Set `QODER_PERSONAL_ACCESS_TOKEN` in the Hermes process environment or profile `.env` using a personal access token from the Qoder console. For a running gateway, apply the environment to the gateway service and restart it. In `hermes model`, choose **More providers** and then **Qoder**. In an existing chat, use `/model qoder` for the Qoder account default or `/model qoder:<model-id>` for an account-visible model. Add `--global` to save a chat model switch.
+
+Hermes stores the transcript and sends the bounded text history with each turn. Replies stream as they arrive. Qoder tools, Hermes tools, attachments, and Qoder Cloud Agent are outside this preview. Hermes reports Qoder credits when the SDK returns them. Auxiliary tasks use Hermes' auxiliary-provider configuration.
+
+[Qoder SDK authentication](https://docs.qoder.com/cli/sdk/authentication) · [Qoder Python SDK reference](https://docs.qoder.com/cli/sdk/references-python)
+
+#### Authenticated release checks
+
+From the Hermes checkout, activate its test environment and supply a Qoder personal access token in the environment. Run the checks explicitly. They make billable Qoder requests using synthetic inputs.
+
+```bash
+HERMES_HOME="$(mktemp -d)" HERMES_QODER_LIVE_TESTS=1 \
+  python -m pytest -n 0 -q -s tests/run_agent/test_qoder_live.py
+```
+
+The suite exercises streaming, persisted history, cancellation and subprocess cleanup, CLI and gateway model selection, and a test-only MCP record lookup. Before removing the text preview flag, repeat the chat, restart, cancellation, and switch-back checks in a disposable gateway session connected to a test chat. Record the SDK and CLI versions and the results. The fixture tool is registered only inside the test.
+
+#### Pending work checklist
+
+Qoder is a text-only preview. The authenticated checks are pending because the workspace test process could not see the token.
+
+- [ ] After restarting the workspace, confirm that the test process can read `QODER_PERSONAL_ACCESS_TOKEN` without displaying it. Install the `qoder` extra in the Hermes test environment and run the authenticated suite above.
+- [ ] Verify streamed text, saved-session reload, cancellation and subprocess cleanup, model switching, and disabled tool access in the CLI and a disposable gateway session. Record the SDK and CLI versions and the results. Remove the text preview flag after these checks pass.
+- [ ] Verify the test-only MCP fixture lookup. Confirm exactly one invocation and that Qoder uses the returned value in its answer.
+- [ ] After the fixture test passes, implement the opt-in workspace read pilot through Hermes' file-tool dispatch. Verify allowed reads, denied paths, transcript persistence, and cancellation without duplicate dispatch.
+- [ ] After the read pilot passes, implement workspace edits through Hermes' file tools and approvals. Test that approved edits apply once, denied edits leave the file untouched, and retries or cancellation cannot replay an edit.
+
 ## Custom & Self-Hosted LLM Providers
 
 Hermes Agent works with **any OpenAI-compatible API endpoint**. If a server implements `/v1/chat/completions`, you can point Hermes at it. This means you can use local models, GPU inference servers, multi-provider routers, or any third-party API.

@@ -540,6 +540,7 @@ _PROVIDER_LABELS = {
     "kimi-coding": "Kimi / Moonshot",
     "minimax": "MiniMax",
     "minimax-cn": "MiniMax (China)",
+    "qoder": "Qoder (text only)",
     "anthropic": "Anthropic",
     "deepseek": "DeepSeek",
     "opencode-zen": "OpenCode Zen",
@@ -602,6 +603,10 @@ def get_default_model_for_provider(provider: str) -> str:
     selected a model (e.g. ``hermes auth add openai-codex`` without
     ``hermes model``).
     """
+    if provider == "qoder":
+        from agent.qoder_adapter import DEFAULT_MODEL
+
+        return DEFAULT_MODEL
     models = _PROVIDER_MODELS.get(provider, [])
     return models[0] if models else ""
 
@@ -848,6 +853,9 @@ def list_available_providers() -> list[dict[str, str]]:
         "opencode-zen", "opencode-go",
         "ai-gateway", "deepseek", "custom",
     ]
+    from agent.qoder_adapter import preview_enabled
+    if preview_enabled():
+        _PROVIDER_ORDER.insert(-1, "qoder")
     # Build reverse alias map
     aliases_for: dict[str, list[str]] = {}
     for alias, canonical in _PROVIDER_ALIASES.items():
@@ -1110,6 +1118,13 @@ def provider_model_ids(provider: Optional[str]) -> list[str]:
     falling back to static lists.
     """
     normalized = normalize_provider(provider)
+    if normalized == "qoder":
+        from agent.qoder_adapter import DEFAULT_MODEL, credentials, discover_models
+
+        try:
+            return [DEFAULT_MODEL, *discover_models(credentials())]
+        except Exception:
+            return []
     if normalized == "openrouter":
         return model_ids()
     if normalized == "openai-codex":
