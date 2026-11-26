@@ -103,8 +103,12 @@ def _ensure_current_event_loop(request):
         return
 
     try:
-        loop = asyncio.get_event_loop_policy().get_event_loop()
+        loop = asyncio.get_running_loop()
     except RuntimeError:
+        # get_event_loop() warns on recent Python versions when no current
+        # loop has been set. Sync tests need a temporary loop for legacy
+        # run_until_complete() calls, so detect the running-loop case without
+        # invoking that deprecated behavior.
         loop = None
 
     created = loop is None or loop.is_closed()

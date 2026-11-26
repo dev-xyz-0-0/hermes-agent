@@ -401,7 +401,7 @@ uv run pytest tests/gateway/test_session_expiry_watcher.py -q
 uv run pytest tests/plugins/memory/test_holographic_profiles.py -q
 uv run pytest tests/agent/test_auxiliary_client.py -q
 uv run pytest tests/gateway/test_telegram_clarify_buttons.py -q
-uv run pytest tests/tools/test_clarify_gateway.py -q
+uv run pytest tests/gateway/test_telegram_approval_buttons.py -q
 
  
 

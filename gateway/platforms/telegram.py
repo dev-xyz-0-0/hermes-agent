@@ -110,8 +110,7 @@ def _strip_mdv2(text: str) -> str:
 
 _EXEC_APPROVAL_HEADER = "⚠️ Command Approval Required\n\n"
 _EXEC_APPROVAL_REASON_PREFIX = "\n\nReason: "
-_EXEC_APPROVAL_REASON_MAX_UNITS = 512
-_EXEC_APPROVAL_RETRY_MAX_UNITS = 3500
+_EXEC_APPROVAL_CONTINUATION_NOTICE = "Full command and reason follow in separate messages."
 
 
 def _utf16_length(text: str) -> int:
@@ -142,33 +141,51 @@ def _truncate_utf16(text: str, max_units: int, suffix: str = "…") -> str:
     return "".join(chars) + suffix
 
 
-def build_exec_approval_text(
+def _split_utf16(text: str, max_units: int) -> List[str]:
+    """Split text into non-empty chunks within Telegram's UTF-16 limit."""
+    if max_units <= 0:
+        raise ValueError("max_units must be positive")
+    chunks: List[str] = []
+    current: List[str] = []
+    used = 0
+    for char in text:
+        char_units = 2 if ord(char) > 0xFFFF else 1
+        if current and used + char_units > max_units:
+            chunks.append("".join(current))
+            current = []
+            used = 0
+        if char_units > max_units:
+            raise ValueError("max_units cannot fit a Unicode character")
+        current.append(char)
+        used += char_units
+    if current:
+        chunks.append("".join(current))
+    return chunks
+
+
+def _build_exec_approval_messages(
     command: str,
     description: str,
     max_units: int = 4096,
-) -> str:
-    """Build a complete plain-text approval prompt within Telegram's limit."""
-    fixed_units = _utf16_length(
-        _EXEC_APPROVAL_HEADER + _EXEC_APPROVAL_REASON_PREFIX
-    )
-    content_budget = max(0, max_units - fixed_units)
-    reason_budget = min(_EXEC_APPROVAL_REASON_MAX_UNITS, content_budget)
-    reason = _truncate_utf16(str(description or "dangerous command"), reason_budget)
-    command_budget = max(0, content_budget - _utf16_length(reason))
-    command_text = _truncate_utf16(str(command or ""), command_budget)
-    text = (
+) -> List[str]:
+    """Build an approval prompt and any plain-text continuation messages."""
+    command = str(command or "")
+    description = str(description or "dangerous command")
+    full_text = (
         _EXEC_APPROVAL_HEADER
-        + command_text
+        + command
         + _EXEC_APPROVAL_REASON_PREFIX
-        + reason
+        + description
     )
-    # Defensive guard for unusually small caller-provided limits.
-    return _truncate_utf16(text, max_units, suffix="")
+    if _utf16_length(full_text) <= max_units:
+        return [full_text]
 
-
-def _is_message_too_long_error(error: Exception) -> bool:
-    normalized = str(error).lower().replace("_", " ")
-    return "message is too long" in normalized or "message too long" in normalized
+    notice = _EXEC_APPROVAL_HEADER + _EXEC_APPROVAL_CONTINUATION_NOTICE
+    details = "Command:\n" + command + "\n\nReason:\n" + description
+    detail_chunks = _split_utf16(details, max_units)
+    # Keep the approval buttons on the first message and make every detail
+    # chunk independently identifiable in chat history.
+    return [notice, *detail_chunks]
 
 
 def _validate_local_media_path(path: str, kind: str) -> Optional[str]:
@@ -1066,7 +1083,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
-            text = build_exec_approval_text(
+            messages = _build_exec_approval_messages(
                 command,
                 description,
                 max_units=self.MAX_MESSAGE_LENGTH,
@@ -1112,35 +1129,26 @@ class TelegramAdapter(BasePlatformAdapter):
 
             kwargs: Dict[str, Any] = {
                 "chat_id": int(chat_id),
-                "text": text,
-                "reply_markup": keyboard,
             }
 
             if thread_id:
                 kwargs["message_thread_id"] = int(thread_id)
 
-            try:
-                msg = await self._bot.send_message(**kwargs)
-            except Exception as first_error:
-                if not _is_message_too_long_error(first_error):
-                    raise
-                logger.warning(
-                    "[%s] Telegram rejected approval length; retrying with a smaller prompt",
-                    self.name,
-                )
-                kwargs["text"] = build_exec_approval_text(
-                    command,
-                    description,
-                    max_units=_EXEC_APPROVAL_RETRY_MAX_UNITS,
-                )
-                msg = await self._bot.send_message(**kwargs)
+            prompt_msg = None
+            for index, part in enumerate(messages):
+                send_kwargs = {**kwargs, "text": part}
+                if index == 0:
+                    send_kwargs["reply_markup"] = keyboard
+                sent_msg = await self._bot.send_message(**send_kwargs)
+                if index == 0:
+                    prompt_msg = sent_msg
 
             # Store session_key keyed by approval_id for callback handler
             self._approval_state[approval_id] = session_key
 
             return SendResult(
                 success=True,
-                message_id=str(msg.message_id),
+                message_id=str(prompt_msg.message_id),
             )
 
         except Exception as e:

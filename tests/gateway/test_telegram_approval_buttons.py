@@ -49,7 +49,7 @@ from gateway.platforms.telegram import (
     TelegramAdapter,
     _truncate_utf16,
     _utf16_length,
-    build_exec_approval_text,
+    _build_exec_approval_messages,
 )
 from gateway.config import PlatformConfig
 from gateway.platforms.base import SendResult
@@ -140,32 +140,59 @@ class TestTelegramExecApproval:
         assert result.success is False
 
     @pytest.mark.asyncio
-    async def test_truncates_long_command(self):
+    async def test_sends_full_long_command_in_followup_messages(self):
         adapter = _make_adapter()
         mock_msg = MagicMock()
         mock_msg.message_id = 1
         adapter._bot.send_message = AsyncMock(return_value=mock_msg)
 
         long_cmd = "x" * 5000
-        await adapter.send_exec_approval(
+        result = await adapter.send_exec_approval(
             chat_id="12345", command=long_cmd, session_key="s"
         )
 
-        kwargs = adapter._bot.send_message.call_args[1]
-        assert "…" in kwargs["text"]
-        assert len(kwargs["text"]) < 5000
+        assert result.message_id == "1"
+        sent = [call.kwargs for call in adapter._bot.send_message.await_args_list]
+        assert len(sent) == 3
+        assert sent[0]["reply_markup"] is not None
+        assert all("reply_markup" not in part for part in sent[1:])
+        details = "".join(part["text"] for part in sent[1:])
+        assert "Command:\n" + long_cmd in details
+        assert "Reason:\ndangerous command" in details
+        assert all(_utf16_length(part["text"]) <= TelegramAdapter.MAX_MESSAGE_LENGTH for part in sent)
+
+    @pytest.mark.asyncio
+    async def test_thread_context_is_used_for_every_chunk(self):
+        adapter = _make_adapter()
+        adapter._bot.send_message = AsyncMock(
+            side_effect=[MagicMock(message_id=n) for n in (10, 11, 12)]
+        )
+
+        result = await adapter.send_exec_approval(
+            chat_id="12345", command="x" * 5000, session_key="s",
+            metadata={"thread_id": "999"},
+        )
+
+        assert result.message_id == "10"
+        assert all(
+            call.kwargs["message_thread_id"] == 999
+            for call in adapter._bot.send_message.await_args_list
+        )
 
     def test_utf16_helpers_count_and_preserve_emoji(self):
         assert _utf16_length("a🚀b") == 4
         assert _truncate_utf16("a🚀b", 3) == "a…"
 
-    def test_complete_prompt_is_bounded_with_long_command_and_reason(self):
-        text = build_exec_approval_text("🚀" * 5000, "reason " * 2000)
+    def test_oversized_approval_chunks_preserve_command_and_reason(self):
+        command = "🚀" * 5000
+        reason = "reason " * 2000
+        messages = _build_exec_approval_messages(command, reason)
 
-        assert _utf16_length(text) <= TelegramAdapter.MAX_MESSAGE_LENGTH
-        assert text.startswith("⚠️ Command Approval Required")
-        assert "\n\nReason: " in text
-        assert "…" in text
+        assert messages[0].startswith("⚠️ Command Approval Required")
+        assert "Full command and reason follow" in messages[0]
+        assert all(_utf16_length(part) <= TelegramAdapter.MAX_MESSAGE_LENGTH for part in messages)
+        assert "".join(messages[1:]).count(command) == 1
+        assert "".join(messages[1:]).endswith(reason)
         
     @pytest.mark.asyncio
     async def test_does_not_use_parse_mode(self):
@@ -339,8 +366,8 @@ class TestTelegramExecApproval:
 
 
     @pytest.mark.asyncio
-    async def test_long_command_is_truncated_to_expected_preview_length(self):
-        """Command preview should be bounded before sending to Telegram."""
+    async def test_long_command_is_sent_in_bounded_chunks(self):
+        """Oversized approval details should be split without content loss."""
         adapter = _make_adapter()
 
         mock_msg = MagicMock()
@@ -355,24 +382,18 @@ class TestTelegramExecApproval:
             session_key="s",
         )
 
-        kwargs = adapter._bot.send_message.call_args[1]
-        text = kwargs["text"]
-
-        # The complete prompt, including its reason, stays inside Telegram's
-        # UTF-16-aware message budget.
-        assert _utf16_length(text) <= TelegramAdapter.MAX_MESSAGE_LENGTH
-        assert "…" in text
-
-        # Still plain text.
-        assert "parse_mode" not in kwargs
+        sent = [call.kwargs for call in adapter._bot.send_message.await_args_list]
+        assert len(sent) == 3
+        assert all(_utf16_length(part["text"]) <= TelegramAdapter.MAX_MESSAGE_LENGTH for part in sent)
+        details = "".join(part["text"] for part in sent[1:])
+        assert "Command:\n" + long_cmd in details
+        assert "Reason:\ndangerous command" in details
+        assert all("parse_mode" not in part for part in sent)
 
     @pytest.mark.asyncio
-    async def test_retries_once_with_smaller_prompt_on_length_rejection(self):
+    async def test_length_error_does_not_retry_with_reduced_content(self):
         adapter = _make_adapter()
-        mock_msg = MagicMock(message_id=42)
-        adapter._bot.send_message = AsyncMock(
-            side_effect=[RuntimeError("Message is too long"), mock_msg]
-        )
+        adapter._bot.send_message = AsyncMock(side_effect=RuntimeError("Message is too long"))
 
         result = await adapter.send_exec_approval(
             chat_id="12345",
@@ -381,13 +402,27 @@ class TestTelegramExecApproval:
             description="reason " * 1000,
         )
 
-        assert result.success is True
+        assert result.success is False
+        assert adapter._bot.send_message.await_count == 1
+        assert adapter._approval_state == {}
+
+    @pytest.mark.asyncio
+    async def test_followup_failure_does_not_store_approval_state(self):
+        adapter = _make_adapter()
+        first_message = MagicMock(message_id=42)
+        adapter._bot.send_message = AsyncMock(
+            side_effect=[first_message, RuntimeError("follow-up failed")]
+        )
+
+        result = await adapter.send_exec_approval(
+            chat_id="12345", command="x" * 5000, session_key="s"
+        )
+
+        assert result.success is False
         assert adapter._bot.send_message.await_count == 2
-        first_text = adapter._bot.send_message.await_args_list[0].kwargs["text"]
-        retry_text = adapter._bot.send_message.await_args_list[1].kwargs["text"]
-        assert _utf16_length(first_text) <= 4096
-        assert _utf16_length(retry_text) <= 3500
-        assert len(adapter._approval_state) == 1
+        assert "reply_markup" in adapter._bot.send_message.await_args_list[0].kwargs
+        assert "reply_markup" not in adapter._bot.send_message.await_args_list[1].kwargs
+        assert adapter._approval_state == {}
 
     @pytest.mark.asyncio
     async def test_does_not_retry_unrelated_or_ambiguous_failure(self):
@@ -608,7 +643,7 @@ class TestTelegramApprovalCallback:
         query.data = "ea:once:1"
         query.message = MagicMock()
         query.message.chat_id = 12345
-        query.message.text = build_exec_approval_text("🚀" * 5000, "r" * 2000)
+        query.message.text = "⚠️ Command Approval Required\n\nFull command and reason follow in separate messages."
         query.from_user = MagicMock()
         query.from_user.id = 123
         query.from_user.first_name = "Approver 🚀"
