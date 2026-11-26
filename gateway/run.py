@@ -1980,6 +1980,28 @@ class GatewayRunner:
         # forwarded it to the user; now the user's reply goes back via
         # .update_response so the update process can continue.
         _quick_key = self._session_key_for_source(source)
+        # Clarify replies are input for the blocked agent thread. Intercept
+        # them before running-agent priority handling can queue/interrupt.
+        try:
+            from tools.clarify_gateway import pending as _pending_clarify, resolve as _resolve_clarify
+            _clarify_req = _pending_clarify(_quick_key)
+        except Exception:
+            _clarify_req = None
+            _resolve_clarify = None
+        if _clarify_req and not event.get_command():
+            _answer = (event.text or "").strip()
+            if _answer and _resolve_clarify:
+                _resolved = _resolve_clarify(_quick_key, _answer)
+                if not _resolved and _clarify_req.choices and not _clarify_req.awaiting_text:
+                    if _answer == str(len(_clarify_req.choices) + 1):
+                        adapter = self.adapters.get(source.platform)
+                        if adapter:
+                            await adapter.send(source.chat_id, "Type your answer in a message.")
+                    else:
+                        adapter = self.adapters.get(source.platform)
+                        if adapter:
+                            await adapter.send(source.chat_id, "Reply with one of the listed numbers, or choose Other.")
+                return None
         _update_prompts = getattr(self, "_update_prompt_pending", {})
         if _update_prompts.get(_quick_key):
             raw = (event.text or "").strip()
@@ -7507,6 +7529,39 @@ class GatewayRunner:
         _status_chat_id = source.chat_id
         _status_thread_metadata = {"thread_id": _progress_thread_id} if _progress_thread_id else None
 
+        def _clarify_callback_sync(question: str, choices: Optional[List[str]]) -> str:
+            """Bridge the synchronous agent thread to a user-facing prompt."""
+            from tools.clarify_gateway import register, wait, resolve_id
+            _clarify_key = self._session_key_for_source(source)
+            request = register(_clarify_key, question, choices)
+            timeout = float(user_config.get("agent", {}).get("clarify_timeout", 600) or 0)
+            if not _status_adapter:
+                resolve_id(request.request_id, "[clarify unavailable: platform adapter is not connected]")
+                return wait(request, 1)
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    _status_adapter.send_clarify(
+                        chat_id=_status_chat_id,
+                        question=question,
+                        choices=choices,
+                        request_id=request.request_id,
+                        metadata=_status_thread_metadata,
+                    ),
+                    _loop_for_step,
+                )
+                sent = future.result(timeout=15)
+                if sent is not None and hasattr(sent, "success") and not sent.success:
+                    resolve_id(request.request_id, "[clarify prompt could not be delivered]")
+            except Exception as exc:
+                resolve_id(request.request_id, f"[clarify prompt failed: {exc}]")
+            try:
+                return wait(request, timeout if timeout > 0 else None)
+            finally:
+                from tools.clarify_gateway import unregister as _unregister_clarify
+                _unregister_clarify(request.request_id)
+
+        agent.clarify_callback = _clarify_callback_sync
+
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter:
                 return
@@ -8274,6 +8329,12 @@ class GatewayRunner:
                     _interrupt_depth=_interrupt_depth + 1,
                 )
         finally:
+            if session_key:
+                try:
+                    from tools.clarify_gateway import clear_session as _clear_gateway_clarify
+                    _clear_gateway_clarify(session_key)
+                except Exception:
+                    logger.debug("Failed to clear gateway clarify state", exc_info=True)
             # Stop progress sender, interrupt monitor, and notification task
             if progress_task:
                 progress_task.cancel()

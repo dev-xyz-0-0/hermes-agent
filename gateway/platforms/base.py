@@ -651,6 +651,24 @@ class BasePlatformAdapter(ABC):
         """
         pass
 
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: Optional[List[str]],
+        request_id: int,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a clarify prompt using numbered text on generic platforms."""
+        lines = [f"❓ {question}"]
+        if choices:
+            lines.extend(f"{i}. {choice}" for i, choice in enumerate(choices, 1))
+            lines.append(f"{len(choices) + 1}. Other (type your answer)")
+            lines.append("Reply with a number or choose Other and send your answer.")
+        else:
+            lines.append("Reply with your answer in a message.")
+        return await self.send(chat_id, "\n".join(lines), metadata=metadata)
+
     async def edit_message(
         self,
         chat_id: str,
@@ -1238,6 +1256,16 @@ class BasePlatformAdapter(ABC):
             # session lifecycle and its cleanup races with the running task
             # (see PR #4926).
             cmd = event.get_command()
+            # A clarify response belongs to the currently blocked agent turn.
+            # Let the runner intercept it before queue/interrupt handling.
+            try:
+                from tools.clarify_gateway import pending as _pending_clarify
+                _clarify = _pending_clarify(session_key)
+            except Exception:
+                _clarify = None
+            if _clarify and not cmd:
+                await self._message_handler(event)
+                return
             if cmd in ("approve", "deny", "status", "stop", "new", "reset"):
                 logger.debug(
                     "[%s] Command '/%s' bypassing active-session guard for %s",

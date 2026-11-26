@@ -512,6 +512,12 @@ When the agent tries to run a potentially dangerous command, it asks you for app
 
 Reply "yes"/"y" to approve or "no"/"n" to deny.
 
+## Interactive Clarification
+
+When the agent needs you to choose between options, Telegram displays inline buttons for each choice and an **Other** button for a custom answer. For open-ended questions, reply to the prompt with a message. Other messaging platforms use numbered text choices.
+
+The gateway waits up to 10 minutes for a response by default. Set `agent.clarify_timeout` in `~/.hermes/config.yaml` to change the timeout in seconds; set it to `0` to wait without a timeout.
+
 ## Security
 
 :::warning
