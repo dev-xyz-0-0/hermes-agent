@@ -13,12 +13,14 @@ import sys
 import threading
 import types
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from gateway.config import Platform
+from gateway.platforms.base import SendResult
 from gateway.session import SessionSource
+from tools.clarify_gateway import pending
 
 
 class _FakeAgent:
@@ -157,10 +159,26 @@ async def test_config_signature_cache_hit_does_not_release(monkeypatch, tmp_path
     with runner._agent_cache_lock:
         first_agent = runner._agent_cache[session_key][0]
     first_agent.release_memory_provider.assert_not_called()
+    first_callback = first_agent.clarify_callback
+    adapter = SimpleNamespace(
+        get_pending_message=lambda key: None,
+        send_clarify=AsyncMock(return_value=SendResult(success=False, error="offline")),
+    )
+    runner.adapters[Platform.TELEGRAM] = adapter
+
+    def run_with_clarify(*args, **kwargs):
+        assert first_agent.clarify_callback is not first_callback
+        response = first_agent.clarify_callback("Choose", ["One"])
+        assert response == "[clarify prompt could not be delivered]"
+        assert pending(session_key) is None
+        return {"final_response": "ok", "messages": [], "api_calls": 1}
+
+    monkeypatch.setattr(first_agent, "run_conversation", run_with_clarify)
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {"agent": {"clarify_timeout": 0.01}})
 
     # Second turn — identical config, must be a cache HIT reusing the same
     # instance, never releasing it.
-    await runner._run_agent(
+    result = await runner._run_agent(
         message="hello again",
         context_prompt="",
         history=[],
@@ -171,5 +189,7 @@ async def test_config_signature_cache_hit_does_not_release(monkeypatch, tmp_path
 
     first_agent.release_memory_provider.assert_not_called()
     first_agent.shutdown_memory_provider.assert_not_called()
+    adapter.send_clarify.assert_awaited_once()
+    assert result["final_response"] == "ok"
     with runner._agent_cache_lock:
         assert runner._agent_cache[session_key][0] is first_agent

@@ -37,9 +37,13 @@ async def test_send_clarify_builds_choice_and_other_buttons():
     message = MagicMock(message_id=77)
     adapter._bot.send_message = AsyncMock(return_value=message)
     req = register("telegram-clarify-send", "Choose", ["One", "Two"])
-    result = await adapter.send_clarify("123", "Choose", ["One", "Two"], req.request_id)
+    result = await adapter.send_clarify(
+        "123", "Choose", ["One", "Two"], req.request_id, metadata={"thread_id": "42"}
+    )
     assert result.success
-    keyboard = adapter._bot.send_message.call_args.kwargs["reply_markup"]
+    kwargs = adapter._bot.send_message.await_args.kwargs
+    assert kwargs["message_thread_id"] == 42
+    keyboard = kwargs["reply_markup"]
     callback_data = [button.callback_data for row in keyboard.inline_keyboard for button in row]
     assert len(callback_data) == 3
     callback_id = int(keyboard.inline_keyboard[-1][0].callback_data.split(":")[1])
@@ -51,10 +55,11 @@ async def test_send_clarify_builds_choice_and_other_buttons():
 
 
 @pytest.mark.asyncio
-async def test_callback_resolves_choice_and_cleans_buttons():
+@pytest.mark.parametrize("label", ["Two", "1", "3"])
+async def test_callback_resolves_choice_and_cleans_buttons(label):
     adapter = _make_adapter()
-    req = register("telegram-clarify-choice", "Choose", ["One", "Two"])
-    adapter._clarify_state[req.request_id] = {"choices": ["One", "Two"], "message_id": 1,
+    req = register("telegram-clarify-choice", "Choose", ["One", label])
+    adapter._clarify_state[req.request_id] = {"choices": ["One", label], "message_id": 1,
                                               "request_id": req.request_id}
     query = MagicMock()
     query.data = f"cl:{req.request_id}:1"
@@ -64,7 +69,7 @@ async def test_callback_resolves_choice_and_cleans_buttons():
     query.edit_message_text = AsyncMock()
     update = MagicMock(callback_query=query)
     await adapter._handle_callback_query(update, MagicMock())
-    assert req.response == "Two"
+    assert req.response == label
     assert req.event.is_set()
     assert req.request_id not in adapter._clarify_state
     query.edit_message_text.assert_awaited_once()

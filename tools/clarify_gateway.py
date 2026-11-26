@@ -136,6 +136,20 @@ def resolve_id(request_id: int, response: str) -> bool:
     return False
 
 
+def resolve_choice(request_id: int, index: int) -> bool:
+    """Complete a request with the exact choice selected by a button."""
+    with _lock:
+        req = _all_requests.get(request_id)
+        if (
+            not req or req.event.is_set() or req.awaiting_text
+            or not req.choices or not 0 <= index < len(req.choices)
+        ):
+            return False
+        req.response = req.choices[index]
+        req.event.set()
+        return True
+
+
 def wait(req: ClarifyRequest, timeout: Optional[float]) -> str:
     deadline = None if timeout is None or timeout <= 0 else time.monotonic() + timeout
     while not req.event.wait(1.0):

@@ -7531,36 +7531,36 @@ class GatewayRunner:
 
         def _clarify_callback_sync(question: str, choices: Optional[List[str]]) -> str:
             """Bridge the synchronous agent thread to a user-facing prompt."""
-            from tools.clarify_gateway import register, wait, resolve_id
-            _clarify_key = self._session_key_for_source(source)
-            request = register(_clarify_key, question, choices)
+            from tools.clarify_gateway import register, unregister, wait
+
             timeout = float(user_config.get("agent", {}).get("clarify_timeout", 600) or 0)
             if not _status_adapter:
-                resolve_id(request.request_id, "[clarify unavailable: platform adapter is not connected]")
-                return wait(request, 1)
+                return "[clarify unavailable: platform adapter is not connected]"
+            request = register(session_key or self._session_key_for_source(source), question, choices)
             try:
-                future = asyncio.run_coroutine_threadsafe(
-                    _status_adapter.send_clarify(
-                        chat_id=_status_chat_id,
-                        question=question,
-                        choices=choices,
-                        request_id=request.request_id,
-                        metadata=_status_thread_metadata,
-                    ),
-                    _loop_for_step,
-                )
-                sent = future.result(timeout=15)
-                if sent is not None and hasattr(sent, "success") and not sent.success:
-                    resolve_id(request.request_id, "[clarify prompt could not be delivered]")
-            except Exception as exc:
-                resolve_id(request.request_id, f"[clarify prompt failed: {exc}]")
-            try:
-                return wait(request, timeout if timeout > 0 else None)
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        _status_adapter.send_clarify(
+                            chat_id=_status_chat_id,
+                            question=question,
+                            choices=choices,
+                            request_id=request.request_id,
+                            metadata=_status_thread_metadata,
+                        ),
+                        _loop_for_step,
+                    )
+                    try:
+                        sent = future.result(timeout=15)
+                    except TimeoutError:
+                        future.cancel()
+                        return "[clarify prompt failed: delivery timed out]"
+                    if not sent.success:
+                        return "[clarify prompt could not be delivered]"
+                except Exception as exc:
+                    return f"[clarify prompt failed: {exc}]"
+                return wait(request, timeout)
             finally:
-                from tools.clarify_gateway import unregister as _unregister_clarify
-                _unregister_clarify(request.request_id)
-
-        agent.clarify_callback = _clarify_callback_sync
+                unregister(request.request_id)
 
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter:
@@ -7746,6 +7746,7 @@ class GatewayRunner:
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
             agent.stream_delta_callback = _stream_delta_cb
             agent.status_callback = _status_callback_sync
+            agent.clarify_callback = _clarify_callback_sync
             agent.reasoning_config = reasoning_config
 
             # Background review delivery — send "💾 Memory updated" etc. to user

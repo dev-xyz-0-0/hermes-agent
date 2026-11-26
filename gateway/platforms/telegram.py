@@ -232,7 +232,6 @@ class TelegramAdapter(BasePlatformAdapter):
         self._approval_state: Dict[int, str] = {}
         # Clarify buttons map compact callback IDs to shared clarify requests.
         self._clarify_state: Dict[int, dict] = {}
-        self._clarify_counter = 0
 
     
     @staticmethod
@@ -1154,65 +1153,54 @@ class TelegramAdapter(BasePlatformAdapter):
                 error=str(e),
             )
 
-
-        """Send an inline-keyboard approval prompt with interactive buttons.
-
-        The buttons call ``resolve_gateway_approval()`` to unblock the waiting
-        agent thread — same mechanism as the text ``/approve`` flow.
-        """
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: Optional[List[str]],
+        request_id: int,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a Telegram choice prompt with inline buttons."""
+        if not choices:
+            return await super().send_clarify(chat_id, question, choices, request_id, metadata)
         if not self._bot:
             return SendResult(success=False, error="Not connected")
 
-        try:
-            cmd_preview = command[:3800] + "..." if len(command) > 3800 else command
-            text = (
-                f"⚠️ *Command Approval Required*\n\n"
-                f"`{cmd_preview}`\n\n"
-                f"Reason: {description}"
-            )
+        from tools.clarify_gateway import find
 
-            # Resolve thread context for thread replies
-            thread_id = None
+        # Drop button state for requests that ended without a button press.
+        for callback_id in list(self._clarify_state):
+            if find(callback_id) is None:
+                self._clarify_state.pop(callback_id)
+        state = {"request_id": request_id, "choices": list(choices)}
+        self._clarify_state[request_id] = state
+        delivered = False
+        try:
+            rows = [
+                [InlineKeyboardButton(choice[:60], callback_data=f"cl:{request_id}:{index}")]
+                for index, choice in enumerate(choices)
+            ]
+            rows.append([InlineKeyboardButton("Other", callback_data=f"cl:{request_id}:o")])
+            kwargs = {
+                "chat_id": int(chat_id),
+                "text": f"❓ {question}",
+                "reply_markup": InlineKeyboardMarkup(rows),
+            }
             if metadata:
                 thread_id = metadata.get("thread_id") or metadata.get("message_thread_id")
-
-            # We'll use the message_id as part of callback_data to look up session_key
-            # Send a placeholder first, then update — or use a counter.
-            # Simpler: use a monotonic counter to generate short IDs.
-            import itertools
-            if not hasattr(self, "_approval_counter"):
-                self._approval_counter = itertools.count(1)
-            approval_id = next(self._approval_counter)
-
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ Allow Once", callback_data=f"ea:once:{approval_id}"),
-                    InlineKeyboardButton("✅ Session", callback_data=f"ea:session:{approval_id}"),
-                ],
-                [
-                    InlineKeyboardButton("✅ Always", callback_data=f"ea:always:{approval_id}"),
-                    InlineKeyboardButton("❌ Deny", callback_data=f"ea:deny:{approval_id}"),
-                ],
-            ])
-
-            kwargs: Dict[str, Any] = {
-                "chat_id": int(chat_id),
-                "text": text,
-                "parse_mode": ParseMode.MARKDOWN,
-                "reply_markup": keyboard,
-            }
-            if thread_id:
-                kwargs["message_thread_id"] = int(thread_id)
-
+                if thread_id:
+                    kwargs["message_thread_id"] = int(thread_id)
             msg = await self._bot.send_message(**kwargs)
-
-            # Store session_key keyed by approval_id for the callback handler
-            self._approval_state[approval_id] = session_key
-
+            state["message_id"] = msg.message_id
+            delivered = True
             return SendResult(success=True, message_id=str(msg.message_id))
-        except Exception as e:
-            logger.warning("[%s] send_exec_approval failed: %s", self.name, e)
-            return SendResult(success=False, error=str(e))
+        except Exception as exc:
+            logger.warning("[%s] send_clarify failed: %s", self.name, exc)
+            return SendResult(success=False, error=str(exc))
+        finally:
+            if not delivered:
+                self._clarify_state.pop(request_id, None)
 
     async def send_model_picker(
         self,
@@ -1571,7 +1559,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 await query.answer(text="This question has already been answered.")
                 return
             choice = parts[2]
-            from tools.clarify_gateway import find as _find_clarify, mark_awaiting_text, resolve_id
+            from tools.clarify_gateway import find as _find_clarify, mark_awaiting_text, resolve_choice
             request_id = state.get("request_id", callback_id)
             request = _find_clarify(request_id)
             if not request:
@@ -1594,7 +1582,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 await query.answer(text="Invalid clarify option.")
                 return
             answer = state["choices"][int(choice)]
-            if not resolve_id(request_id, answer):
+            if not resolve_choice(request_id, int(choice)):
                 self._clarify_state.pop(callback_id, None)
                 await query.answer(text="This question has already been answered.")
                 return
